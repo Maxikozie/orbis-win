@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Build one of the bundle's two worked examples, optionally package and deploy it.
+#
+#   scripts/build.sh hello               layout only — touches no Mesa
+#   scripts/build.sh triangle --pkg      the graphics stack, as an installable .pkg
+#   scripts/build.sh triangle --pkg --deploy
+#
+# The split between the two is the point of having both. hello answers "is the
+# bundle laid out correctly", with nothing else able to fail; triangle answers
+# "does the graphics stack come up and reach the screen". One example mixing
+# both reports a driver problem as a layout problem, and the reverse.
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+need_bundle
+
+# ⚠ The bundle warns "gate=unproven" on every configure even though BUNDLE.txt
+# says gate=pass. orbis-sdk.cmake tests `MATCHES "gate=unproven"` against the
+# WHOLE manifest, and the comment three lines above the value contains that
+# exact string. Upstream bug, cosmetic, filtered here so a real warning stands out.
+filter_gate_warning() {
+  awk '/CMake Warning at .*orbis-sdk\.cmake:47/ {skip=1; next}
+       skip && (/^Call Stack/ || /CMakeSystem\.cmake/ || /TryCompile/ || /^[[:space:]]*$/ || /^[[:space:]]+\//) {next}
+       {skip=0; print}'
+}
+
+TARGET="${1:-}"; shift || true
+case "$TARGET" in
+  hello)    TITLE_ID=GLDS10000; TITLE="Gladius Hello" ;;
+  triangle) TITLE_ID=GLDS10001; TITLE="Gladius Triangle" ;;
+  *) die "usage: build.sh {hello|triangle} [--pkg] [--deploy]" ;;
+esac
+
+PKG=0; DEPLOY=0
+for a in "$@"; do
+  case "$a" in
+    --pkg)    PKG=1 ;;
+    --deploy) PKG=1; DEPLOY=1 ;;
+    *) die "unknown option: $a" ;;
+  esac
+done
+
+BUILD="$ROOT/build/$TARGET"
+# shellcheck source=/dev/null
+source "$BUNDLE/env.sh" >/dev/null
+
+# ⚠ ORBIS_KIT_DIR. examples/triangle wants a directory holding vkloader/, and
+# defaults to the bundle root, which has none — the example was written to sit
+# inside an orbis-porting-kit checkout. The bundle carries the same vkloader at
+# orbis-compat/vkloader, so point it there. Without this the configure fails
+# with "holds no vkloader/".
+EXTRA=()
+[[ $TARGET == triangle ]] && EXTRA+=(-DORBIS_KIT_DIR="$BUNDLE/orbis-compat")
+
+say "configure $TARGET"
+cmake -S "$BUNDLE/examples/$TARGET" -B "$BUILD" -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE="$BUNDLE/toolchain/orbis-sdk.cmake" "${EXTRA[@]}" \
+  2>&1 | filter_gate_warning
+
+say "build"
+cmake --build "$BUILD"
+
+[[ -f "$BUILD/eboot.bin" ]] || die "no eboot.bin — create-fself did not run"
+
+# The checks the toolchain file names as the ones that catch a bad link.
+#
+# ⚠ nm output is captured ONCE into a variable rather than piped into `grep -q`.
+# Under `set -o pipefail`, grep -q exits on the first match, llvm-nm takes
+# SIGPIPE, and the pipeline reports failure on a check that actually PASSED.
+say "checking the image"
+syms=$(llvm-nm "$BUILD/$TARGET")
+entry=$(llvm-readelf -h "$BUILD/$TARGET" | sed -n 's/.*Entry point address: *//p')
+start=0x$(printf '%s\n' "$syms" | sed -n 's/^0*\([0-9a-f]*\) [Tt] _start$/\1/p' | head -1)
+
+[[ ${entry,,} == "${start,,}" ]] || die "e_entry $entry is not _start $start"
+printf '%s\n' "$syms" | grep -F _sceProcessParam >/dev/null ||
+  die "no _sceProcessParam — the process header is missing and the console will refuse this"
+
+# Every PT_LOAD must be 0x4000-aligned. awk here is mawk on Debian, which has
+# no strtonum, so the hex is converted in the shell.
+bad=0
+while read -r v; do
+  (( (16#${v#0x}) % 16384 == 0 )) || { echo "!! unaligned PT_LOAD $v" >&2; bad=1; }
+done < <(llvm-readelf -lW "$BUILD/$TARGET" | awk '/LOAD/{print $3}')
+(( bad == 0 )) || die "PT_LOAD alignment"
+
+printf '   entry %s == _start, _sceProcessParam present, PT_LOADs 0x4000-aligned\n' "$entry"
+printf '   eboot.bin %s\n' "$(du -h "$BUILD/eboot.bin" | cut -f1)"
+[[ $TARGET == triangle ]] &&
+  printf '   RADV/ACO symbols linked in: %s\n' "$(printf '%s\n' "$syms" | grep -cE ' (radv_|ac_drm_|aco_)')"
+
+if (( PKG )); then
+  say "package"
+  OUT="$ROOT/pkgout/$TARGET"; mkdir -p "$OUT"
+  "$PS4_SCRIPTS/make-pkg.sh" --eboot "$BUILD/eboot.bin" --out-dir "$OUT" \
+      --title-id "$TITLE_ID" --title "$TITLE"
+fi
+
+if (( DEPLOY )); then
+  need_console
+  say "deploy to $ORBIS_CONSOLE"
+  "$PS4_SCRIPTS/deploy.sh" --pkg "$ROOT/pkgout/$TARGET/$TITLE_ID.pkg" \
+      --name "$TARGET" --host "$ORBIS_CONSOLE"
+fi

@@ -1,0 +1,13 @@
+# the SDK bundle (92 MB) and anything unpacked from it
+sdk/
+*.tar.gz
+*.tar.gz.sha256
+
+# build trees and packaging output
+build/
+build-*/
+pkgout/
+*build-*/
+
+# local console settings
+config.env
