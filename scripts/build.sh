@@ -24,9 +24,10 @@ filter_gate_warning() {
 
 TARGET="${1:-}"; shift || true
 case "$TARGET" in
-  hello)    TITLE_ID=GLDS10000; TITLE="Gladius Hello" ;;
-  triangle) TITLE_ID=GLDS10001; TITLE="Gladius Triangle" ;;
-  *) die "usage: build.sh {hello|triangle} [--pkg] [--deploy]" ;;
+  hello)    TITLE_ID=GLDS10000; TITLE="Gladius Hello";    SRC="$BUNDLE/examples/hello" ;;
+  triangle) TITLE_ID=GLDS10001; TITLE="Gladius Triangle"; SRC="$BUNDLE/examples/triangle" ;;
+  probe)    TITLE_ID=GLDS10002; TITLE="Gladius Probe";    SRC="$ROOT/src/probe" ;;
+  *) die "usage: build.sh {hello|triangle|probe} [--pkg] [--deploy]" ;;
 esac
 
 PKG=0; DEPLOY=0
@@ -48,10 +49,11 @@ source "$BUNDLE/env.sh" >/dev/null
 # orbis-compat/vkloader, so point it there. Without this the configure fails
 # with "holds no vkloader/".
 EXTRA=()
-[[ $TARGET == triangle ]] && EXTRA+=(-DORBIS_KIT_DIR="$BUNDLE/orbis-compat")
+[[ $TARGET == triangle || $TARGET == probe ]] &&
+  EXTRA+=(-DORBIS_KIT_DIR="$BUNDLE/orbis-compat")
 
 say "configure $TARGET"
-cmake -S "$BUNDLE/examples/$TARGET" -B "$BUILD" -G Ninja \
+cmake -S "$SRC" -B "$BUILD" -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE="$BUNDLE/toolchain/orbis-sdk.cmake" "${EXTRA[@]}" \
   2>&1 | filter_gate_warning
 
@@ -84,7 +86,7 @@ done < <(llvm-readelf -lW "$BUILD/$TARGET" | awk '/LOAD/{print $3}')
 
 printf '   entry %s == _start, _sceProcessParam present, PT_LOADs 0x4000-aligned\n' "$entry"
 printf '   eboot.bin %s\n' "$(du -h "$BUILD/eboot.bin" | cut -f1)"
-[[ $TARGET == triangle ]] &&
+[[ $TARGET == triangle || $TARGET == probe ]] &&
   printf '   RADV/ACO symbols linked in: %s\n' "$(printf '%s\n' "$syms" | grep -cE ' (radv_|ac_drm_|aco_)')"
 
 if (( PKG )); then

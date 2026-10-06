@@ -105,3 +105,68 @@ Both are the same shape as the pattern the upstream record keeps flagging:
 - Start `scripts/logs.sh` before launching anything. There is no usable stdout
   on this platform (`freopen` fails), so a black screen with no listener is a
   wasted evening.
+
+---
+
+## 2026-10-06 — `RADV_DEBUG=info` cannot be set on this console, and the way round it
+
+Stage 2 was written assuming we would capture `radeon_info` the way the upstream
+record does: `RADV_DEBUG=info`, then `sed` the `radv-info|` lines out of the UDP
+capture. Neither half of that works from a stock bundle.
+
+### The dump has nowhere to go
+
+`radeon_info` does not go through `mesa_log`, and on this platform it cannot go
+through stdout either — `freopen` fails. Upstream's harness patches the one call
+site to `fopen` a file directly. We have Mesa as **prebuilt static archives**, so
+there is no call site to patch without rebuilding Mesa.
+
+### ⚠ And the switch cannot be thrown at all
+
+This is the more interesting half, and it is the exact failure
+`orbis-compat/scripts/check-env-knobs.sh` exists to catch — *"a switch that
+cannot be thrown looks exactly like a switch with no effect."*
+
+`orbis-compat/src/orbis_env.cpp` reads `/data/orbis-env.txt`, but `load_file()`
+calls `store()`, which writes into a **private array** (`g_entry[]`). It does not
+`setenv()`. Only code calling `orbis_env_get()` ever sees those values.
+
+Mesa reads its knobs with plain `getenv()` — `RADV_DEBUG`, and the PS4 port's own
+`ORBIS_TESS_WORKGROUPS` and `ORBIS_TF_BASE_BIAS`. On a console `getenv` returns
+NULL for all of them, the code takes its default, and **the run comes back looking
+like a measurement of the default**. Stage 3's entire tuning method depends on
+those two knobs, so this would have invalidated it silently.
+
+The fix is small, and it works *here* for a reason worth stating: RADV is
+statically linked into our eboot, so Mesa and our `main()` share one `environ`.
+`setenv()` early in `main()`, before `vkCreateInstance`, and Mesa sees it.
+
+That is also why it failed upstream for RetroArch: a `.prx` core links its own
+copy of static musl with its own `environ`, and the frontend's `setenv` never
+reached it. Measured upstream 2026-08-23 — `ORBIS_NCPU=1` was applied to the
+eboot's environ and the core still started 5 workers.
+
+`src/probe/probe.c` does the `setenv` pass and logs each setting it applied, so
+the knob being thrown is visible in the capture rather than assumed.
+
+### What replaces the radeon_info diff
+
+`VK_AMD_shader_core_properties` is present in this bundle's RADV (confirmed by
+`strings` on `libvulkan_radeon.a`) and carries the fields stage 3 actually
+depends on:
+
+| Vulkan field | radeon_info field | Liverpool |
+|---|---|---|
+| `shaderEngineCount` | `max_se` | 2 |
+| `shaderArraysPerEngineCount` | `max_sa_per_se` | 1 |
+| `computeUnitsPerShaderArray` | `num_cu_per_sh` | 9 |
+| product of the three | `num_cu` | 18 |
+
+Plus `VkPhysicalDeviceProperties.deviceID`, which is `0x9924` for `CHIP_GLADIUS`
+in `ac_gpu_info.c` — the direct answer to whether the Pro branch fired — and
+`deviceName`, which RADV fills from `ac_get_marketing_name`.
+
+That is most of what the `radeon_info` diff was going to tell us, through a
+standard extension, with no Mesa rebuild. It is not all 164 fields. If the full
+dump turns out to be needed, the path is to rebuild Mesa from the `orbis` branch
+with the log call site patched, which is a much larger job than this stage needs.

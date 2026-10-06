@@ -23,7 +23,7 @@ So this is not a port. It is a bring-up, and most of it is measurement.
 |---|---|---|
 | 1 | Toolchain → PKG, on the host | **done** |
 | 1 | Triangle on the television | not yet run |
-| 2 | `radeon_info` captured on Gladius | — |
+| 2 | GPU identity + topology probe | **built**, not yet run |
 | 3 | CTS, and the ring-sizing deltas | — |
 | 4 | OpenGothic, for a frame rate | — |
 | 5 | prospero-win port | — |
@@ -37,6 +37,7 @@ Target console: PS4 Pro, firmware 9.60, GoldHEN.
 ./scripts/fetch-sdk.sh                 # orbis-sdk-v1, checksummed and verified
 ./scripts/build.sh hello --pkg         # layout only — touches no Mesa
 ./scripts/build.sh triangle --pkg      # the graphics stack, ~26 MB .pkg
+./scripts/build.sh probe --pkg         # stage 2: what the driver says it is on
 ```
 
 Then point it at the console:
