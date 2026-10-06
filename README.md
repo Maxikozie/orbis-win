@@ -43,9 +43,14 @@ Then point it at the console:
 
 ```sh
 cp config.env.example config.env       # put your PS4's IP in it
+./scripts/preflight.sh                 # console up? which port is FTP on?
 ./scripts/logs.sh                      # leave running in its own terminal
 ./scripts/build.sh triangle --deploy   # uploads to /data/pkg/
 ```
+
+`preflight.sh` probes for the FTP banner across 2121, 1337 and 21 rather than
+trusting the configured port — guessing wrong there looks like a hung upload
+rather than a refused one, which is an hour you do not get back.
 
 Install from `/data/pkg/` on the console and launch it. The two examples answer
 different questions on purpose — `hello` proves the bundle is laid out right with
@@ -59,6 +64,8 @@ screen. One example doing both would report a driver fault as a layout fault.
 | `prereqs.sh` | Checks the host toolchain. Never installs anything. |
 | `fetch-sdk.sh` | Downloads, checksums, unpacks and runs the bundle's own `verify.sh`. |
 | `build.sh` | `{hello\|triangle} [--pkg] [--deploy]`, plus the ELF checks that catch a bad link. |
+| `preflight.sh` | Console reachable, which port serves FTP, log port free, pkg built. |
+| `wait-for-console.sh` | Polls until the PS4 answers, then runs preflight. |
 | `logs.sh` | UDP netlog capture (primary) or GoldHEN klog (fallback). |
 | `capture-radeon-info.sh` | Stage 2 — pulls the dump out of a log and diffs it against Liverpool. |
 
