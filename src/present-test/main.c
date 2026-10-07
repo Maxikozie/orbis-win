@@ -28,11 +28,13 @@
 #include "pw_wine_dmem_ps4.h"
 #include "pw_wine_heap.h"
 #include "pw_wine_threads.h"
+#include "pw_wine_cwd.h"
 #include <pthread.h>
 #include <signal.h>
 #include <sched.h>
 #include <math.h>
 #include <errno.h>
+#include <fcntl.h>
 
 void *pw_test_worker(void *);
 extern volatile int pw_test_stop;
@@ -155,6 +157,90 @@ int main(void)
             say("present:   red as B,G,R,A is 00 00 ff ff; VideoOut must read byte0 as BLUE");
             say("present:   for that to show red. Format in use is logged above.");
         }
+    }
+
+    /* ------------------------------------------------------- working directory
+     * pw_wine_cwd is 1288 lines across two files, and every one of them exists
+     * because of three things measured on PS5 firmware 12.02 and stated in its
+     * header:
+     *
+     *   "chdir() is EPERM for every path and libc's getcwd() faults"
+     *   "symlink() is libkernel_sys only, and a system call from title code
+     *    kills the process"
+     *
+     * Those are facts about a different console. The heap taught us not to
+     * assume they carry over — its 13 MiB malloc cap does not exist here at
+     * all. So measure before porting anything.
+     *
+     * ⚠ EACH STEP ANNOUNCES ITSELF BEFORE IT RUNS. If symlink() really does
+     * kill the title, the log must already say which call was in flight — the
+     * klog replays its buffer, so a line printed before the attempt survives
+     * the death. */
+    {
+        char buf[1024];
+
+        say("cwd: calling getcwd()...");
+        const char *got = getcwd(buf, sizeof buf);
+        say("cwd: getcwd -> %s (errno %d)", got ? got : "(null)", got ? 0 : errno);
+
+        say("cwd: calling chdir(\"/data\")...");
+        errno = 0;
+        int cd = chdir("/data");
+        say("cwd: chdir(/data) -> %d errno %d%s", cd, errno,
+            cd == 0 ? "  <- PERMITTED, unlike the PS5" : "  (EPERM=1 is the PS5 behaviour)");
+
+        if (cd == 0) {
+            const char *again = getcwd(buf, sizeof buf);
+            say("cwd: getcwd after chdir -> %s", again ? again : "(null)");
+            (void)chdir("/");
+        }
+
+        /* Relative open: the thing the whole shim exists to make work. */
+        say("cwd: calling open(\"data/pkg\", O_RDONLY) relative...");
+        errno = 0;
+        int rfd = open("data/pkg", O_RDONLY | O_DIRECTORY);
+        say("cwd: relative open -> %d errno %d", rfd, rfd < 0 ? errno : 0);
+        if (rfd >= 0) close(rfd);
+
+        /* ⚠ LAST, AND LOUDLY. On the PS5 this is documented to kill the
+         * process outright. If the next line in the log is not "symlink
+         * returned", that is what happened. */
+        say("cwd: about to call symlink() - PS5 documents this as FATAL");
+        say("cwd: if no further line appears, it killed the title here too");
+        errno = 0;
+        int sl = symlink("/data", "/data/pw-symlink-probe");
+        say("cwd: symlink returned %d errno %d%s", sl, sl < 0 ? errno : 0,
+            sl == 0 ? "  <- WORKS, unlike the PS5" : "");
+        if (sl == 0) unlink("/data/pw-symlink-probe");
+
+        /* ------------------------------------------------- the shim itself
+         * The relative open above failed with ENOENT because nothing resolves
+         * it. pw_cwd_set gives the process a logical working directory, and
+         * pw_wine_cwd_libc.c's __wrap_open joins relative paths to it. The
+         * same call should now succeed — that is the whole shim in one line. */
+        say("cwd: --- with the shim ---");
+        int sr = pw_cwd_set("/data");
+        char cur[PW_CWD_PATH_MAX];
+        size_t n = pw_cwd_get(cur, sizeof cur);
+        say("cwd: pw_cwd_set(/data) -> %d, pw_cwd_get -> '%s' (%zu)", sr, cur, n);
+
+        errno = 0;
+        int wfd = open("pkg", O_RDONLY | O_DIRECTORY);
+        say("cwd: open(\"pkg\") relative -> %d errno %d%s", wfd, wfd < 0 ? errno : 0,
+            wfd >= 0 ? "  <- RESOLVED against /data" : "  <- still unresolved");
+        if (wfd >= 0) close(wfd);
+
+        /* Lexical folding, which chdir cannot do for us here. */
+        (void)pw_cwd_set("/data/pkg");
+        (void)pw_cwd_set("..");
+        n = pw_cwd_get(cur, sizeof cur);
+        say("cwd: set(/data/pkg) then set(..) -> '%s' (expect /data)", cur);
+
+        errno = 0;
+        struct stat st;
+        int sv = stat("pkg", &st);
+        say("cwd: stat(\"pkg\") relative -> %d errno %d, dir=%d",
+            sv, sv < 0 ? errno : 0, sv == 0 && S_ISDIR(st.st_mode));
     }
 
     /* --------------------------------------------------------------- threads

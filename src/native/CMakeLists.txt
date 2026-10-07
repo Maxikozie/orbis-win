@@ -49,6 +49,11 @@ add_library(pw_native_ps4 STATIC
   # Also pure POSIX; its *_libc.c companion includes <sys/thr.h>, which the
   # PS4 SDK does not have, so src/native/pw_wine_threads_ps4.c replaces it.
   "${PW}/wine/ps5/pw_wine_threads.c"
+  # The working-directory shim. Both halves are pure POSIX, so neither needed
+  # porting — but the libc half only does anything if the linker is told to
+  # divert the 28 calls it wraps, below.
+  "${PW}/wine/ps5/pw_wine_cwd.c"
+  "${PW}/wine/ps5/pw_wine_cwd_libc.c"
   pw_videoout_ps4.c
   pw_pad_ps4.c
   pw_audio_ps4.c
@@ -65,7 +70,46 @@ target_compile_options(pw_native_ps4 PRIVATE -std=c11 -O2 -Wall -Wextra)
 # exports sceVideoOutSubmitFlip / sceVideoOutWaitVblank. PUBLIC so an executable
 # linking this archive inherits it — a STATIC library records the dependency but
 # cannot satisfy it itself.
+# ⚠ WITHOUT THESE THE SHIM IS INERT. pw_wine_cwd_libc.c defines __wrap_open and
+# friends and calls __real_open; lld only creates that pairing when told to, per
+# symbol. A build missing them links cleanly, runs, and resolves no relative
+# path — the failure is silence, not an error.
+#
+# MEASURED on this console 2026-10-07, which is why the shim is needed at all:
+#   chdir("/data")  -> EPERM   (same as the PS5)
+#   getcwd()        -> ENOSYS  (the PS5 faults instead)
+#   open("data/pkg")-> ENOENT  (nothing to resolve against)
+#   symlink()       -> ENOSYS  (the PS5 kills the process instead)
 target_link_libraries(pw_native_ps4 PUBLIC
+  "-Wl,--wrap=access"
+  "-Wl,--wrap=chdir"
+  "-Wl,--wrap=chmod"
+  "-Wl,--wrap=close"
+  "-Wl,--wrap=fchdir"
+  "-Wl,--wrap=fopen"
+  "-Wl,--wrap=fstatat"
+  "-Wl,--wrap=getcwd"
+  "-Wl,--wrap=link"
+  "-Wl,--wrap=lstat"
+  "-Wl,--wrap=mkdir"
+  "-Wl,--wrap=mkdirat"
+  "-Wl,--wrap=open"
+  "-Wl,--wrap=openat"
+  "-Wl,--wrap=opendir"
+  "-Wl,--wrap=readlink"
+  "-Wl,--wrap=realpath"
+  "-Wl,--wrap=rename"
+  "-Wl,--wrap=renameat"
+  "-Wl,--wrap=rmdir"
+  "-Wl,--wrap=stat"
+  "-Wl,--wrap=statfs"
+  "-Wl,--wrap=symlink"
+  "-Wl,--wrap=symlinkat"
+  "-Wl,--wrap=truncate"
+  "-Wl,--wrap=unlink"
+  "-Wl,--wrap=unlinkat"
+  "-Wl,--wrap=utimes"
+
   "${OO_PS4_TOOLCHAIN}/lib/libSceVideoOut.so"
   "${OO_PS4_TOOLCHAIN}/lib/libSceSystemService.so"   # HideSplashScreen
   "${OO_PS4_TOOLCHAIN}/lib/libSceUserService.so"     # the signed-in user fallback
