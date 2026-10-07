@@ -850,3 +850,77 @@ does not load a Wine PRX, because none is built yet — that needs
 and thread shim none of which sits behind a vtable. What it does establish is
 that when a Wine PRX exists, the machinery to find and resolve it is in place
 and its module-info reading is correct on this hardware.
+
+---
+
+## 2026-10-07 — direct memory, and five for five
+
+```
+dmem: add_region(0x40000000, 16777216) -> 0
+dmem: commit 262144 bytes RW -> 0, backed 262144
+dmem: wrote and verified 65536 words, 0 mismatched
+dmem: fresh page reads 0x00000000 (expect 0)
+dmem: backed 278528 peak 278528, 2 allocs 2 maps 0 protects 0 failures, 1 runs
+dmem: replace(..,0) -> 0, backed now 0, 1 releases
+```
+
+The whole lifecycle: reserve an address region, commit pages into it, write a
+pattern through those addresses and read it back, confirm a freshly backed page
+arrives zeroed, then give it all back with nothing left behind.
+
+⚠ **The read-back is the test, not the return codes.** `reserve`, `allocate` and
+`map` all returning 0 says only that the kernel accepted the calls. A map at the
+wrong physical offset returns success and hands back somebody else's page. 65,536
+words written and verified through the mapped addresses is what proves the
+memory landed where it was asked for.
+
+### Two PS4-specific traps
+
+**`sceKernelAllocateMainDirectMemory` is unusable here.** The OpenOrbis header
+declares its last parameter `off_t` **by value** where it must be `off_t *` — the
+physical offset cannot come back. A header bug, and one that would have produced
+a garbage offset and a map landing nowhere. `sceKernelAllocateDirectMemory` has
+the correct out-pointer and an explicit `[start, end)` search range, which the
+PS5's "main" variant does not take.
+
+**The memory type is not the scanout's.** `pw_videoout_ps4.c` uses WC_GARLIC (3)
+because the compositor only ever writes a surface the display only ever reads.
+Wine's heap and stack are read far more than written, so this uses WB_ONION (0),
+cached and CPU-coherent. The wrong one here works and is slow in a way nothing
+reports.
+
+⚠ And a correction to the presenter while passing: its comment called type 3
+*WB_ONION*. It is WC_GARLIC. Right value, backwards reason — left as a visible
+note rather than quietly fixed, because a constant that works for a reason
+nobody wrote down is a constant somebody later "fixes".
+
+### A misread of the API that looked like a leak
+
+The first run called `pw_wine_dmem_protect(range, 0)` to free, and got `rc 0`
+with `backed_bytes` unchanged and `releases` still 0 — which reads exactly like
+a leak in this port. It is not:
+
+- `protect(range, 0)` declines to **back** reserved pages; backed pages stay.
+- `replace(range, 0)` is the one whose header says *"protection 0 leaves it
+  reserved"*, and which releases the direct memory behind it.
+
+Worth recording because the failure mode is a leak that **reports success**.
+
+### Five for five
+
+| upstream | lines | this port | lines | upstream reused |
+|---|---|---|---|---|
+| videoout + tiling + AGC | ~350 | `pw_videoout_ps4.c` | 170 | the compositor |
+| pad platform block | ~15 | `pw_pad_ps4.c` | 96 | the whole pad core |
+| audio platform block | ~20 | `pw_audio_ps4.c` | 62 | `pw_audio_ps5_open_port` |
+| dl platform block | ~70 | `pw_wine_dl_ps4.c` | 73 | dlopen/dlsym/dladdr, PRXDESC1 parsing |
+| dmem platform block | ~130 | `pw_wine_dmem_ps4.c` | 121 | the whole region allocator |
+
+**522 lines of PS4 platform code** against `src/`'s 13,519 LOC translator plus
+the pad core, the compositor, the module loader and the region allocator, all
+compiled unmodified.
+
+⚠ The pattern is upstream's doing, not this port's cleverness: every one of
+these five sits behind a vtable or a `*_HOST_TEST` guard that somebody put there
+on purpose. What is left — the heap, threads, the working-directory shim, and
+the 81 Wine patches whose constants were *measured* on PS5 firmware — does not.

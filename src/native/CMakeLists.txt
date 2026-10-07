@@ -39,10 +39,12 @@ add_library(pw_native_ps4 STATIC
   # Sony calls in a separate *_libc.c companion, which we simply do not compile.
   "${PW}/wine/ps5/pw_wine_prx.c"
   "${PW}/wine/ps5/pw_wine_dl.c"
+  "${PW}/wine/ps5/pw_wine_dmem.c"
   pw_videoout_ps4.c
   pw_pad_ps4.c
   pw_audio_ps4.c
-  pw_wine_dl_ps4.c)
+  pw_wine_dl_ps4.c
+  pw_wine_dmem_ps4.c)
 target_include_directories(pw_native_ps4 PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}" "${PW}/src" "${PW}/native" "${PW}/wine/ps5" "${PW}/include")
 target_compile_options(pw_native_ps4 PRIVATE -std=c11 -O2 -Wall -Wextra)

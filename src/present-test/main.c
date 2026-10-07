@@ -25,7 +25,11 @@
 #include "pw_pad_ps5.h"
 #include "pw_audio_ps4.h"
 #include "pw_wine_dl_ps4.h"
+#include "pw_wine_dmem_ps4.h"
 #include <math.h>
+
+/* One 16 KiB page, for the zero-fill probe. */
+#define PW_WINE_DMEM_PAGE_PROBE 0x4000u
 #include "pw_present.h"
 #include "prospero_win.h"
 
@@ -127,6 +131,78 @@ int main(void)
             say("present: red-column px  = %02x %02x %02x %02x", red[0], red[1], red[2], red[3]);
             say("present:   red as B,G,R,A is 00 00 ff ff; VideoOut must read byte0 as BLUE");
             say("present:   for that to show red. Format in use is logged above.");
+        }
+    }
+
+    /* --------------------------------------------------------- direct memory
+     * Wine wants far more anonymous memory than a title's flexible pool has,
+     * so ntdll's VM manager is routed onto direct memory instead. This is the
+     * machinery that does it, driven end to end: own a region, commit pages
+     * into it, write and read them back, then give them away.
+     *
+     * ⚠ THE READ-BACK IS THE POINT. reserve/allocate/map all returning 0 only
+     * says the kernel accepted the calls. Writing a pattern and reading it
+     * through the same addresses is what proves the physical memory actually
+     * landed under them — a map at the wrong offset returns success and hands
+     * back somebody else's page. */
+    {
+        static PwWineDmemRun runs[256];
+        PwWineDmem dmem;
+        PwWineDmemOps dops;
+        if (pw_wine_dmem_ps4_ops(&dops) == PW_OK &&
+            pw_wine_dmem_init(&dmem, &dops, runs, 256, 1) == 0) {
+
+            /* 16 MiB of address space high enough not to collide with the
+             * eboot (0x400000..0x544000) or anything the SDK maps low. */
+            const uintptr_t base = (uintptr_t)0x40000000;
+            const size_t    span = 16u << 20;
+            int rc = pw_wine_dmem_add_region(&dmem, base, span, 0);
+            say("dmem: add_region(%p, %zu) -> %d", (void *)base, span, rc);
+
+            if (rc == 0) {
+                const size_t commit = 256u << 10;      /* 256 KiB, 16 pages */
+                rc = pw_wine_dmem_protect(&dmem, base, commit, PW_WINE_DMEM_READ | PW_WINE_DMEM_WRITE);
+                say("dmem: commit %zu bytes RW -> %d, backed %zu",
+                    commit, rc, pw_wine_dmem_backed(&dmem, base, commit));
+
+                if (rc == 0) {
+                    volatile uint32_t *p = (volatile uint32_t *)base;
+                    const uint32_t n = (uint32_t)(commit / sizeof *p);
+                    for (uint32_t i = 0; i < n; i++) p[i] = i * 2654435761u;
+                    uint32_t bad = 0;
+                    for (uint32_t i = 0; i < n; i++)
+                        if (p[i] != i * 2654435761u) bad++;
+                    say("dmem: wrote and verified %u words, %u mismatched", n, bad);
+
+                    /* Zero-fill was requested at init, so a freshly backed
+                     * page must read zero before anything writes it. */
+                    volatile uint32_t *q = (volatile uint32_t *)(base + commit);
+                    rc = pw_wine_dmem_protect(&dmem, base + commit, PW_WINE_DMEM_PAGE_PROBE,
+                                              PW_WINE_DMEM_READ | PW_WINE_DMEM_WRITE);
+                    if (rc == 0) say("dmem: fresh page reads 0x%08x (expect 0)", q[0]);
+                }
+
+                PwWineDmemStats st;
+                pw_wine_dmem_stats(&dmem, &st);
+                say("dmem: backed %llu peak %llu, %llu allocs %llu maps %llu protects %llu failures, %u runs",
+                    (unsigned long long)st.backed_bytes, (unsigned long long)st.peak_backed_bytes,
+                    (unsigned long long)st.allocations, (unsigned long long)st.maps,
+                    (unsigned long long)st.protects, (unsigned long long)st.failures, st.runs);
+
+                /* ⚠ replace(), NOT protect(). A first run called
+                 * pw_wine_dmem_protect(.., 0) expecting it to free, and got
+                 * rc 0 with backed_bytes unchanged and releases still 0 —
+                 * which read like a leak in the port and was a misread of the
+                 * API. protect(.., 0) declines to BACK reserved pages; it is
+                 * replace() whose header says "protection 0 leaves it
+                 * reserved", and which releases the direct memory behind it. */
+                rc = pw_wine_dmem_replace(&dmem, base, span, 0);
+                pw_wine_dmem_stats(&dmem, &st);
+                say("dmem: replace(..,0) -> %d, backed now %llu, %llu releases",
+                    rc, (unsigned long long)st.backed_bytes, (unsigned long long)st.releases);
+            }
+        } else {
+            say("dmem: init refused");
         }
     }
 

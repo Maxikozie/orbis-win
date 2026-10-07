@@ -38,11 +38,18 @@ enum { DIRECT_ALIGN = 0x200000 };
  * a wrong guess then costs reversed colours rather than a black screen. */
 enum { PIXEL_A8R8G8B8_SRGB = 0x80000000,   /* byte0=B — what the compositor writes */
        PIXEL_A8B8G8R8_SRGB = 0x80002200 }; /* byte0=R — reversed from it */
-/* Direct-memory type 3 is WB_ONION on both consoles: CPU-written, GPU/display
- * readable without an explicit flush. WC_GARLIC (type 0) is faster for the GPU
- * and much slower for the CPU writes the compositor does, which is the whole
- * workload here. */
-enum { DIRECT_TYPE = 3 };
+/* ⚠ TYPE 3 IS WC_GARLIC, NOT WB_ONION — this comment said the opposite until
+ * 2026-10-07. The PS4 SDK defines ORBIS_KERNEL_WB_ONION 0x0, WC_GARLIC 0x3,
+ * WB_GARLIC 0xA.
+ *
+ * The value is still the right one and the picture proves it: write-combining
+ * suits a surface the CPU only ever writes, sequentially, and the display only
+ * ever reads. WB_ONION would be the choice if anything here read the surface
+ * back — the compositor does not.
+ *
+ * Kept as a note rather than quietly corrected, because a constant that works
+ * for a reason nobody wrote down is a constant somebody later "fixes". */
+enum { DIRECT_TYPE = 3 /* ORBIS_KERNEL_WC_GARLIC */ };
 
 int pw_videoout_ps4_open(PwVideoOutPs4 *video)
 {
