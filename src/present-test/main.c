@@ -23,6 +23,8 @@
 #include "pw_videoout_ps4.h"
 #include "pw_pad_ps4.h"
 #include "pw_pad_ps5.h"
+#include "pw_audio_ps4.h"
+#include <math.h>
 #include "pw_present.h"
 #include "prospero_win.h"
 
@@ -124,6 +126,50 @@ int main(void)
             say("present: red-column px  = %02x %02x %02x %02x", red[0], red[1], red[2], red[3]);
             say("present:   red as B,G,R,A is 00 00 ff ff; VideoOut must read byte0 as BLUE");
             say("present:   for that to show red. Format in use is logged above.");
+        }
+    }
+
+    /* -------------------------------------------------------------- audio
+     * A one-second tone before the video loop, deliberately NOT interleaved
+     * with it: sceAudioOutOutput blocks until the port takes the grain, and a
+     * 256-frame grain at 48 kHz is 5.33 ms against a 16.6 ms frame. Pushing one
+     * grain per frame would starve the port and stutter; pushing three would
+     * couple the render loop's timing to the audio clock. Neither belongs in a
+     * test whose job is to prove the port opens and plays.
+     *
+     * The port policy — main port, 256-frame grains, S16 stereo at 48 kHz,
+     * unity volume on eight channels — is upstream's pw_audio_ps5_open_port(),
+     * unchanged. Only the five forwards under it are this port's. */
+    {
+        PwAudioPs5Ops aops;
+        int ahandle = -1;
+        int arc = pw_audio_ps4_platform_ops(&aops);
+        if (arc == PW_OK) arc = pw_audio_ps5_open_port(&aops, &ahandle);
+        if (arc == PW_OK) {
+            say("audio: port %d open, %u frames per grain at %u Hz, S16 stereo",
+                ahandle, PW_AUDIO_PS5_GRAIN, PW_AUDIO_PS5_RATE);
+            static int16_t grain[PW_AUDIO_PS5_GRAIN * PW_AUDIO_PS5_CHANNELS];
+            const double step = 2.0 * 3.14159265358979 * 440.0 / PW_AUDIO_PS5_RATE;
+            double phase = 0.0;
+            int grains = PW_AUDIO_PS5_RATE / PW_AUDIO_PS5_GRAIN;   /* ~one second */
+            int failed = 0;
+            for (int g = 0; g < grains && !failed; g++) {
+                for (unsigned f = 0; f < PW_AUDIO_PS5_GRAIN; f++) {
+                    /* A quarter of full scale: loud enough to hear, quiet
+                     * enough not to startle whoever is holding the pad. */
+                    int16_t v = (int16_t)(8000.0 * sin(phase));
+                    phase += step;
+                    grain[f * 2] = grain[f * 2 + 1] = v;
+                }
+                if (aops.output(ahandle, grain) < 0) {
+                    say("audio: output failed at grain %d of %d", g, grains);
+                    failed = 1;
+                }
+            }
+            if (!failed) say("audio: %d grains played - a 440 Hz tone, about a second", grains);
+            (void)aops.close(ahandle);
+        } else {
+            say("audio: NOT open (rc %d) - the rest still runs", arc);
         }
     }
 

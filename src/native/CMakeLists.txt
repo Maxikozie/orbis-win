@@ -26,12 +26,17 @@ file(GLOB PW_SRC "${PW}/src/*.c")
 # HOST_TEST in a PS4 build deserves the reason.
 set_source_files_properties("${PW}/native/pw_pad_ps5.c"
   PROPERTIES COMPILE_DEFINITIONS PW_PAD_PS5_HOST_TEST)
+# Audio uses the same seam, for the same reason.
+set_source_files_properties("${PW}/native/pw_audio_ps5.c"
+  PROPERTIES COMPILE_DEFINITIONS PW_AUDIO_PS5_HOST_TEST)
 
 add_library(pw_native_ps4 STATIC
   ${PW_SRC}
   "${PW}/native/pw_pad_ps5.c"
+  "${PW}/native/pw_audio_ps5.c"
   pw_videoout_ps4.c
-  pw_pad_ps4.c)
+  pw_pad_ps4.c
+  pw_audio_ps4.c)
 target_include_directories(pw_native_ps4 PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}" "${PW}/src" "${PW}/native" "${PW}/include")
 target_compile_options(pw_native_ps4 PRIVATE -std=c11 -O2 -Wall -Wextra)
@@ -46,5 +51,6 @@ target_link_libraries(pw_native_ps4 PUBLIC
   "${OO_PS4_TOOLCHAIN}/lib/libSceVideoOut.so"
   "${OO_PS4_TOOLCHAIN}/lib/libSceSystemService.so"   # HideSplashScreen
   "${OO_PS4_TOOLCHAIN}/lib/libSceUserService.so"     # the signed-in user fallback
-  "${OO_PS4_TOOLCHAIN}/lib/libScePad.so")            # DualShock 4
+  "${OO_PS4_TOOLCHAIN}/lib/libScePad.so"             # DualShock 4
+  "${OO_PS4_TOOLCHAIN}/lib/libSceAudioOut.so")       # the main audio port
 orbis_compat_verify()
