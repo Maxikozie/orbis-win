@@ -1071,3 +1071,85 @@ uncorrected. Worth sending upstream with the Gladius measurement.
 | dmem platform block | ~130 | `pw_wine_dmem_ps4.c` | 121 |
 | heap | — | nothing | 0 |
 | threads companion | ~7 | `pw_wine_threads_ps4.c` | 8 |
+
+---
+
+## 2026-10-07 — the working directory, and a lesson about instrumentation
+
+Both halves of `pw_wine_cwd` are pure POSIX, so neither needed porting. What
+they needed was the **28 `--wrap` flags**: the libc half defines `__wrap_open`
+and calls `__real_open`, and lld only creates that pairing when told to, per
+symbol. A build missing them links cleanly, runs, and resolves no relative path
+at all — the failure is **silence**.
+
+### The kernel, measured through `__real_*`
+
+```
+__real_getcwd          -> (null) errno 78   ENOSYS
+__real_chdir("/data")  -> -1     errno 1    EPERM
+__real_open(relative)  -> -1     errno 2    ENOENT
+__real_symlink         -> -1     errno 78   ENOSYS
+```
+
+| | PS5 (upstream's measurement) | PS4 (this console) |
+|---|---|---|
+| `chdir` | EPERM for every path | **EPERM** — same |
+| `getcwd` | **faults** | ENOSYS |
+| `symlink` | **kills the process** | ENOSYS |
+
+So the problem is real here and the shim is needed — but upstream's two
+*dangers* are not. A stray `symlink` merely fails; it does not take the title
+down. That makes this code considerably safer to develop against than its own
+header warns.
+
+### The shim, driven
+
+```
+pw_cwd_set(/data) -> 0, pw_cwd_get -> '/data'
+open("pkg") relative   -> 15        resolved against /data
+set("..")              -> -1 EINVAL correctly refused
+set(/data/pkg/..)      -> '/data'   folded lexically
+stat("pkg") relative   -> 0, dir=1  stat is wrapped too, not just open
+```
+
+That last line matters: Wine touches all 28 of these, and one unwrapped call is
+a path silently resolving against nothing.
+
+### ⚠ Twice in this piece my instrumentation was the thing at fault
+
+**A run reported that `chdir` and `symlink` "work, unlike the PS5".** They do
+not. Once the wraps are on the link line those names resolve to the shim's own
+logical implementations — the test was measuring this port and calling it the
+console. Fixed by probing `__real_*` and the wrapped names side by side in one
+run, so neither answer can be mistaken for the other.
+
+**A run reported that lexical folding had failed.** It had not: `pw_cwd_set`
+documents `EINVAL` for a relative path, and `".."` was correctly refused.
+Folding applies to `".."` *inside* an absolute path. The test was misusing the
+API.
+
+Both would have entered this record as console facts. A test that reports
+confidently and wrongly is worse than no test, and the only thing that caught
+either was going back over numbers that already looked like an answer.
+
+### Eight for eight — the platform layer is complete
+
+| upstream | lines | this port | lines |
+|---|---|---|---|
+| videoout + tiling + AGC | ~350 | `pw_videoout_ps4.c` | 170 |
+| pad platform block | ~15 | `pw_pad_ps4.c` | 96 |
+| audio platform block | ~20 | `pw_audio_ps4.c` | 62 |
+| dl platform block | ~70 | `pw_wine_dl_ps4.c` | 73 |
+| dmem platform block | ~130 | `pw_wine_dmem_ps4.c` | 121 |
+| heap | — | nothing | 0 |
+| threads companion | ~7 | `pw_wine_threads_ps4.c` | 8 |
+| cwd | — | nothing (28 `--wrap` flags) | 0 |
+
+**530 lines of PS4 platform code.** Underneath it, compiled unmodified: the
+13,519-LOC i386 translator, the compositor, the pad core, the audio port
+policy, dlopen/dlsym/dladdr with PRXDESC1 parsing, the direct-memory region
+allocator, the heap, the thread registry, and the working-directory shim with
+its virtual symlink table.
+
+What is left is not a vtable: `tools/build_wine_ps5.sh` and the 81-patch series,
+whose constants were *measured* on PS5 firmware rather than ported.

@@ -179,39 +179,37 @@ int main(void)
     {
         char buf[1024];
 
-        say("cwd: calling getcwd()...");
-        const char *got = getcwd(buf, sizeof buf);
-        say("cwd: getcwd -> %s (errno %d)", got ? got : "(null)", got ? 0 : errno);
+/* ⚠ PROBE THE KERNEL THROUGH __real_*, NOT THE WRAPPED NAMES.
+         *
+         * A previous run called chdir()/getcwd()/symlink() directly and
+         * reported they "work, unlike the PS5". They do not. Once the 28
+         * --wrap flags are on the link line those names resolve to
+         * pw_wine_cwd_libc.c's own logical implementations, so the run was
+         * measuring this shim and calling it the console.
+         *
+         * __real_* is the undiverted call. Both are asked here, side by side,
+         * so neither answer can be mistaken for the other. */
+        extern int   __real_chdir(const char *);
+        extern char *__real_getcwd(char *, size_t);
+        extern int   __real_symlink(const char *, const char *);
+        extern int   __real_open(const char *, int, ...);
 
-        say("cwd: calling chdir(\"/data\")...");
+        say("cwd: --- the kernel, through __real_* ---");
         errno = 0;
-        int cd = chdir("/data");
-        say("cwd: chdir(/data) -> %d errno %d%s", cd, errno,
-            cd == 0 ? "  <- PERMITTED, unlike the PS5" : "  (EPERM=1 is the PS5 behaviour)");
-
-        if (cd == 0) {
-            const char *again = getcwd(buf, sizeof buf);
-            say("cwd: getcwd after chdir -> %s", again ? again : "(null)");
-            (void)chdir("/");
-        }
-
-        /* Relative open: the thing the whole shim exists to make work. */
-        say("cwd: calling open(\"data/pkg\", O_RDONLY) relative...");
+        char *rg = __real_getcwd(buf, sizeof buf);
+        say("cwd: __real_getcwd -> %s errno %d", rg ? rg : "(null)", rg ? 0 : errno);
         errno = 0;
-        int rfd = open("data/pkg", O_RDONLY | O_DIRECTORY);
-        say("cwd: relative open -> %d errno %d", rfd, rfd < 0 ? errno : 0);
-        if (rfd >= 0) close(rfd);
-
-        /* ⚠ LAST, AND LOUDLY. On the PS5 this is documented to kill the
-         * process outright. If the next line in the log is not "symlink
-         * returned", that is what happened. */
-        say("cwd: about to call symlink() - PS5 documents this as FATAL");
-        say("cwd: if no further line appears, it killed the title here too");
+        int rc_cd = __real_chdir("/data");
+        say("cwd: __real_chdir(/data) -> %d errno %d (EPERM=1)", rc_cd, rc_cd ? errno : 0);
         errno = 0;
-        int sl = symlink("/data", "/data/pw-symlink-probe");
-        say("cwd: symlink returned %d errno %d%s", sl, sl < 0 ? errno : 0,
-            sl == 0 ? "  <- WORKS, unlike the PS5" : "");
-        if (sl == 0) unlink("/data/pw-symlink-probe");
+        int rro = __real_open("data/pkg", O_RDONLY | O_DIRECTORY);
+        say("cwd: __real_open(relative) -> %d errno %d", rro, rro < 0 ? errno : 0);
+        if (rro >= 0) close(rro);
+        errno = 0;
+        int rsl = __real_symlink("/data", "/data/pw-real-probe");
+        say("cwd: __real_symlink -> %d errno %d (ENOSYS=78; the PS5 dies here)",
+            rsl, rsl < 0 ? errno : 0);
+        if (rsl == 0) unlink("/data/pw-real-probe");
 
         /* ------------------------------------------------- the shim itself
          * The relative open above failed with ENOENT because nothing resolves
@@ -230,11 +228,16 @@ int main(void)
             wfd >= 0 ? "  <- RESOLVED against /data" : "  <- still unresolved");
         if (wfd >= 0) close(wfd);
 
-        /* Lexical folding, which chdir cannot do for us here. */
-        (void)pw_cwd_set("/data/pkg");
-        (void)pw_cwd_set("..");
+        /* ⚠ pw_cwd_set TAKES AN ABSOLUTE PATH. Its header says EINVAL for a
+         * relative one, and a previous run passed ".." and reported the fold
+         * had failed — it had been correctly refused. Folding applies to ".."
+         * INSIDE an absolute path, which is what chdir cannot do for us here. */
+        int bad = pw_cwd_set("..");
+        say("cwd: set(\"..\") -> %d errno %d (relative: EINVAL=%d expected)",
+            bad, bad ? errno : 0, EINVAL);
+        (void)pw_cwd_set("/data/pkg/..");
         n = pw_cwd_get(cur, sizeof cur);
-        say("cwd: set(/data/pkg) then set(..) -> '%s' (expect /data)", cur);
+        say("cwd: set(/data/pkg/..) -> '%s' (expect /data)", cur);
 
         errno = 0;
         struct stat st;
