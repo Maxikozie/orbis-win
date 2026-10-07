@@ -74,12 +74,10 @@ elif [[ $found != "$ORBIS_FTP_PORT" ]]; then
   fail=1
 fi
 
-# --- klog, the fallback log channel -----------------------------------------
-if timeout 3 bash -c "exec 3<>/dev/tcp/$ORBIS_CONSOLE/$PS4_KLOG_PORT" 2>/dev/null; then
-  note "klog $PS4_KLOG_PORT" "open"
-else
-  note "klog $PS4_KLOG_PORT" "closed (optional — UDP netlog is the primary channel)"
-fi
+# ⚠ NO KLOG PROBE HERE. Opening GoldHEN's klog socket and closing it without
+# draining is exactly what the bundle warns about — the console's stdout write
+# blocks the calling thread when nothing is reading. Checking a channel must not
+# disturb it. Run scripts/logs.sh klog when you actually want the log.
 
 # --- the local UDP capture port has to be free ------------------------------
 if ss -lun 2>/dev/null | grep -q ":$PS4_LOG_PORT "; then

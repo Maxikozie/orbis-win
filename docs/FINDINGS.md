@@ -224,3 +224,59 @@ over.
 Neither bug was found by reasoning about the code. Both appeared the moment real
 hardware was on the other end, which is the argument for stage 1 existing as its
 own stage.
+
+---
+
+## 2026-10-06 — all three packages on the console
+
+`/data/pkg/` now holds `hello.pkg` (6,619,136 B), `triangle.pkg` and `probe.pkg`
+(27,394,048 B each), every one verified by reading the directory back rather
+than by trusting the `226`.
+
+### ⚠ lftp's login is what kills GoldHEN
+
+Reported by the console's owner, who watched it happen: *"before you logged in
+it worked, then once you logged in it died."* Twice, each costing a reboot.
+
+`deploy.sh` passes no credentials, so lftp falls back to **anonymous**, and that
+login takes down the whole GoldHEN payload — FTP and klog both — leaving a
+console that still answers ping. I had been about to blame my own klog probe
+instead, which does not fit the evidence at all: the owner's observation was
+specific and the probe theory was a guess.
+
+`scripts/ftp-put.py` replaces lftp on this path. It attempts **no login at all**
+and sends only what STOR requires:
+
+```
+TYPE I  →  MKD  →  PASV  →  STOR
+```
+
+No FEAT, no SYST, no OPTS, no PWD, no EPSV, no SIZE, no MLSD. Every command and
+reply is printed before it is sent, so a server that dies again names the
+command that did it. Three uploads and a directory listing since, with the
+server alive throughout.
+
+### `/data/pkg/` does not exist on a fresh console
+
+The bundle's `deploy.sh` says *"/data/pkg AND NOWHERE ELSE"* and assumes the
+directory is there. On this console it was not, and STOR answered:
+
+```
+550 Requested action not taken. File unavailable.
+```
+
+`/data` is `drwxrwxrwx`, so `MKD /data/pkg` is enough. ftp-put.py now creates the
+parent and ignores the reply — an existing directory answers 550 here too, so
+checking it would be worse than not.
+
+### ⚠ These examples log to KLOG, not to the UDP netlog
+
+Both `triangle.c` and `probe.c` write through `sceKernelDebugOutText`, which is
+GoldHEN's **klog** channel on TCP 3232. Neither calls `orbis_netlog`. So
+`scripts/logs.sh` with no argument — the UDP path, and the one the plan kept
+calling primary — captures nothing from either of them.
+
+**`scripts/logs.sh klog` is the one to run**, and it must be left draining: the
+console's stdout write *blocks the calling thread* when nothing is reading that
+socket. That is also the reason preflight's connect-and-close klog check was a
+bad idea regardless of whether it caused anything, and it has been removed.
