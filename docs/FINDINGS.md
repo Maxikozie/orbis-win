@@ -1338,3 +1338,71 @@ The patch series is viable on the PS4. What stands between here and `ntdll.so`
 is a set of missing FreeBSD headers — bounded, mechanical, and the exact kind of
 thing `orbis-compat` exists to carry. After that, the PRX link remains the one
 genuinely unknown piece.
+
+---
+
+## 2026-10-07 — 307 → 106 errors on headers alone, and the real blocker surfaces
+
+`src/freebsd-compat/` is 14 headers, ~500 lines: the FreeBSD 9 declarations the
+OpenOrbis SDK omits although the platform has them — `orbis-compat` §2.2's
+category, which the overlay already carries eight of.
+
+| pass | errors | what changed |
+|---|---|---|
+| 1 | 307 | none |
+| 2 | 251 | cdio, sockio, ttycom, sysarch, bpf, mount, time, filio, conf |
+| 3 | **106** | cdio completed; `cdrom.c`'s 132 errors gone entirely |
+| 4 | 261 | trap.h and thr.h added — and the count **rose** |
+
+### ⚠ Four traps, each of which made a header look ignored
+
+**An empty header is worse than no header.** `dev/acpica/acpiio.h` was written
+deliberately empty so Wine would take its absent-hardware branch. Configure
+tests header *existence*, set `HAVE_DEV_ACPICA_ACPIIO_H`, and Wine then included
+it and demanded `ACPI_BATT_STAT_CHARGING` from an empty file. Deleted.
+
+**`<sys/ioctl.h>` must chain.** `TIOCGWINSZ`, `SIOCATMARK` and `FIODTYPE` stayed
+undeclared long after `ttycom.h`, `filio.h` and `sockio.h` existed, because Wine
+includes `<sys/ioctl.h>` and expects them *through* it as FreeBSD's does. The
+SDK's does not chain. It looked exactly like the headers were off the path.
+
+**`__BEGIN_DECLS` does not exist in this SDK**, and `fsid_t` is not reachable
+from anything `sys/mount.h` includes. Both were compile errors *inside
+configure's test*, so `HAVE_SYS_MOUNT_H` came back "no" while the header sat
+right there.
+
+**And an unguarded `struct winsize`** in `ttycom.h` made the `sys/mount.h` test
+fail with "redefinition of 'winsize'" — a failure reported against the wrong
+header entirely.
+
+### The count rising was the useful result
+
+Adding `machine/trap.h` and `sys/thr.h` took configure onto Wine's **FreeBSD**
+signal path, and `signal_x86_64.c` went from 7 errors to 131:
+
+```
+no member named 'mc_rsp' in 'mcontext_t'
+no member named 'mc_rip' in 'mcontext_t'
+no member named 'mc_rdi' in 'mcontext_t'   … and the rest of the register file
+```
+
+That is the Linux-vs-FreeBSD `ucontext_t` mismatch, and it is **patch 0500's
+exact subject**. The SDK declares a Linux `mcontext_t`; Wine's FreeBSD arm wants
+FreeBSD's.
+
+⚠ I predicted 0500/0501 would break first, the first build said otherwise, and I
+recorded the prediction as wrong. It was **premature, not wrong** — the first
+build could not reach that code. Both readings were honest; only the second had
+enough headers to be informative.
+
+### Also settled: where a PS4 thread id comes from
+
+`pthread_getthreadid_np` is exported by libkernel, verified against the stub
+library. That closes the question flagged during the thread-registry work —
+`thr_self` is not exported and musl's `syscall()` uses Linux conventions, but
+this is a plain function call needing neither.
+
+### What remains
+
+A FreeBSD `mcontext_t` for the signal path, the BPF guard in `server/sock.c`,
+and `getmntinfo`. Then the PRX link, still the one genuinely unknown piece.
