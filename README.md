@@ -23,8 +23,9 @@ So this is not a port. It is a bring-up, and most of it is measurement.
 |---|---|---|
 | 1 | Toolchain → PKG, on the host | **done** |
 | 1 | Triangle on the television | **done** — 1024+ frames, 1920x1080 |
-| 2 | GPU identity + topology probe | **run** — 0x9920, 18 CU: Pro is in base mode |
-| 2b | Neo mode (`--neo`) to unlock the Pro | built, awaiting a run |
+| 2 | GPU identity + topology probe | **done** — knee measured, 72 → 144 SIMDs |
+| 2b | Neo mode (`--neo`) in the package | **done** |
+| 2c | Gladius detection in RADV | **done — 36 CU confirmed live** |
 | 3 | CTS, and the ring-sizing deltas | — |
 | 4 | OpenGothic, for a frame rate | — |
 | 5 | prospero-win port | — |

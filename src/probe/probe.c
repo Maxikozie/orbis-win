@@ -28,10 +28,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <vulkan/vulkan.h>
 #include <orbis/libkernel.h>
+
+#include "bench_comp_spv.h"
 
 /* sceKernelDebugOutText is the console's own channel and needs no library of
  * ours, which matters when the thing under test is the graphics stack. */
@@ -100,6 +103,401 @@ static const char *heap_kind(VkMemoryHeapFlags f)
     return (f & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? "device-local" : "host";
 }
 
+
+/* ------------------------------------------------------------------ bench --
+ * Measure achieved FMA throughput, which is a fact about the silicon rather
+ * than about what ac_orbis_drm.c asserts.
+ *
+ * Reference points, 2 flops per FMA lane per clock, 64 lanes per CU:
+ *   base PS4   18 CU @ 800 MHz  ->  18 * 64 * 2 * 0.800 = 1843 GFLOP/s
+ *   PS4 Pro    36 CU @ 911 MHz  ->  36 * 64 * 2 * 0.911 = 4196 GFLOP/s
+ * Real kernels land under peak, but the two are far enough apart that a
+ * measurement says which machine is underneath.
+ */
+static uint32_t find_mem(VkPhysicalDevice phys, uint32_t bits, VkMemoryPropertyFlags want)
+{
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(phys, &mp);
+    for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+        if ((bits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & want) == want)
+            return i;
+    return UINT32_MAX;
+}
+
+static double now_sec(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static void run_bench(VkPhysicalDevice phys, uint32_t qf)
+{
+    say("");
+    say("--- compute throughput ---------------------------------------");
+
+    const float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        .queueFamilyIndex = qf, .queueCount = 1, .pQueuePriorities = &prio,
+    };
+    VkDeviceCreateInfo dci = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+    };
+    VkDevice dev;
+    if (vkCreateDevice(phys, &dci, NULL, &dev) != VK_SUCCESS) {
+        say("bench: vkCreateDevice FAILED - skipping"); return;
+    }
+    VkQueue q; vkGetDeviceQueue(dev, qf, 0, &q);
+    say("bench: ok   vkCreateDevice + queue");
+
+    enum { WG_SIZE = 64, MAX_WG = 8192 };
+    const VkDeviceSize bytes = (VkDeviceSize)MAX_WG * WG_SIZE * sizeof(float);
+    say("bench: buffer %llu B for up to %u workgroups", (unsigned long long)bytes, (unsigned)MAX_WG);
+
+    VkBufferCreateInfo bci = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bytes,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VkBuffer buf;
+    if (vkCreateBuffer(dev, &bci, NULL, &buf) != VK_SUCCESS) {
+        say("bench: vkCreateBuffer FAILED"); vkDestroyDevice(dev, NULL); return;
+    }
+    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(dev, buf, &mr);
+    uint32_t mt = find_mem(phys, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (mt == UINT32_MAX) mt = find_mem(phys, mr.memoryTypeBits, 0);
+    VkMemoryAllocateInfo mai = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = mr.size, .memoryTypeIndex = mt,
+    };
+    VkDeviceMemory mem;
+    if (vkAllocateMemory(dev, &mai, NULL, &mem) != VK_SUCCESS) {
+        say("bench: vkAllocateMemory FAILED (%llu B)", (unsigned long long)mr.size);
+        vkDestroyBuffer(dev, buf, NULL); vkDestroyDevice(dev, NULL); return;
+    }
+    vkBindBufferMemory(dev, buf, mem, 0);
+
+    VkDescriptorSetLayoutBinding dslb = {
+        .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+    VkDescriptorSetLayoutCreateInfo dslci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1, .pBindings = &dslb,
+    };
+    VkDescriptorSetLayout dsl;
+    if (vkCreateDescriptorSetLayout(dev, &dslci, NULL, &dsl) != VK_SUCCESS) {
+        say("bench: vkCreateDescriptorSetLayout FAILED"); return; }
+    say("bench: ok   descriptor set layout");
+
+    VkPushConstantRange pcr = { .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                .offset = 0, .size = sizeof(uint32_t) };
+    VkPipelineLayoutCreateInfo plci = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1, .pSetLayouts = &dsl,
+        .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr,
+    };
+    VkPipelineLayout pl;
+    if (vkCreatePipelineLayout(dev, &plci, NULL, &pl) != VK_SUCCESS) {
+        say("bench: vkCreatePipelineLayout FAILED"); return; }
+    say("bench: ok   pipeline layout");
+
+    VkShaderModuleCreateInfo smci = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = sizeof bench_comp_spv, .pCode = bench_comp_spv,
+    };
+    VkShaderModule sm;
+    if (vkCreateShaderModule(dev, &smci, NULL, &sm) != VK_SUCCESS) {
+        say("bench: vkCreateShaderModule FAILED"); return;
+    }
+    VkComputePipelineCreateInfo cpci = {
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                   .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" },
+        .layout = pl,
+    };
+    VkPipeline pipe;
+    if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, NULL, &pipe) != VK_SUCCESS) {
+        say("bench: vkCreateComputePipelines FAILED"); return;
+    }
+    say("bench: ok   compute pipeline");
+
+    VkDescriptorPoolSize dps = { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 };
+    VkDescriptorPoolCreateInfo dpci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &dps,
+    };
+    VkDescriptorPool dp;
+    if (vkCreateDescriptorPool(dev, &dpci, NULL, &dp) != VK_SUCCESS) {
+        say("bench: vkCreateDescriptorPool FAILED"); return; }
+    VkDescriptorSetAllocateInfo dsai = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = dp, .descriptorSetCount = 1, .pSetLayouts = &dsl,
+    };
+    VkDescriptorSet ds;
+    if (vkAllocateDescriptorSets(dev, &dsai, &ds) != VK_SUCCESS) {
+        say("bench: vkAllocateDescriptorSets FAILED"); return; }
+    say("bench: ok   descriptor set");
+    VkDescriptorBufferInfo dbi = { .buffer = buf, .offset = 0, .range = VK_WHOLE_SIZE };
+    VkWriteDescriptorSet wds = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0,
+        .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pBufferInfo = &dbi,
+    };
+    vkUpdateDescriptorSets(dev, 1, &wds, 0, NULL);
+
+    VkCommandPoolCreateInfo cpi = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = qf,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+    };
+    VkCommandPool cp;
+    if (vkCreateCommandPool(dev, &cpi, NULL, &cp) != VK_SUCCESS) {
+        say("bench: vkCreateCommandPool FAILED"); return; }
+    VkCommandBufferAllocateInfo cbai = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = cp,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1,
+    };
+    VkCommandBuffer cb;
+    if (vkAllocateCommandBuffers(dev, &cbai, &cb) != VK_SUCCESS) {
+        say("bench: vkAllocateCommandBuffers FAILED"); return; }
+    say("bench: ok   command buffer");
+    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence fence; vkCreateFence(dev, &fci, NULL, &fence);
+
+    /* ⚠ KEEP EACH DISPATCH WELL UNDER THE GPU WATCHDOG. The port's own record
+     * notes a watchdog it has never reached because no wait hit five seconds;
+     * these are sized for a few hundred ms. */
+    /* ⚠ SMALL, AND IT ANNOUNCES EACH STEP BEFORE TAKING IT.
+     *
+     * The first version logged a size only AFTER its timed pass completed, so
+     * when the console went down mid-sweep the log named nothing at all and the
+     * run taught us only that something died. klog replays its buffer on
+     * connect, so a line printed BEFORE a dispatch survives even a hang — which
+     * makes the next failure name itself.
+     *
+     * Sizes also start far below anything that saturates and stop at the first
+     * dispatch that misbehaves, rather than escalating into whatever killed the
+     * previous run. */
+    const uint32_t iters = 200;
+
+    say("bench: %u iters x 4 FMA per invocation, 64 threads per workgroup", iters);
+    say("bench: stopping at the first dispatch that does not return cleanly");
+    say("   %-10s %-12s %-12s %s", "workgroups", "invocations", "time ms", "GFLOP/s");
+
+    double best = 0.0;
+    const uint32_t sizes[] = { 1, 4, 16, 64, 256, 1024, 4096 };
+
+    for (unsigned si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
+        const uint32_t wg = sizes[si];
+        int aborted = 0;
+
+        for (int pass = 0; pass < 2 && !aborted; pass++) {
+            say("bench: -> dispatch %u workgroup(s), pass %d", wg, pass);
+
+            vkResetCommandBuffer(cb, 0);
+            VkCommandBufferBeginInfo bi = {
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            };
+            if (vkBeginCommandBuffer(cb, &bi) != VK_SUCCESS) {
+                say("bench: vkBeginCommandBuffer FAILED"); aborted = 1; break;
+            }
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, NULL);
+            vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof iters, &iters);
+            vkCmdDispatch(cb, wg, 1, 1);
+            if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
+                say("bench: vkEndCommandBuffer FAILED"); aborted = 1; break;
+            }
+
+            vkResetFences(dev, 1, &fence);
+            VkSubmitInfo si2 = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                 .commandBufferCount = 1, .pCommandBuffers = &cb };
+
+            const double t0 = now_sec();
+            VkResult sr = vkQueueSubmit(q, 1, &si2, fence);
+            if (sr != VK_SUCCESS) {
+                say("bench: vkQueueSubmit -> %d, stopping", (int)sr); aborted = 1; break;
+            }
+            /* 3s, not 10: a hang should be reported while the console is still
+             * answering, not after it has gone. */
+            VkResult w = vkWaitForFences(dev, 1, &fence, VK_TRUE, 3000000000ull);
+            const double dt = now_sec() - t0;
+
+            if (w != VK_SUCCESS) {
+                say("bench: wait -> %d after %.0f ms at %u workgroup(s) - STOPPING",
+                    (int)w, dt * 1e3, wg);
+                aborted = 1; break;
+            }
+
+            if (pass == 1) {
+                const double flops = (double)wg * WG_SIZE * (double)iters * 4.0 * 2.0;
+                const double gfs   = flops / dt * 1e-9;
+                if (gfs > best) best = gfs;
+                say("   %-10u %-12u %-12.2f %.1f", wg, wg * WG_SIZE, dt * 1e3, gfs);
+            }
+        }
+        if (aborted) break;
+    }
+
+    /* ------------------------------------------------------------------
+     * ⚠ THE RAMP ABOVE MEASURES SUBMIT OVERHEAD, NOT THE GPU.
+     *
+     * Every size in it came back in 0.7-2 ms and 4096 workgroups finished
+     * FASTER than 1024 — which is the signature of a fixed cost swamping the
+     * work. The submit-and-fence floor on this console is ~0.7 ms; at 4096
+     * workgroups x 200 iters the dispatch is only ~419 MFLOP, perhaps 0.2 ms of
+     * real compute. The ramp is worth keeping as a stability check and worth
+     * nothing as a throughput number.
+     *
+     * So: hold the dispatch at its widest and raise the per-invocation work
+     * until the fixed cost is noise. Reporting several iteration counts rather
+     * than one makes the answer self-checking — if GFLOP/s climbs and then
+     * flattens, the flat part is the hardware. If it never flattens, something
+     * other than ALU throughput is the limit and the number is not peak. */
+    if (best > 0.0) {
+        say("");
+        say("bench: holding 4096 workgroups and raising iterations until");
+        say("       the ~0.7 ms submit floor stops mattering");
+        say("   %-10s %-12s %-12s %s", "iters", "GFLOP", "time ms", "GFLOP/s");
+
+        const uint32_t deep[] = { 2000, 10000, 40000, 100000 };
+        const uint32_t wg = 4096;
+
+        for (unsigned di = 0; di < sizeof deep / sizeof deep[0]; di++) {
+            const uint32_t it = deep[di];
+            say("bench: -> dispatch %u workgroups x %u iters", wg, it);
+
+            vkResetCommandBuffer(cb, 0);
+            VkCommandBufferBeginInfo bi = {
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            };
+            vkBeginCommandBuffer(cb, &bi);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, NULL);
+            vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof it, &it);
+            vkCmdDispatch(cb, wg, 1, 1);
+            vkEndCommandBuffer(cb);
+
+            vkResetFences(dev, 1, &fence);
+            VkSubmitInfo si3 = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                 .commandBufferCount = 1, .pCommandBuffers = &cb };
+            const double t0 = now_sec();
+            if (vkQueueSubmit(q, 1, &si3, fence) != VK_SUCCESS) {
+                say("bench: submit failed at %u iters, stopping", it); break;
+            }
+            /* 4s: the longest of these should be well under one second, so a
+             * wait that reaches the timeout means a hang rather than slowness. */
+            VkResult w = vkWaitForFences(dev, 1, &fence, VK_TRUE, 4000000000ull);
+            const double dt = now_sec() - t0;
+            if (w != VK_SUCCESS) {
+                say("bench: wait -> %d after %.0f ms at %u iters - STOPPING",
+                    (int)w, dt * 1e3, it);
+                break;
+            }
+            const double flops = (double)wg * WG_SIZE * (double)it * 4.0 * 2.0;
+            const double gfs   = flops / dt * 1e-9;
+            if (gfs > best) best = gfs;
+            say("   %-10u %-12.1f %-12.1f %.1f", it, flops * 1e-9, dt * 1e3, gfs);
+        }
+    }
+
+    /* ------------------------------------------------------------------
+     * THE SCALING KNEE — how many compute units actually absorb work.
+     *
+     * Throughput in GFLOP/s cannot be converted to a CU count, because it also
+     * contains the GPU clock and the kernel's issue efficiency, and neither is
+     * known here: the converged 985 GFLOP/s is only 53% of the 18-CU reference,
+     * so something in that product is not what the reference assumes.
+     *
+     * Where the curve FLATTENS does not care about either. Add wavefronts until
+     * throughput stops rising; the point it stops is set by how many SIMDs are
+     * there to fill. Clock and efficiency scale the whole curve up or down and
+     * move the knee not at all.
+     *
+     *   18 CU =  72 SIMDs
+     *   36 CU = 144 SIMDs      — a factor of two in the knee position
+     *
+     * ⚠ EACH POINT MUST STAY OUT OF THE SUBMIT FLOOR, and small dispatches fall
+     * into it at a fixed iteration count — that is what made the first sweep
+     * meaningless. So the work per dispatch is held roughly constant by scaling
+     * iterations against the workgroup count, which also keeps the unsaturated
+     * points (slow by construction) from running long. */
+    if (best > 0.0) {
+        say("");
+        say("--- scaling knee: where does adding wavefronts stop helping? ---");
+        say("   18 CU = 72 SIMDs, 36 CU = 144 SIMDs. The KNEE is the answer,");
+        say("   not the height — clock and efficiency move height, not knee.");
+        say("   %-8s %-10s %-10s %-11s %s", "wgroups", "waves", "iters", "time ms", "GFLOP/s");
+
+        const uint32_t knee[] = { 8, 16, 32, 64, 96, 128, 192, 256, 384,
+                                  512, 768, 1024, 1536, 2048, 3072, 4096 };
+        /* ~20 GFLOP per dispatch: 20e9 / (wg * 64 lanes * 8 flops) */
+        const double target_flops = 20.0e9;
+
+        for (unsigned ki = 0; ki < sizeof knee / sizeof knee[0]; ki++) {
+            const uint32_t wg = knee[ki];
+            double want = target_flops / ((double)wg * WG_SIZE * 8.0);
+            if (want < 2000.0)    want = 2000.0;
+            if (want > 5000000.0) want = 5000000.0;
+            const uint32_t it = (uint32_t)want;
+
+            vkResetCommandBuffer(cb, 0);
+            VkCommandBufferBeginInfo bi = {
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            };
+            vkBeginCommandBuffer(cb, &bi);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &ds, 0, NULL);
+            vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof it, &it);
+            vkCmdDispatch(cb, wg, 1, 1);
+            vkEndCommandBuffer(cb);
+
+            vkResetFences(dev, 1, &fence);
+            VkSubmitInfo si4 = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                 .commandBufferCount = 1, .pCommandBuffers = &cb };
+            const double t0 = now_sec();
+            if (vkQueueSubmit(q, 1, &si4, fence) != VK_SUCCESS) {
+                say("knee: submit failed at %u workgroups, stopping", wg); break;
+            }
+            VkResult w = vkWaitForFences(dev, 1, &fence, VK_TRUE, 5000000000ull);
+            const double dt = now_sec() - t0;
+            if (w != VK_SUCCESS) {
+                say("knee: wait -> %d at %u workgroups after %.0f ms - STOPPING",
+                    (int)w, wg, dt * 1e3);
+                break;
+            }
+            const double flops = (double)wg * WG_SIZE * (double)it * 4.0 * 2.0;
+            say("   %-8u %-10u %-10u %-11.1f %.1f",
+                wg, wg, it, dt * 1e3, flops / dt * 1e-9);
+        }
+        say("");
+        say("   read it as: the last workgroup count whose GFLOP/s is still");
+        say("   meaningfully above the previous one. 1 workgroup = 1 wavefront.");
+    }
+
+    say("");
+    say("bench: peak %.0f GFLOP/s", best);
+    say("   base PS4  18 CU @ 800 MHz  = 1843 GFLOP/s peak");
+    say("   PS4 Pro   36 CU @ 911 MHz  = 4196 GFLOP/s peak");
+    say("   driver claims %u CU", 18u);
+
+    vkDestroyFence(dev, fence, NULL);
+    vkDestroyCommandPool(dev, cp, NULL);
+    vkDestroyDescriptorPool(dev, dp, NULL);
+    vkDestroyPipeline(dev, pipe, NULL);
+    vkDestroyShaderModule(dev, sm, NULL);
+    vkDestroyPipelineLayout(dev, pl, NULL);
+    vkDestroyDescriptorSetLayout(dev, dsl, NULL);
+    vkFreeMemory(dev, mem, NULL);
+    vkDestroyBuffer(dev, buf, NULL);
+    vkDestroyDevice(dev, NULL);
+}
+
 int main(void)
 {
     say("=== gladius probe ===");
@@ -125,6 +523,27 @@ int main(void)
      * else entirely. */
     say("probe: sceKernelHasNeoMode()=%d  sceKernelIsNeoMode()=%d",
         (int)sceKernelHasNeoMode(), (int)sceKernelIsNeoMode());
+
+    /* ⚠ DOES OUR setenv REACH MESA'S getenv? ORBIS_NUM_SE=4 was applied from
+     * /data/orbis-env.txt and the driver still reported shaderEngineCount=2,
+     * even though ac_gpu_info.c:1249 is a bare
+     *     info->max_se = device_info->num_shader_engines;
+     * with no clamp, and the ORBIS_NUM_SE string is present in this bundle's
+     * libvulkan_radeon.a. Either the write is not visible to Mesa or something
+     * downstream overrides it, and a read-back from this same binary separates
+     * those two without another guess.
+     *
+     * RADV is statically linked here, so this process and Mesa share one musl
+     * and one environ. If this prints 4 and the driver still says 2, the write
+     * is fine and the override is inside Mesa. */
+    {
+        static const char *const knobs[] = { "ORBIS_NUM_SE", "ORBIS_CHIP",
+                                             "ORBIS_TCC_BLOCKS", "RADV_DEBUG" };
+        for (unsigned i = 0; i < sizeof knobs / sizeof knobs[0]; i++) {
+            const char *v = getenv(knobs[i]);
+            say("probe: getenv(%s) = %s", knobs[i], v ? v : "(null)");
+        }
+    }
 
     VkApplicationInfo app = {
         .sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -252,6 +671,8 @@ int main(void)
     say("maxMemoryAllocationCount        %u", p->limits.maxMemoryAllocationCount);
     say("minUniformBufferOffsetAlignment %llu",
         (unsigned long long)p->limits.minUniformBufferOffsetAlignment);
+
+    run_bench(phys[0], 0);
 
     say("");
     say("=== probe complete ===");

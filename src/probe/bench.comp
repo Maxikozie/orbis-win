@@ -1,0 +1,37 @@
+#version 450
+/* Occupancy-limited FMA benchmark.
+ *
+ * The point is to measure the SILICON, not what the driver claims. RADV on PS4
+ * reports 18 CUs because ac_orbis_drm.c has 18 typed into it (marked UNCITED).
+ * If a Pro in Neo mode has 36 physical CUs, a dispatch that saturates the
+ * machine delivers roughly twice the throughput, and no amount of hardcoding
+ * changes that.
+ *
+ * ⚠ FOUR INDEPENDENT CHAINS. A single dependent FMA chain measures ALU latency,
+ * not throughput — each op waits on the previous. Four interleaved chains keep
+ * the SIMD issuing every cycle, so the number reflects width.
+ *
+ * ⚠ AND THE RESULT MUST BE STORED or the whole loop is dead code the compiler
+ * deletes, which measures an empty dispatch very fast.
+ */
+layout(local_size_x = 64) in;                    /* one wavefront per workgroup */
+
+layout(std430, binding = 0) buffer Out { float v[]; } outbuf;
+layout(push_constant) uniform PC { uint iters; } pc;
+
+void main()
+{
+    uint  id = gl_GlobalInvocationID.x;
+    float a  = float(id) * 1e-6;
+
+    float x0 = a + 1.0, x1 = a + 2.0, x2 = a + 3.0, x3 = a + 4.0;
+    const float b = 1.0000001, c = 0.9999999;
+
+    for (uint i = 0u; i < pc.iters; ++i) {
+        x0 = fma(x0, b, c);
+        x1 = fma(x1, b, c);
+        x2 = fma(x2, b, c);
+        x3 = fma(x3, b, c);
+    }
+    outbuf.v[id] = x0 + x1 + x2 + x3;
+}

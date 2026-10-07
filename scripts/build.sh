@@ -27,15 +27,16 @@ case "$TARGET" in
   hello)    TITLE_ID=GLDS10000; TITLE="Gladius Hello";    SRC="$BUNDLE/examples/hello" ;;
   triangle) TITLE_ID=GLDS10001; TITLE="Gladius Triangle"; SRC="$BUNDLE/examples/triangle" ;;
   probe)    TITLE_ID=GLDS10002; TITLE="Gladius Probe";    SRC="$ROOT/src/probe" ;;
-  *) die "usage: build.sh {hello|triangle|probe} [--pkg] [--deploy] [--neo]" ;;
+  *) die "usage: build.sh {hello|triangle|probe} [--pkg] [--deploy] [--neo] [--dev-mesa]" ;;
 esac
 
-PKG=0; DEPLOY=0; NEO=0
+PKG=0; DEPLOY=0; NEO=0; DEVMESA=0
 for a in "$@"; do
   case "$a" in
     --pkg)    PKG=1 ;;
     --deploy) PKG=1; DEPLOY=1 ;;
     --neo)    NEO=1 ;;
+    --dev-mesa) DEVMESA=1 ;;
     *) die "unknown option: $a" ;;
   esac
 done
@@ -52,6 +53,34 @@ source "$BUNDLE/env.sh" >/dev/null
 EXTRA=()
 [[ $TARGET == triangle || $TARGET == probe ]] &&
   EXTRA+=(-DORBIS_KIT_DIR="$BUNDLE/orbis-compat")
+
+# --dev-mesa: link against the locally built mesa-ps4 instead of the bundle's
+# prebuilt archive, for the Gladius work.
+#
+# ⚠ orbis-compat MOVES WITH IT, and that is the whole point of the bundle's
+# pairing gate: Mesa compiled against one include/ tree and linked against
+# another is a struct-layout bug that builds cleanly and fails at run time. The
+# local Mesa was built against the local orbis-compat (HEAD), so both are
+# overridden together or neither is.
+if (( DEVMESA )); then
+  DEV="$ROOT/mesa-build"
+  [[ -f "$DEV/mesa-ps4/build-orbis/src/amd/vulkan/libvulkan_radeon.a" ]] ||
+    die "no locally built RADV — run mesa-build/mesa-ps4/ps4/build.sh first"
+  [[ -f "$DEV/orbis-compat/build/liborbis-compat.a" ]] ||
+    die "no locally built orbis-compat — run mesa-build/orbis-compat/build.sh first"
+  # ⚠ cmake/ LEFT orbis-compat FOR THE KIT ON 2026-09-18, but the bundle's
+  # orbis-sdk.cmake still does include("${ORBIS_COMPAT_DIR}/cmake/..."). The
+  # symlink lets ORBIS_COMPAT_DIR point at the HEAD overlay — which is the one
+  # this Mesa was compiled against — without rewriting the bundle's toolchain.
+  [[ -e "$DEV/orbis-compat/cmake" ]] ||
+    ln -s "$DEV/orbis-porting-kit/cmake" "$DEV/orbis-compat/cmake"
+  say "dev mesa: $DEV/mesa-ps4/build-orbis"
+  EXTRA+=(-DORBIS_MESA_SRC="$DEV/mesa-ps4"
+          -DORBIS_MESA_BUILD="$DEV/mesa-ps4/build-orbis"
+          -DORBIS_COMPAT_DIR="$DEV/orbis-compat"
+          -DORBIS_KIT_DIR="$DEV/orbis-porting-kit")
+  BUILD="$ROOT/build/$TARGET-dev"
+fi
 
 say "configure $TARGET"
 cmake -S "$SRC" -B "$BUILD" -G Ninja \

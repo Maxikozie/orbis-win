@@ -16,7 +16,18 @@ if(NOT ORBIS_MESA_SRC)
   endif()
 endif()
 
-add_executable(probe probe.c)
+# The benchmark's SPIR-V is compiled on the host and embedded, so the console
+# reads no files. glslangValidator: apt install glslang-tools.
+find_program(GLSLANG NAMES glslangValidator glslang REQUIRED)
+add_custom_command(
+  OUTPUT  "${CMAKE_CURRENT_BINARY_DIR}/bench_comp_spv.h"
+  COMMAND "${GLSLANG}" -V "${CMAKE_CURRENT_LIST_DIR}/bench.comp"
+          --vn bench_comp_spv -o "${CMAKE_CURRENT_BINARY_DIR}/bench_comp_spv.h"
+  DEPENDS "${CMAKE_CURRENT_LIST_DIR}/bench.comp"
+  COMMENT "glslang: bench.comp -> bench_comp_spv.h")
+
+add_executable(probe probe.c "${CMAKE_CURRENT_BINARY_DIR}/bench_comp_spv.h")
+target_include_directories(probe PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 # Same vkloader the triangle uses: this console has no Vulkan loader and cannot
 # have one. The eboot is statically linked, there is no libvulkan.so to dlopen

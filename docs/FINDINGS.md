@@ -441,3 +441,94 @@ And the receiver does go stale: the console suspended at 19:28:48
 (`State Change: SUSPEND_ON_GOING`, `HW Indicator: Orange Blink`) and the socket
 stayed ESTAB while delivering nothing. Check that the log is still growing, not
 that the connection still exists.
+
+---
+
+## 2026-10-06 — THE PS4 PRO'S OTHER 18 COMPUTE UNITS WERE BEING MASKED BY THE DRIVER
+
+`ac_orbis_drm.c` hardcoded `num_shader_engines = 2` and `device_id = 0x9920`,
+both marked UNCITED. `cu_bitmap` is built from that, and RADV programs
+`COMPUTE_STATIC_THREAD_MGMT` from `cu_bitmap` — so the driver was not merely
+*mis-reporting* a Pro as a base PS4, it was configuring it as one.
+
+Patched to pick Gladius from `sceKernelIsNeoMode()` (`patches/0001-*.patch`),
+rebuilt Mesa, relinked, measured. Same console, same binary, same benchmark —
+only the driver's idea of the topology changed.
+
+### The scaling knee doubled
+
+Per-wavefront rate while every wave still has a SIMD to itself: **6.125 GFLOP/s**.
+`%lin` is the measured throughput against that straight line.
+
+| waves | 18-CU config | %lin | 36-CU config | %lin |
+|---|---|---|---|---|
+| 8 | 48.9 | 100% | 49.0 | 100% |
+| 16 | 97.5 | 99% | 97.5 | 99% |
+| 32 | 195.8 | 100% | 194.0 | 99% |
+| 64 | 384.3 | 98% | 384.7 | 98% |
+| **96** | 464.6 | **79%** | 571.2 | **97%** |
+| **128** | 623.8 | **80%** | 769.0 | **98%** |
+| 192 | 689.4 | 59% | 908.5 | 77% |
+| 256 | 739.1 | 47% | 1250.3 | 80% |
+
+Before: linear to 64, broken by 96 → the machine has between 64 and 96 SIMDs.
+**72** (18 CU × 4) is in that bracket; 144 is not.
+
+After: linear all the way to 128, broken by 192 → between 128 and 192 SIMDs.
+**144** (36 CU × 4) is in that bracket; 72 is nowhere near it.
+
+The knee is the measurement that does not care about clock or ALU efficiency —
+those scale the whole curve and leave the knee where it is.
+
+### The plateau and the efficiency agree with it
+
+```
+plateau   950 -> 1830 GFLOP/s   (1.93x)
+
+  18 CU @ 800 MHz: theoretical 1843, measured  950  -> 51.5% efficiency
+  36 CU @ 800 MHz: theoretical 3686, measured 1830  -> 49.6% efficiency
+```
+
+Essentially **identical efficiency on twice the hardware**, which is what
+doubling a compute array looks like and is not what a mislabelled constant looks
+like. It also pins the GPU clock at ~800 MHz rather than the Pro's nominal 911 —
+at 911 the efficiency would have to be 44%, and it would have had to *drop* on
+the larger配置 for no reason.
+
+### Attribution is clean
+
+`/data/orbis-env.txt` was deleted before this run and the probe confirms it:
+
+```
+probe: sceKernelHasNeoMode()=1  sceKernelIsNeoMode()=1
+probe: getenv(ORBIS_NUM_SE) = (null)
+probe: getenv(ORBIS_CHIP)   = (null)
+deviceID          0x9924   <- CHIP_GLADIUS
+shaderEngineCount 4
+=> compute units  36
+```
+
+So the four engines came from Neo detection inside the driver, not from a
+leftover knob.
+
+### The inconsistent raster_config does not break basic rasterisation
+
+`ac_gpu_info.c`'s `CHIP_GLADIUS` entry pairs `0x2a00161a` (a TWO-engine high
+half) with `0x0000002e` (Hawaii's FOUR-engine `SE_PAIR_MAP`), and its comment
+calls the pair internally inconsistent and unresolvable without a Pro. The
+triangle renders correctly on screen with it.
+
+⚠ That is a weak test and should not be read as more. One full-screen triangle
+barely exercises work distribution across shader engines, which is what that
+register governs; upstream describes the failure mode as "quarter-of-the-screen
+shaped". It rules out catastrophic breakage, not misbinning.
+
+### Loose end, honestly unresolved
+
+Setting `ORBIS_NUM_SE=4` through `/data/orbis-env.txt` earlier did **not** change
+`shaderEngineCount`, even though the string is present in the bundled driver and
+`ac_gpu_info.c:1249` assigns `max_se` from it with no clamp. The `getenv`
+read-back that would have separated "our setenv never reached Mesa" from
+"something downstream overrode it" was added to the probe but only ever ran with
+the file absent, so it answered `(null)` and settled nothing. Moot for the fix —
+the driver now decides for itself — but not explained.

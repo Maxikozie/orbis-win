@@ -1,0 +1,71 @@
+diff --git a/src/amd/common/ac_orbis_drm.c b/src/amd/common/ac_orbis_drm.c
+index e4055c6..66ceb29 100644
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -26,6 +26,11 @@
+ #include "ac_gpu_info.h"
+ #include "orbis_tile_tables.h"
+ 
++/* Set by orbis_fill_device_info() before num_shader_engines is chosen; read
++ * only there. File scope because the two decisions sit ~50 lines apart in the
++ * same function and threading a parameter between them would be worse. */
++static bool orbis_is_neo = false;
++
+ #include "util/log.h"
+ #include "util/macros.h"
+ #include "util/os_time.h"
+@@ -6155,7 +6160,37 @@ orbis_query_dev_info(struct drm_amdgpu_info_device *d)
+ 
+    ORBIS_DRM_UNCITED("drm_amdgpu_info_device.device_id", "Liverpool's PCI id is in no oracle; "
+                                                          "it reaches only radeon_info.pci_id");
+-   d->device_id = 0x9920;
++   /* ⚠ GLADIUS (PS4 Pro) — orbis-gladius experiment, 2026-10-06.
++    *
++    * 0x9920 is Liverpool and was unconditional here, so a Pro has always been
++    * reported, and configured, as a base PS4. MEASURED on a Pro in Neo mode
++    * (sceKernelIsNeoMode()==1) with the stock driver: a compute scaling knee
++    * between 64 and 96 wavefronts and a plateau of 950 GFLOP/s, i.e. 72 SIMDs
++    * = 18 CUs — half the part. cu_bitmap is built from num_shader_engines just
++    * below, and RADV programs COMPUTE_STATIC_THREAD_MGMT from cu_bitmap, so
++    * this arm may be MASKING the other half rather than merely mis-naming it.
++    *
++    * sceKernelIsNeoMode() is the title's own Neo state, which is the right
++    * question: a Pro running a non-Neo title genuinely only has 18 CUs, and
++    * reporting 36 there would be a lie that masks nothing and breaks rings.
++    *
++    * ⚠ CHIP_GLADIUS'S raster_config PAIR IS KNOWN-INCONSISTENT. ac_gpu_info.c
++    * carries 0x2a00161a (a TWO-engine high half) with 0x0000002e (Hawaii's
++    * FOUR-engine SE_PAIR_MAP) and says so in its own comment, unresolved for
++    * want of a Pro. If geometry corrupts on screen, that pair is the suspect.
++    *
++    * ORBIS_FORCE_NEO=0/1 overrides the detection, so the A/B needs no rebuild. */
++   {
++      const char *const force = getenv("ORBIS_FORCE_NEO");
++      const bool        neo   = (force != NULL) ? (atoi(force) != 0)
++                                                : (sceKernelIsNeoMode() != 0);
++      d->device_id = neo ? 0x9924u : 0x9920u;
++      orbis_is_neo = neo;
++      mesa_logi("orbis-drm: %s - device_id 0x%04x (%s)%s",
++                neo ? "NEO MODE" : "base mode", d->device_id,
++                neo ? "CHIP_GLADIUS" : "CHIP_LIVERPOOL",
++                force != NULL ? " [forced by ORBIS_FORCE_NEO]" : "");
++   }
+ 
+    /* --- shader array topology. ALL UNCITED, and gnmtune.h:732 says so in the fork's own words:
+     * "the fork cannot cite Liverpool's CU/SIMD topology from any oracle in the stash".
+@@ -6207,8 +6242,14 @@ orbis_query_dev_info(struct drm_amdgpu_info_device *d)
+     * derives - so this is a knob for one measurement, not a new default. And note the standing
+     * contradiction it sits on: GB_ADDR_CONFIG's own NUM_SHADER_ENGINES field reads ONE. */
+    {
++      /* ⚠ FOUR ON A PRO. The Linux-on-PS4 stack reports max_se = 4 for Gladius,
++       * and ac_gpu_info.c's own CHIP_GLADIUS comment says that would make its
++       * raster_config high half wrong rather than its raster_config_1 — the
++       * contradiction it could not settle without the hardware. This is the
++       * side of it we can test. ORBIS_NUM_SE still wins when set. */
+       const char *const se = getenv("ORBIS_NUM_SE");
+-      d->num_shader_engines = se != NULL ? (uint32_t)MAX2(atoi(se), 1) : 2u;
++      const uint32_t    se_default = orbis_is_neo ? 4u : 2u;
++      d->num_shader_engines = se != NULL ? (uint32_t)MAX2(atoi(se), 1) : se_default;
+       if (se != NULL)
+          mesa_logi("orbis-drm: ORBIS_NUM_SE=%u - AN EXPERIMENT. This field is uncited, "
+                    "GB_ADDR_CONFIG says one, and the GSVS ring needs exactly twice what it sizes.",

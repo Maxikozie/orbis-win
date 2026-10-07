@@ -14,3 +14,6 @@ config.env
 
 # Sony firmware modules, extracted from the console. NOT redistributable.
 sce_module/
+
+# local Mesa build tree (498 MB) — scripts/ rebuild it; the patch is in patches/
+mesa-build/
