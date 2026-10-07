@@ -45,6 +45,11 @@ $CC $CFL -DPW_HID_PS5_HOST_TEST   -c "$PW/native/pw_hid_ps5.c"   -o "$OBJ/core_h
 llvm-objcopy --redefine-sym pw_pad_ps5_platform_ops=pw_pad_ps5_platform_ops_unused     "$OBJ/core_pad.o"
 llvm-objcopy --redefine-sym pw_audio_ps5_platform_ops=pw_audio_ps5_platform_ops_unused "$OBJ/core_audio.o"
 
+# The PRX loader belongs to the TITLE, not to a module: it is what loads the
+# modules, so it cannot be imported from one.
+say "compile: the PRX loader"
+$CC $CFL -I"$PW/wine/ps5" -c "$PW/wine/ps5/pw_wine_prx.c" -o "$OBJ/pw_wine_prx.o"
+
 say "compile: this port's platform layer"
 for f in "$ROOT"/src/native/pw_videoout_ps4.c "$ROOT"/src/native/pw_pad_ps4.c \
          "$ROOT"/src/native/pw_audio_ps4.c "$ROOT"/src/native/pw_platform_bind_ps4.c; do
@@ -52,15 +57,25 @@ for f in "$ROOT"/src/native/pw_videoout_ps4.c "$ROOT"/src/native/pw_pad_ps4.c \
 done
 
 say "link"
-[ -f "$PRX/stubs/ntdll.so" ] || { echo "run scripts/prx-ps4.sh first" >&2; exit 1; }
-$CC -o "$OBJ/../wine_app.elf" "$OBJ"/*.o -L"$PRX/stubs" "$PRX/stubs/ntdll.so" \
+# ⚠ DO NOT LINK AGAINST ntdll. The title resolves Wine's entry points at RUNTIME
+# through its own PRX loader (src/pw_wine_start.c: pw_prx_lookup(descriptor,
+# "__wine_main")), so a link-time dependency is wrong in both directions:
+#
+#   - the console does not auto-load /app0/sce_module/*.prx for a DT_NEEDED on
+#     a non-Sony module, so the title died at load with
+#     0xa0020101 PRX_NOT_RESOLVED_FUNCTION having loaded none of our nine;
+#   - every PRX carries orbis-compat and libc++ whole-archive, so linking the
+#     stub silently bound the title's 212 C++ runtime imports (_ZNSt3__1...,
+#     _Unwind_*) to ntdll.prx instead of to the SDK's own runtime.
+#
+# Measured on hardware 2026-10-07. The title must depend on Sony libraries only.
+$CC -o "$OBJ/../wine_app.elf" "$OBJ"/*.o \
     -lSceNet -lSceAudioOut -lSceSystemService -lSceVideoOut -lScePad -lSceUserService
 printf '   elf %s\n' "$(du -h "$OBJ/../wine_app.elf" | cut -f1)"
 
 say "eboot"
 "$BUNDLE/sdk/bin/linux/create-fself" -in "$OBJ/../wine_app.elf" \
-    -out "$OBJ/../wine_app.oelf" -eboot "$OBJ/../eboot.bin" \
-    -library-path "$PRX/stubs" >/dev/null
+    -out "$OBJ/../wine_app.oelf" -eboot "$OBJ/../eboot.bin" >/dev/null
 printf '   eboot.bin %s\n' "$(du -h "$OBJ/../eboot.bin" | cut -f1)"
 
 if (( PKG )); then

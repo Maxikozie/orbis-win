@@ -1932,3 +1932,33 @@ appears to make one.
 **Consequence: a title should not return from main.** Harmless in a probe that
 has already printed everything, but the real title must not unwind out of
 `main` and expect a clean exit.
+
+## The title must not link against ntdll (2026-10-07, measured)
+
+First run of GLDS10005 on hardware died at load:
+
+    # exception: 0xa0020101 (PRX_NOT_RESOLVED_FUNCTION)
+
+and the loaded-module list contained **none of our nine PRX modules** -- only
+Sony's `libc.prx` and `libSceFios2.prx`.
+
+Two mistakes, both from linking the title against `prx/stubs/ntdll.so`:
+
+1. **The console does not auto-load `/app0/sce_module/*.prx` to satisfy a
+   DT_NEEDED on a non-Sony module.** Sony's own modules load; ours did not, so
+   every symbol the title imported from `ntdll.prx` was unresolved before
+   `main()`.
+2. **The dependency should not exist at all.** prospero-win resolves Wine's
+   entry points at RUNTIME through its own loader --
+   `src/pw_wine_start.c`: `pw_prx_lookup(descriptor, "__wine_main")` -- so the
+   title loads the modules itself and looks symbols up by name.
+
+Worse, the stub link was silently binding the wrong things: the title's 212
+undefined symbols were **C++ runtime** (`_ZNSt3__1...`, `_Unwind_*`, `_Exit`),
+not Wine at all. Every PRX carries orbis-compat and libc++ whole-archive, so
+the linker happily resolved the title's C++ runtime out of `ntdll.prx` instead
+of the SDK's. The title now links against Sony libraries only.
+
+One real dependency came out of this: `wine/ps5/pw_wine_prx.c` -- the PRX
+loader -- has to be compiled **into the title**. It is what loads the modules,
+so it cannot be imported from one.
