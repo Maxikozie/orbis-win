@@ -1840,3 +1840,27 @@ measured it.
   overflow can still report** -- directly relevant to our fault-handler work.
 - Their `probe/probe.c` covers firmware, Neo mode, CPU/TSC clocks and boot
   memory pools.
+
+## GoldHEN dies on ANY stray write to its FTP port (2026-10-07)
+
+Known already: lftp's anonymous login kills GoldHEN. Today's addition is that it
+is not the *login* that does it -- **one unexpected byte is enough**.
+
+    echo > /dev/tcp/10.168.2.52/2121     # kills it
+
+That opens the control socket and writes a newline. Both GoldHEN services (FTP
+2121 and klog 3232) stopped accepting connections immediately afterwards while
+the console kept pinging -- the same signature as the lftp failure.
+
+The safe idioms, both already used by `scripts/preflight.sh` and
+`scripts/arm.sh`, open the socket and send **nothing**:
+
+    exec 3<>/dev/tcp/HOST/PORT          # bash, connect only
+    socket.create_connection(...)        # python, connect only
+
+⚠ So: **probe the console with `scripts/preflight.sh`, never with an ad-hoc
+shell one-liner.** The repo's scripts were already correct here; this was a
+hand-rolled check run around them. `preflight.sh` also carries a standing
+warning against probing the klog port at all, for the same reason.
+
+Recovery is manual: relaunch GoldHEN from the console.

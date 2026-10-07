@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Put a package on the console, without lftp.
 #
-#   scripts/deploy.sh {hello|triangle|probe}
+#   scripts/deploy.sh {hello|triangle|probe|present|fault|wine-app}
 #
 # The bundle's own deploy.sh drives lftp, and lftp's login sequence kills
 # GoldHEN's FTP server — see docs/FINDINGS.md. scripts/ftp-put.py sends only
@@ -17,7 +17,9 @@ case "$TARGET" in
   triangle) TITLE_ID=GLDS10001 ;;
   probe)    TITLE_ID=GLDS10002 ;;
   present)  TITLE_ID=GLDS10003 ;;
-  *) die "usage: deploy.sh {hello|triangle|probe|present}" ;;
+  fault)    TITLE_ID=GLDS10004 ;;
+  wine-app) TITLE_ID=GLDS10005 ;;
+  *) die "usage: deploy.sh {hello|triangle|probe|present|fault|wine-app}" ;;
 esac
 
 # readlink -f: make-pkg.sh leaves <TITLE_ID>.pkg as a symlink, and sizing the
