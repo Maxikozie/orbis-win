@@ -110,6 +110,22 @@ int main(void)
     else
         say("probe: applied %d setting(s) from /data/orbis-env.txt", applied);
 
+    /* ⚠ NEO MODE IS THE WHOLE QUESTION ON A PRO.
+     *
+     * A PS4 Pro runs a title as a base PS4 unless the title declares NEO
+     * support — param.sfo ATTRIBUTE bit 24, 0x00800000. In base mode the extra
+     * compute units are not there to be found: the GPU answers device id 0x9920
+     * (CHIP_LIVERPOOL) and reports 2 SE x 1 SA x 9 CU = 18, which is exactly
+     * what this probe saw on its first run against a Pro.
+     *
+     *   HasNeoMode  the CONSOLE is a Pro
+     *   IsNeoMode   THIS TITLE got Neo mode
+     *
+     * Both matter: 1/0 means the package is the problem, 0/0 means something
+     * else entirely. */
+    say("probe: sceKernelHasNeoMode()=%d  sceKernelIsNeoMode()=%d",
+        (int)sceKernelHasNeoMode(), (int)sceKernelIsNeoMode());
+
     VkApplicationInfo app = {
         .sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "gladius-probe",

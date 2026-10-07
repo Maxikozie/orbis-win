@@ -337,3 +337,107 @@ a failure that reads as a successful run with no output.
 than building something that cannot boot.
 
 Packages rebuilt and re-uploaded: triangle and probe grew 27,394,048 → 27,525,120 B.
+
+---
+
+## 2026-10-06 — RADV RENDERS ON THE PRO. And the Pro is running as a base PS4.
+
+Stage 1 is done. `hello` prints and `triangle` draws:
+
+```
+orbis-sdk bundle: hello
+orbis-sdk bundle: all checks passed
+
+orbis-sdk bundle: triangle
+triangle: ok   vkCreateInstance
+triangle: ok   vkCreateHeadlessSurfaceEXT
+triangle: GPU 'PlayStation 4 Liverpool (RADV ORBIS) (RADV LIVERPOOL)', api 1.3.359, driver 0x06802063
+triangle: queue family 0 renders and presents
+triangle: ok   vkCreateDevice
+triangle: surface 1920x1080, format 37, 4..0 images
+triangle: ok   vkCreateSwapchainKHR    ... swapchain has 4 images
+triangle: ok   vkCreateGraphicsPipelines
+triangle: setup complete - presenting
+triangle: frame 1024 presented
+```
+
+Every call checked and named, a pipeline compiled from SPIR-V, 1024+ frames at
+1920x1080. **`api 1.3.359` — Vulkan 1.3**, not the 1.1 the gfx7 framing led me
+to expect.
+
+⚠ `hello`'s black screen is CORRECT and I should have said so in advance. Both
+examples end in `for (;;) sleep(1)` deliberately: returning from `main()` on this
+console is reported as CE-34878-0 and reads exactly like a crash. `hello` draws
+nothing, so black is the right picture.
+
+### The probe's answer: 18 compute units, device id 0x9920
+
+```
+probe: 197 device extensions, VK_AMD_shader_core_properties present
+deviceName        PlayStation 4 Liverpool (RADV ORBIS) (RADV LIVERPOOL)
+vendorID          0x1002
+deviceID          0x9920
+shaderEngineCount        2      <- max_se
+shaderArraysPerEngine    1      <- max_sa_per_se
+computeUnitsPerShaderArr 9      <- num_cu_per_sh
+=> compute units         18
+simdPerComputeUnit       4   wavefrontsPerSimd 10   wavefrontSize 64
+heap 0  661 MB host      heap 1  1322 MB device-local
+family 0  1 queue(s) graphics compute transfer
+```
+
+`ac_gpu_info.c` maps `0x9920/0x9922/0x9923 -> CHIP_LIVERPOOL` and `0x9924 ->
+CHIP_GLADIUS`. The console answered **0x9920**, and the topology is exactly the
+Liverpool baseline — 2 SE, 1 SA, 9 CU/SA.
+
+**This is not a driver bug. The title was never given the Pro.**
+
+### ⚠ Root cause: param.sfo ATTRIBUTE bit 24
+
+A PS4 Pro runs a title in base-PS4 compatibility mode unless the title declares
+NEO support: `param.sfo` `ATTRIBUTE` flag 24, `0x00800000` (8388608). In base
+mode the extra compute array is simply not there to be enumerated — the GPU
+answers Liverpool's device id and reports 18 CUs, which is precisely what we
+measured.
+
+`make-pkg.sh` writes `sfo_set ATTRIBUTE Integer 4 0`. Every package this project
+has built so far has been a base-PS4 package.
+
+`build.sh --neo` now sets it. make-pkg.sh takes no `--attribute`, so the staged
+SFO is edited afterwards and the package rebuilt from the gp4 make-pkg.sh
+already wrote — reusing its file list rather than composing a second one.
+
+Verified by parsing the SFO out of the uploaded package's bytes rather than
+trusting the tool, because `PkgTool.Core` has already been seen to fail and exit
+0 once this session:
+
+```
+param.sfo magic at 0x3db0
+  APP_TYPE     = 0x1
+  ATTRIBUTE    = 0x800000
+  TITLE_ID     = GLDS10002
+```
+
+⚠ `pkg_extract` will not show you this: it unpacks the inner PFS (`uroot/`)
+only, and `param.sfo` is a PKG entry rather than a PFS file.
+
+The SDK also exposes `sceKernelHasNeoMode()` (is the CONSOLE a Pro) and
+`sceKernelIsNeoMode()` (did THIS TITLE get Neo mode). probe.c now prints both,
+so the next run distinguishes "package was wrong" from anything else.
+
+### Still unknown
+
+Whether the attribute alone is sufficient. It may also need the eboot built with
+a Neo flag, or an explicit `sceKernelSwitchToNeoMode()` call. The two
+`sceKernel*NeoMode` readings will say which.
+
+### Logging note
+
+GoldHEN's klog server **replays its buffer on connect**, so reconnecting after a
+run still yields the whole run. That is how the triangle output above was
+recovered after the receiver had gone stale.
+
+And the receiver does go stale: the console suspended at 19:28:48
+(`State Change: SUSPEND_ON_GOING`, `HW Indicator: Orange Blink`) and the socket
+stayed ESTAB while delivering nothing. Check that the log is still growing, not
+that the connection still exists.

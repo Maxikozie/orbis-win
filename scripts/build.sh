@@ -27,14 +27,15 @@ case "$TARGET" in
   hello)    TITLE_ID=GLDS10000; TITLE="Gladius Hello";    SRC="$BUNDLE/examples/hello" ;;
   triangle) TITLE_ID=GLDS10001; TITLE="Gladius Triangle"; SRC="$BUNDLE/examples/triangle" ;;
   probe)    TITLE_ID=GLDS10002; TITLE="Gladius Probe";    SRC="$ROOT/src/probe" ;;
-  *) die "usage: build.sh {hello|triangle|probe} [--pkg] [--deploy]" ;;
+  *) die "usage: build.sh {hello|triangle|probe} [--pkg] [--deploy] [--neo]" ;;
 esac
 
-PKG=0; DEPLOY=0
+PKG=0; DEPLOY=0; NEO=0
 for a in "$@"; do
   case "$a" in
     --pkg)    PKG=1 ;;
     --deploy) PKG=1; DEPLOY=1 ;;
+    --neo)    NEO=1 ;;
     *) die "unknown option: $a" ;;
   esac
 done
@@ -112,6 +113,34 @@ if (( PKG )); then
 
   "$PS4_SCRIPTS/make-pkg.sh" --eboot "$BUILD/eboot.bin" --out-dir "$OUT" \
       --title-id "$TITLE_ID" --title "$TITLE" "${EXTRA_FILES[@]}"
+
+  # ⚠ NEO MODE. make-pkg.sh writes ATTRIBUTE=0, and a PS4 Pro runs any title
+  # without ATTRIBUTE bit 24 (0x00800000) as a base PS4: 18 CUs, device id
+  # 0x9920, Liverpool. Measured on hardware 2026-10-06 — see docs/FINDINGS.md.
+  #
+  # make-pkg.sh takes no --attribute, so the staged SFO is edited afterwards and
+  # the package rebuilt from the gp4 make-pkg.sh already wrote. Reusing its gp4
+  # rather than composing our own keeps the file list in one place.
+  if (( NEO )); then
+    say "neo mode: ATTRIBUTE=0x00800000"
+    STAGE="$OUT/pkg-stage"
+    PKGTOOL="$BUNDLE/sdk/bin/linux/PkgTool.Core"
+    export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+    ossl="${XDG_CACHE_HOME:-$HOME/.cache}/orbis-ports/openssl11/lib"
+    [[ -d $ossl ]] && export LD_LIBRARY_PATH="$ossl${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+    "$PKGTOOL" sfo_setentry "$STAGE/sce_sys/param.sfo" ATTRIBUTE \
+        --type Integer --maxsize 4 --value 8388608 > /dev/null
+    # ⚠ READ IT BACK. PkgTool.Core has already been seen to fail and exit 0
+    # ("No usable version of libssl was found"), so a silent no-op here would
+    # produce a package that looks Neo-enabled and is not.
+    "$PKGTOOL" sfo_listentries "$STAGE/sce_sys/param.sfo" 2>/dev/null |
+      grep -i attribute || true
+    ( cd "$STAGE" && "$PKGTOOL" pkg_build pkg.gp4 . > pkg-build-neo.log 2>&1 ) ||
+      { cat "$STAGE/pkg-build-neo.log" >&2; die "neo repackage failed"; }
+    cp -f "$STAGE"/*.pkg "$OUT"/ 2>/dev/null || true
+    say "repackaged with neo attribute"
+  fi
 fi
 
 if (( DEPLOY )); then
