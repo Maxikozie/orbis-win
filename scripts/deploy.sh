@@ -16,7 +16,8 @@ case "$TARGET" in
   hello)    TITLE_ID=GLDS10000 ;;
   triangle) TITLE_ID=GLDS10001 ;;
   probe)    TITLE_ID=GLDS10002 ;;
-  *) die "usage: deploy.sh {hello|triangle|probe}" ;;
+  present)  TITLE_ID=GLDS10003 ;;
+  *) die "usage: deploy.sh {hello|triangle|probe|present}" ;;
 esac
 
 # readlink -f: make-pkg.sh leaves <TITLE_ID>.pkg as a symlink, and sizing the

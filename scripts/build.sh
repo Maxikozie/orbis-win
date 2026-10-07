@@ -27,7 +27,8 @@ case "$TARGET" in
   hello)    TITLE_ID=GLDS10000; TITLE="Gladius Hello";    SRC="$BUNDLE/examples/hello" ;;
   triangle) TITLE_ID=GLDS10001; TITLE="Gladius Triangle"; SRC="$BUNDLE/examples/triangle" ;;
   probe)    TITLE_ID=GLDS10002; TITLE="Gladius Probe";    SRC="$ROOT/src/probe" ;;
-  *) die "usage: build.sh {hello|triangle|probe} [--pkg] [--deploy] [--neo] [--dev-mesa]" ;;
+  present)  TITLE_ID=GLDS10003; TITLE="Prospero Presenter"; SRC="$ROOT/src/present-test" ;;
+  *) die "usage: build.sh {hello|triangle|probe|present} [--pkg] [--deploy] [--neo] [--dev-mesa]" ;;
 esac
 
 PKG=0; DEPLOY=0; NEO=0; DEVMESA=0
