@@ -60,6 +60,22 @@ different questions on purpose — `hello` proves the bundle is laid out right w
 nothing else able to fail, `triangle` proves the graphics stack reaches the
 screen. One example doing both would report a driver fault as a layout fault.
 
+## Titles
+
+What each build target is called on the console. `build.sh` and `deploy.sh` take
+the left-hand name; the home screen shows the right-hand one.
+
+| target | title ID | on the device |
+|---|---|---|
+| `hello` | GLDS10000 | Gladius Hello |
+| `triangle` | GLDS10001 | Gladius Triangle |
+| `probe` | GLDS10002 | Gladius Probe |
+| `present` | GLDS10003 | Prospero Presenter |
+
+Read them back out of a built package with the SFO parser in `docs/FINDINGS.md`
+rather than trusting this table — an installed title keeps the name it was
+installed with, so a stale install can disagree.
+
 ## Scripts
 
 | | |
