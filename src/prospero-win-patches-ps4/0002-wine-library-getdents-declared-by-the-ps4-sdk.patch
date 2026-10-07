@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] native: the PS4 SDK already declares getdents.
+
+prospero-win declares getdents itself because the PS5 SDK does not. The
+OpenOrbis PS4 SDK declares it in <dirent.h> as
+
+    int getdents(int, struct dirent *, size_t);
+
+so the local declaration is a conflicting type rather than a missing one.
+Extend the existing !__linux__ guard to exclude PS4 and cast the buffer at the
+call site; it is the same syscall either way.
+---
+diff --git a/native/pw_wine_library.c b/native/pw_wine_library.c
+index a2b28e3..e1fb5c1 100644
+--- a/native/pw_wine_library.c
++++ b/native/pw_wine_library.c
+@@ -8,7 +8,10 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include <dirent.h>
+-#ifndef __linux__
++/* The PS4 SDK declares getdents in <dirent.h> as
++ *   int getdents(int, struct dirent *, size_t);
++ * so redeclaring it here is a conflicting type rather than a missing one. */
++#if !defined(__linux__) && !defined(__PS4__)
+ int getdents(int fd, char *buffer, int size);
+ #endif
+ 
+@@ -112,7 +115,11 @@ static int scan_getdents(PwWineLibrary *library, const char *directory)
+     int fd = open(directory, O_RDONLY | O_DIRECTORY), got, error;
+ 
+     if (fd < 0) return -1;
++    #if defined(__PS4__)
++    while ((got = (int)getdents(fd, (struct dirent *)buffer, sizeof(buffer))) > 0)
++#else
+     while ((got = getdents(fd, (char *)buffer, sizeof(buffer))) > 0)
++#endif
+         if (pw_wine_library_dirents(buffer, (size_t)got, add_name, library) < 0) {
+             errno = EINVAL;
+             got = -1;

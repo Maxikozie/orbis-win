@@ -1715,3 +1715,60 @@ out to work, set the switch to 0 and the arm drops out entirely.
 
 The probe reads only named offsets and trusts nothing until `mc_len` reads 800
 -- the earlier signal probe scanned a range and took the title down.
+
+## The title itself builds for PS4 (2026-10-07)
+
+`GLDS10005` "Prospero Wine" -- `scripts/build-app-ps4.sh`, packaged at
+`pkgout/wine-app/`, 10 MB, Neo attribute set, carrying all eight Wine PRX
+modules in `sce_module/`.
+
+Upstream builds the title with `tools/build_native.sh` against
+`.deps/ps5-native-app-boilerplate`, which is PS5-only -- but **the title's entry
+point is in the repo, not the boilerplate** (`native/wine64_main.c`, 1411
+lines). The boilerplate only supplies PS5 packaging, which this port already
+replaced. So the app was never actually gated on it.
+
+**12 of the 13 files in `native/` compile for PS4 unmodified**, `wine64_main.c`
+included. The one failure was `getdents`, declared locally because the PS5 SDK
+omits it where the PS4 SDK declares it with `struct dirent *` and `size_t` --
+the same shape as the `ptrace` conflict
+(`src/prospero-win-patches-ps4/0002-*.patch`).
+
+### What the binding file does
+
+`src/native/pw_platform_bind_ps4.c` joins the contract to this port. The title
+calls `pw_*_ps5_*`; our implementations are named `pw_*_ps4_*` because they were
+written as standalone titles first. Upstream's pad/audio/hid cores compile with
+their `*_HOST_TEST` guards so the PS5 vtables drop out, and the vtable entry
+points land in the binding file instead.
+
+⚠ `*_HOST_TEST` does **not** remove `platform_ops` -- it keeps it as a stub
+returning `PW_ERR_UNSUPPORTED`, so the symbol still collides. The build renames
+those two stubs aside with `llvm-objcopy --redefine-sym` rather than patching
+upstream.
+
+Video out needed a real adapter, not an alias: the contract's `PwVideoOutPs5`
+carries `PwAgcPs5` state that the linear-scanout path has no equivalent for, and
+its `present()` hand-rolls layout, background fill and a scaled blit through the
+tiling tables. On PS4 that is exactly what the portable compositor already
+writes, so `present()` is `pw_present_frame_from_view` +
+`pw_videoout_ps4_present_scaled`, and the device state stays ours -- the
+caller's struct is only a handle, never read by the title.
+
+Not ported, and explicitly stubbed rather than left undefined so the title
+starts and says so: **HID** (keyboard/mouse over USB -- the DualShock 4 arrives
+through the pad path, which is ported) and **Lapy elevation** (a PS5 privilege
+path; a PS4 title under GoldHEN already has what it needs).
+
+### ⚠ What this package is NOT yet
+
+It boots the launcher and exercises module loading. It cannot run a Windows
+game: **the package carries no Wine prefix and no PE tree**. The build produces
+16 patched PE DLLs (`i386-windows/` and `x86_64-windows/`) but a prefix needs
+the whole Wine PE side plus NLS data, and `wowprospero.dll` -- the WoW64 CPU
+backend, from `wine/wowprospero` via `tools/build_wowprospero.sh` -- is not
+built yet either. Four of upstream's thirteen modules are still missing:
+`wowprospero`, `wineps5`, `libfreetype`, `libvulkan`, `xinput1_3`.
+
+So the first run tests: does the eboot start, does `ntdll.prx` load, does the
+launcher render, and does the fault path survive -- not whether a game runs.
