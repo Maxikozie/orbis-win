@@ -29,18 +29,18 @@ struct pw_fbsd_mcontext {
     uint32_t mc_flags;
     uint16_t mc_es, mc_ds;
     int64_t  mc_err, mc_rip, mc_cs, mc_rflags, mc_rsp, mc_ss;
-    int64_t  mc_len;              /* sizeof(mcontext_t) */
-    int64_t  mc_fpformat;
-    int64_t  mc_ownedfp;
-    /* No mc_spare1 here. Later FreeBSD carries one "to align the next field to
-     * 16 bytes", but in this layout mc_ownedfp ends at 224, which is already
-     * 16-aligned -- adding it pushes mc_fpstate to 240 and makes the struct
-     * 816. The registers above are corroborated offset-for-offset by
-     * nx-on-orbis; this tail is pinned by the total instead, since mc_len must
-     * read 800 and only this arrangement gives it. */
-    int64_t  mc_fpstate[64] __attribute__((aligned(16)));
-    int64_t  mc_fsbase, mc_gsbase;
-    int64_t  mc_spare2[6];
+    int64_t  mc_len;              /* 200 — sizeof(mcontext_t): 1152 HERE, not
+                                   * FreeBSD 9's 800. MEASURED on hardware
+                                   * 2026-10-07 (GLDS10004). */
+    int64_t  mc_fpformat;         /* 208 */
+    int64_t  mc_ownedfp;          /* 216 */
+    /* 224..1151 — the FPU save area and spare words. Orbis's mcontext is 352
+     * bytes larger than FreeBSD 9's (1152 vs 800), almost certainly a wider
+     * xsave area. The split is unmeasured and nothing in this port reads past
+     * mc_ownedfp, so it is one opaque block: what matters is that the struct
+     * is the right SIZE, so mc_len validates and anything embedding it is
+     * laid out correctly. */
+    uint8_t  mc_tail[1152 - 224];
 };
 
 /* ⚠ THE OFFSET IS THE ONE THING STILL UNMEASURED ON THIS CONSOLE.

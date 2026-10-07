@@ -1864,3 +1864,71 @@ hand-rolled check run around them. `preflight.sh` also carries a standing
 warning against probing the klog port at all, for the same reason.
 
 Recovery is manual: relaunch GoldHEN from the console.
+
+## The fault path and the mcontext, MEASURED (2026-10-07, GLDS10004)
+
+Two assumptions baked into this port were wrong. Both are now settled on
+hardware by `src/fault-probe`, which faults once under each mechanism on its
+own PROT_NONE page and recovers by mprotecting it so the instruction retries.
+
+### sigaction DOES receive faults on PS4
+
+    sony handler  : receives faults
+    sigaction     : receives faults
+
+Both fired. nx-on-orbis's *"faults never reach sigaction there"* does **not**
+hold on this console -- their trouble was presumably specific to dynarmic's
+handler rather than a platform limit. So patch 0883's PS4 arm is left in place
+but **off** (`PW_PS4_FAULTS_VIA_SONY 0`): upstream's sigaction path works and
+staying on it keeps the divergence smaller. `ntdll` no longer imports
+`sceKernelInstallExceptionHandler` at all.
+
+⚠ This is the second time a finding borrowed from that project did not survive
+contact with our console. Their offset was right; this was not. Borrowed facts
+are a reason to measure, not a substitute for it.
+
+### The mcontext is at +64 and is 1152 bytes, not 800
+
+`mc_len` read at eight candidate bases, and exactly one is plausible:
+
+    base +0   -> 8593489920
+    base +8   -> 16607277028999169
+    base +16  -> 6                  (FreeBSD's own offset: garbage)
+    base +32  -> 67
+    base +48  -> 34074504448
+    base +64  -> 1152               <-- plausible
+    base +80  -> 131073
+    base +96  -> 4218358
+
+So +64 is confirmed, but **Orbis's mcontext_t is 1152 bytes** where FreeBSD 9's
+is 800 -- 352 bytes larger, almost certainly a wider xsave area.
+`struct pw_fbsd_mcontext` now carries an opaque `mc_tail` to that size; nothing
+in the port reads past `mc_ownedfp`, so only the total needed fixing.
+
+**The register block is byte-for-byte FreeBSD 9's**, confirmed field by field:
+
+    mc_trapno  = 12            T_PAGEFLT
+    mc_fs/mc_gs= 0x13 / 0x1b   valid selectors
+    mc_addr    = 0x200364000   EXACTLY the faulting page
+    mc_rip     = 0x405dfd      inside the eboot's text
+
+(The probe's first report of `mc_trapno` as 7599905975566348 was its own bug:
+it read 8 bytes at a 4-byte field, packing trapno|fs|gs together. 0x001b0013_0000000c
+decodes to exactly the three values above -- which is itself a confirmation.)
+
+### ⚠ Returning from main raises SIGSYS
+
+Both runs ended the same way after `=== done ===`:
+
+    # A user thread receives a fatal signal
+    # signal: 12 (SIGSYS)        rip: 0x8000028bc
+
+Restoring the handlers before returning did not prevent it, so it is not ours:
+`rip` is outside the eboot, in a library, and SIGSYS is a rejected system call
+-- the kernel kills a title that executes a syscall instruction outside
+libkernel (the same rule patch 0690 is about). The static libc's exit path
+appears to make one.
+
+**Consequence: a title should not return from main.** Harmless in a probe that
+has already printed everything, but the real title must not unwind out of
+`main` and expect a clean exit.

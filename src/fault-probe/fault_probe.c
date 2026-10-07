@@ -74,11 +74,23 @@ static uint64_t rd(const void *base, size_t off)
 /* Record from inside the handler. mc_len is read at both candidate offsets and
  * is the gate: the registers are only read if it says 800, so a wrong offset
  * reports nonsense in one number instead of four plausible-looking ones. */
+/* mc_len read at each candidate base, so the base is pinned by which one holds
+ * a plausible struct size rather than by assuming a value. Every offset here is
+ * inside the context (the smallest candidate base plus MC_LEN is 200 bytes in,
+ * and mc_len itself says the struct runs to 1152) -- this does not scan. */
+static uint64_t len_at[8];
+static const size_t bases[8] = { 0, 8, 16, 32, 48, 64, 80, 96 };
+
 static void record(const void *uc)
 {
+    for (unsigned i = 0; i < 8; i++) len_at[i] = rd(uc, bases[i] + MC_LEN);
     len_at_64 = rd(uc, MC_AT_64 + MC_LEN);
     len_at_16 = rd(uc, MC_AT_16 + MC_LEN);
-    if (len_at_64 == 800) {
+    /* A real mcontext_t is a few hundred bytes to a few KiB and 16-byte
+     * aligned. FreeBSD 9 says 800; this console answered 1152, so gate on
+     * plausibility, not on one expected number -- the previous run refused to
+     * print any register because of that. */
+    if (len_at_64 >= 256 && len_at_64 <= 8192 && (len_at_64 % 16) == 0) {
         seen_trapno = rd(uc, MC_AT_64 + MC_TRAPNO);
         seen_addr   = rd(uc, MC_AT_64 + MC_ADDR);
         seen_rip    = rd(uc, MC_AT_64 + MC_RIP);
@@ -132,11 +144,12 @@ int main(void)
     say("  returned from the faulting store");
     say("  sony handler fired : %s", sony_fired ? "YES" : "no");
     if (sony_fired) {
-        say("  mc_len at +64      : %llu   %s", (unsigned long long)len_at_64,
-            len_at_64 == 800 ? "<-- 800, offset 64 CONFIRMED" : "<-- NOT 800");
-        say("  mc_len at +16      : %llu   (the offset we assumed before)",
-            (unsigned long long)len_at_16);
-        if (len_at_64 == 800) {
+        say("  mc_len by base     : (a plausible struct size pins the mcontext)");
+        for (unsigned i = 0; i < 8; i++)
+            say("    base +%-3zu -> %llu%s", bases[i], (unsigned long long)len_at[i],
+                (len_at[i] >= 256 && len_at[i] <= 8192 && (len_at[i] % 16) == 0)
+                    ? "   <-- plausible" : "");
+        if (len_at_64 >= 256 && len_at_64 <= 8192 && (len_at_64 % 16) == 0) {
             say("  mc_trapno          : %llu", (unsigned long long)seen_trapno);
             say("  mc_addr            : 0x%llx  (page was 0x%llx)",
                 (unsigned long long)seen_addr, (unsigned long long)(uintptr_t)page_sony);
@@ -163,11 +176,18 @@ int main(void)
     say("  returned from the faulting store");
     say("  posix handler fired: %s", posix_fired ? "YES" : "no");
 
+    /* ⚠ Put SIGSEGV back before returning. The first run printed "=== done ==="
+     * and then took "a user thread receives a fatal signal" at exit, with this
+     * handler still installed over a page it no longer owns. */
+    sigaction(SIGSEGV, &old, NULL);
+    sceKernelRemoveExceptionHandler(PROBE_SIGSEGV);
+
     say("");
     say("=== VERDICT ===");
     say("  sony handler  : %s", sony_fired  ? "receives faults" : "does NOT");
     say("  sigaction     : %s", posix_fired ? "receives faults" : "does NOT");
-    say("  mcontext at 64: %s", len_at_64 == 800 ? "confirmed (mc_len 800)" : "NOT confirmed");
+    say("  mcontext at 64: mc_len = %llu%s", (unsigned long long)len_at_64,
+        (len_at_64 >= 256 && len_at_64 <= 8192 && (len_at_64 % 16) == 0) ? " (plausible)" : " (implausible)");
     if (posix_fired)
         say("  => prospero-win's sigaction fault path works as-is on PS4.");
     else

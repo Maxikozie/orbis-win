@@ -11,9 +11,19 @@ it, building the siginfo Wine's handlers expect -- si_addr is the only member
 the fault paths read, and it is mc_addr in the FreeBSD mcontext. Every other
 signal still goes to sigaction, and pw_native_sigaction stays the only seam.
 
-Unverified on hardware: title GLDS10004 (src/fault-probe) faults once under
-each mechanism and reports which caught it. Set PW_PS4_FAULTS_VIA_SONY to 0 to
-drop this arm entirely.
+MEASURED 2026-10-07 (GLDS10004, src/fault-probe): BOTH mechanisms deliver the
+fault on PS4 -- sigaction fired exactly as the Sony handler did. nx-on-orbis's
+"faults never reach sigaction there" does not hold on this console; their
+trouble was presumably specific to dynarmic rather than a platform limit. So
+the arm is left in place but OFF (PW_PS4_FAULTS_VIA_SONY 0): upstream's
+sigaction path works, and staying on it keeps the divergence smaller. Set the
+switch to 1 to route the five fault signals through Sony's handler instead.
+
+The same run pinned the mcontext: at ucontext+64 mc_len reads 1152 -- the only
+plausible value of eight candidate bases -- and the register block is
+byte-for-byte FreeBSD 9's, confirmed by mc_trapno 12 (T_PAGEFLT), mc_addr
+matching the faulting page exactly and mc_rip landing in the eboot's text.
+Orbis's mcontext is simply larger than FreeBSD 9's 800 bytes.
 diff --git a/dlls/ntdll/unix/native_libkernel_resolver.c b/dlls/ntdll/unix/native_libkernel_resolver.c
 new file mode 100644
 index 0000000000..26b2bfa879
@@ -139,7 +149,7 @@ index ee772086d0..1562eac131 100644
 + */
 +#if defined(__PS4__)
 +#ifndef PW_PS4_FAULTS_VIA_SONY
-+#define PW_PS4_FAULTS_VIA_SONY 1
++#define PW_PS4_FAULTS_VIA_SONY 0
 +#endif
 +#endif
 +
