@@ -42,6 +42,8 @@ typedef struct PwVideoOutPs4 {
      * them: a close that half-succeeds is a different bug from one that fails
      * at the first step, and the numbers say which. */
     int unregister_rc, close_rc, munmap_rc, release_rc;
+    /* Which user id opened the output, and what 0xFF returned if it did not. */
+    int32_t open_user, open_rc_system;
 } PwVideoOutPs4;
 
 int pw_videoout_ps4_open(PwVideoOutPs4 *);

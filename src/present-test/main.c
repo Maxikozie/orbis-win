@@ -83,6 +83,39 @@ int main(void)
     }
     say("present: %zu bytes mapped, %u buffers of %zu",
         video.bytes, PW_VIDEOOUT_PS4_BUFFERS, video.frame_bytes);
+    say("present: opened with user 0x%x%s", (unsigned)video.open_user,
+        video.open_rc_system ? " (0xFF was refused, fell back)" : "");
+
+    /* ⚠ READ THE SURFACE BACK BEFORE TRUSTING THE SCREEN. A black television
+     * is the same picture whether the compositor wrote nothing, wrote the
+     * wrong thing, or wrote correctly into memory the display never scans. One
+     * dump separates the first from the other two, and costs one frame. */
+    {
+        PwPresentTarget probe_target;
+        if (pw_videoout_ps4_acquire(&video, &probe_target) == PW_OK) {
+            PwPresentPlacement placement;
+            int rc = pw_present_scale(&frame, PW_PRESENT_SCALE_INTEGER,
+                                      BGRX(24, 24, 32), &probe_target, &placement);
+            say("present: compose -> %d, placed %ux%u at %u,%u scale %u", rc,
+                placement.shown_width, placement.shown_height,
+                placement.left, placement.top, placement.scale);
+            const uint8_t *px = probe_target.pixels;
+            /* Row 0 is the dark surround; the row the white bar lands on is
+             * placement.top. Both are named so a wrong one is obvious. */
+            say("present: surround px[0] = %02x %02x %02x %02x (expect 20 18 18 ff)",
+                px[0], px[1], px[2], px[3]);
+            const uint8_t *bar = px + (size_t)placement.top * probe_target.stride
+                                    + (size_t)placement.left * 4u;
+            say("present: white-bar px   = %02x %02x %02x %02x (expect ff ff ff ff)",
+                bar[0], bar[1], bar[2], bar[3]);
+            /* One quarter into the shown image is inside the RED column. */
+            const uint8_t *red = px + ((size_t)placement.top + 40) * probe_target.stride
+                                    + ((size_t)placement.left + 40) * 4u;
+            say("present: red-column px  = %02x %02x %02x %02x", red[0], red[1], red[2], red[3]);
+            say("present:   if that reads ff 00 00 ff the surface is B,G,R,A as the compositor");
+            say("present:   intends; if 00 00 ff ff the bytes are reversed from what VideoOut wants");
+        }
+    }
 
     /* PW_PRESENT_SCALE_INTEGER: 480x270 into 1920x1080 is exactly 4x, so any
      * softness or tearing on screen is the presenter's doing and not the

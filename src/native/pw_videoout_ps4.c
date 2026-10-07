@@ -5,6 +5,7 @@
 
 #include <orbis/UserService.h>
 #include <orbis/VideoOut.h>
+#include <orbis/SystemService.h>
 #include <orbis/libkernel.h>
 
 enum {
@@ -32,7 +33,22 @@ int pw_videoout_ps4_open(PwVideoOutPs4 *video)
     video->handle = -1;
     video->physical = -1;
 
+    /* ⚠ 0xFF (the system user) FIRST, THEN THE SIGNED-IN USER. The PS5 original
+     * opens with 0xff and nothing else; on the PS4 some configurations want the
+     * real user id instead, and the failure is a negative handle with no other
+     * symptom. Trying both costs one call and removes a whole class of "black
+     * screen, no reason given" from the first hardware run. */
     video->handle = sceVideoOutOpen(ORBIS_VIDEO_USER_MAIN, ORBIS_VIDEO_OUT_BUS_MAIN, 0, NULL);
+    video->open_user = ORBIS_VIDEO_USER_MAIN;
+    if (video->handle < 0) {
+        video->open_rc_system = video->handle;
+        OrbisUserServiceUserId user = -1;
+        if (sceUserServiceInitialize(NULL) >= 0 &&
+            sceUserServiceGetInitialUser(&user) >= 0 && user >= 0) {
+            video->handle = sceVideoOutOpen(user, ORBIS_VIDEO_OUT_BUS_MAIN, 0, NULL);
+            video->open_user = (int32_t)user;
+        }
+    }
     if (video->handle < 0) goto state_failed;
 
     size_t pool = sceKernelGetDirectMemorySize();
@@ -70,6 +86,14 @@ int pw_videoout_ps4_open(PwVideoOutPs4 *video)
         goto state_failed;
     video->buffers_registered = 1;
     video->opened = 1;
+
+    /* ⚠ WITHOUT THIS THE SPLASH SCREEN STAYS ON TOP and every frame below it is
+     * invisible — which presents as "the title ran and nothing happened", the
+     * most expensive symptom to diagnose on a console that has to be rebooted
+     * to retry. The PS5 original calls it for the same reason; the PS4 SDK
+     * exports it too. Return value ignored: it fails harmlessly when there is
+     * no splash left to hide. */
+    (void)sceSystemServiceHideSplashScreen();
     return PW_OK;
 
 limit_failed:

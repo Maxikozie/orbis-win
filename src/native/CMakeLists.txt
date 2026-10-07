@@ -25,5 +25,8 @@ target_compile_options(pw_native_ps4 PRIVATE -std=c11 -O2 -Wall -Wextra)
 # exports sceVideoOutSubmitFlip / sceVideoOutWaitVblank. PUBLIC so an executable
 # linking this archive inherits it — a STATIC library records the dependency but
 # cannot satisfy it itself.
-target_link_libraries(pw_native_ps4 PUBLIC "${OO_PS4_TOOLCHAIN}/lib/libSceVideoOut.so")
+target_link_libraries(pw_native_ps4 PUBLIC
+  "${OO_PS4_TOOLCHAIN}/lib/libSceVideoOut.so"
+  "${OO_PS4_TOOLCHAIN}/lib/libSceSystemService.so"   # HideSplashScreen
+  "${OO_PS4_TOOLCHAIN}/lib/libSceUserService.so")    # the signed-in user fallback
 orbis_compat_verify()
