@@ -1,17 +1,17 @@
-/* FreeBSD 9 <sys/ttycom.h> — the window-size ioctl server.c and env.c want. */
+/* FreeBSD 9 <sys/ttycom.h> — the window-size ioctls server.c and env.c want.
+ *
+ * ⚠ NO `struct winsize` HERE. The SDK's own sys/ioctl.h (and pty.h) declare it
+ * with no guard macro, so a second copy is a hard redefinition — which cost 59
+ * errors AND failed configure's unrelated sys/mount.h test, because that test
+ * includes sys/ioctl.h too and the error was reported against ttycom.h. A
+ * private _STRUCT_WINSIZE_DECLARED guard does not help: nothing else sets it.
+ *
+ * sys/ioctl.h in this directory chains to the SDK's copy before including this
+ * one, so winsize is already declared by the time these macros are used. */
 #ifndef _SYS_TTYCOM_H_
 #define _SYS_TTYCOM_H_
 #include <sys/ioccom.h>
-/* ⚠ GUARDED: something else in this SDK already declares winsize, and an
- * unguarded copy here made configure's sys/mount.h test fail with "redefinition
- * of 'winsize'" — a failure attributed to the wrong header entirely. */
-#ifndef _STRUCT_WINSIZE_DECLARED
-#define _STRUCT_WINSIZE_DECLARED
-struct winsize {
-    unsigned short ws_row, ws_col;      /* characters */
-    unsigned short ws_xpixel, ws_ypixel;/* pixels */
-};
-#endif
+struct winsize;
 #define TIOCGWINSZ  _IOR('t', 104, struct winsize)
 #define TIOCSWINSZ  _IOW('t', 103, struct winsize)
 #endif

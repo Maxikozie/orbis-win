@@ -23,4 +23,15 @@ static inline int thr_self(long *id)
     *id = (long)pthread_getthreadid_np();
     return 0;
 }
+
+/* ⚠ thr_set_name IS NOT EXPORTED EITHER. libkernel offers only
+ * pthread_{mutex,cond,barrier}_setname_np — none of which names a thread.
+ * Wine calls thr_set_name purely for debugger and profiler display, so a
+ * no-op loses nothing observable; returning 0 keeps the caller's error path
+ * quiet about something that was never going to work here. */
+static inline int thr_set_name(long id, const char *name)
+{
+    (void)id; (void)name;
+    return 0;
+}
 #endif

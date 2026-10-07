@@ -1406,3 +1406,89 @@ this is a plain function call needing neither.
 
 A FreeBSD `mcontext_t` for the signal path, the BPF guard in `server/sock.c`,
 and `getmntinfo`. Then the PRX link, still the one genuinely unknown piece.
+
+---
+
+## 2026-10-07 — ⭐ Wine's Unix side builds for a PlayStation 4
+
+```
+dlls/ntdll/ntdll.so         built=True  unresolved=none    3.8M
+dlls/win32u/win32u.so       built=True  unresolved=none    8.8M
+server/wineserver           built=True  unresolved=none    4.3M
+dlls/winevulkan/winevulkan.so  built=True  malloc=imports
+dlls/opengl32/opengl32.so      built=True  malloc=imports
+dlls/ws2_32/ws2_32.so          built=True  malloc=defines
+dlls/crypt32/crypt32.so        built=True  malloc=defines
+dlls/dwrite/dwrite.so          built=True  malloc=defines
+```
+
+**Eight targets, 28 MB, zero errors.** Wine 11.17, 83 patches, built against the
+OpenOrbis toolchain for `x86_64-scei-ps4`.
+
+Error trajectory: **307 → 251 → 106 → 142 → 44 → 23 → 7 → 0.**
+
+### What it took
+
+| | |
+|---|---|
+| `src/freebsd-compat/` | 15 headers, ~550 lines of FreeBSD 9 declarations the SDK omits |
+| `src/wine-patches-ps4/` | upstream's 83, two given PS4 arms |
+| `build/ps4-wine-sdk/` | a shim presenting OpenOrbis as `prospero-clang` |
+
+### The shim, and three things CMake hides
+
+The build script requires `$sdk/bin/prospero-clang` by that name. The shim wraps
+host clang with `ps4-openorbis.cmake`'s flags, and linking took four discoveries:
+
+1. **Compile flags are not enough** — configure's first act is "can the compiler
+   create executables".
+2. **`-fuse-ld=lld` is rejected** for `x86_64-scei-ps4`; the driver picks its own.
+3. **It wants `orbis-ld`**, Sony's linker name — `bin/orbis-ld` symlinks `ld.lld`.
+4. **`-pie` and `crt1.o` are for executables only.** `orbis-ld` refuses
+   "-shared and -pie may not be used together", and `crt1.o` carries `_start`
+   and the process parameter block, which a `.so` must not define.
+
+CMake sidesteps all four by driving the linker directly rather than through the
+compiler driver, which is why the triangle built while this did not.
+
+### ⚠ Five ways I mangled a patch before finding the method
+
+Each failed differently and none said "your patch is incomplete":
+
+1. Hand-written hunk context — corrupt at line 51
+2. Edited the text, breaking the hunk's line counts
+3. Targeted a line a *later* patch introduces (the `C_ASSERT` comes from 0883)
+4. Header extracted with the wrong `sed` range — patch began at `Subject:`
+5. **`git diff` omits untracked files**, silently dropping the two new sources
+   0883 adds. That one surfaced three layers away: the patch applied, configure
+   completed, and `config.status` failed generating Makefiles.
+
+The method that works every time: apply everything before it, apply the patch,
+edit the **source**, `git add -A`, then `git diff --cached` beneath the original
+header up to the first `diff --git`.
+
+### ⚠ And the ACPI header, wrong in both directions
+
+Written **empty** so Wine would take its absent-hardware branch: configure tests
+header *existence*, set `HAVE_DEV_ACPICA_ACPIIO_H`, and Wine demanded
+`ACPI_BATT_STAT_CHARGING` from an empty file. **Deleted**: `fatal error: file
+not found`, because `system.c` includes it unconditionally under
+`#elif defined(__FreeBSD__)`. There is no branch to fall into — on a FreeBSD
+target Wine always compiles its ACPI path. It needs the header *and* two
+constants, and the PS4's absent `/dev/acpi` makes the ioctl fail at runtime,
+which Wine already handles.
+
+### ⚠⚠ COMPILING IS NOT WORKING
+
+The mcontext offset is **a guess**: FreeBSD's +16, where the PS5 measured +64.
+Sony has moved it at least once.
+
+- The `C_ASSERT` pins `mc_cs` at 168 in our struct, which independently matches
+  the PS5's `+64 + 168 = 232` arithmetic — corroboration of the *layout*, not of
+  the offset.
+- `mc_len` carries `sizeof(mcontext_t) == 800`, readable at the chosen offset as
+  a cheap runtime check.
+- Patch 0883's signal-entry **assembly depends on the same number**.
+
+Nothing here has run on the console. A wrong offset means every exception reads
+the wrong registers.

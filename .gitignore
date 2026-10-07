@@ -23,3 +23,6 @@ prospero-win/
 
 # Wine source and the staged PE runtime (built by tools/)
 prospero-win/.deps/
+
+# the PS4 build shim (generated)
+build/ps4-wine-sdk/
