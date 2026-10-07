@@ -21,6 +21,8 @@
 #include <orbis/libkernel.h>
 
 #include "pw_videoout_ps4.h"
+#include "pw_pad_ps4.h"
+#include "pw_pad_ps5.h"
 #include "pw_present.h"
 #include "prospero_win.h"
 
@@ -40,7 +42,7 @@ static void say(const char *fmt, ...)
 /* A BGRX pixel as pw_present.c lays it down: byte0=B, byte1=G, byte2=R. */
 #define BGRX(r, g, b) (((uint32_t)(r) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(b))
 
-enum { SRC_W = 480, SRC_H = 270 };
+enum { SRC_W = 320, SRC_H = 180 };
 
 int main(void)
 {
@@ -121,23 +123,76 @@ int main(void)
         }
     }
 
-    /* PW_PRESENT_SCALE_INTEGER: 480x270 into 1920x1080 is exactly 4x, so any
-     * softness or tearing on screen is the presenter's doing and not the
-     * scaler's. */
-    for (int i = 0; i < 600; i++) {
+    /* ---------------------------------------------------------------- pad
+     * The core is upstream's native/pw_pad_ps5.c, unmodified; only the vtable
+     * underneath it is ours. If the DualShock drives this, the batching,
+     * generation tracking and edge detection above it are working too. */
+    PwPadPs5 pad;
+    PwPadPs5Ops ops;
+    int pad_ready = 0;
+    if (pw_pad_ps4_platform_ops(&ops) == PW_OK &&
+        pw_pad_ps5_open(&pad, &ops, NULL, 0) == PW_OK) {
+        pad_ready = 1;
+        say("pad: open, user 0x%x handle %d", (unsigned)pad.user_id, pad.pad_handle);
+    } else {
+        say("pad: NOT open (init rc %d, user rc %d) - the picture still runs",
+            pad.pad_init_rc, pad.user_initialize_rc);
+    }
+
+    /* 320x180 at 6x is 1920x1080, but INTEGER picks the largest fit with the
+     * margin, so a surround is left for the pad to tint. */
+    uint32_t background = BGRX(24, 24, 32);
+    uint64_t reported = 0;
+
+    for (int i = 0; i < 3600; i++) {
+        if (pad_ready && pw_pad_ps5_read(&pad) == PW_OK) {
+            /* previous_buttons is the state after the newest tracked sample — the
+             * core keeps no separate "held" field. */
+            uint32_t held = pad.core.previous_buttons;
+            /* Face buttons pick a surround colour; the analogue triggers dim
+             * it. Every one of those is a different field arriving intact. */
+            if      (held & 0x4000u) background = BGRX(120, 24, 24);   /* CROSS    */
+            else if (held & 0x2000u) background = BGRX(24, 110, 40);   /* CIRCLE   */
+            else if (held & 0x8000u) background = BGRX(30, 40, 130);   /* SQUARE   */
+            else if (held & 0x1000u) background = BGRX(120, 100, 24);  /* TRIANGLE */
+            else                     background = BGRX(24, 24, 32);
+            uint32_t dim = (uint32_t)pad.l2 + (uint32_t)pad.r2;
+            if (dim) {
+                uint32_t b = (uint32_t)(background & 0xffu) * (510u - dim) / 510u;
+                uint32_t g = ((background >> 8) & 0xffu) * (510u - dim) / 510u;
+                uint32_t r = ((background >> 16) & 0xffu) * (510u - dim) / 510u;
+                background = BGRX(r, g, b);
+            }
+            if (pad.core.pressed_edges && reported < 20) {
+                say("pad: pressed 0x%08x held 0x%08x L(%3u,%3u) R(%3u,%3u) L2=%3u R2=%3u",
+                    pad.core.pressed_edges, held,
+                    pad.left_stick.x, pad.left_stick.y,
+                    pad.right_stick.x, pad.right_stick.y, pad.l2, pad.r2);
+                reported++;
+            }
+        }
         status = pw_videoout_ps4_present_scaled(&video, &frame,
-                                                PW_PRESENT_SCALE_INTEGER, BGRX(24, 24, 32));
+                                                PW_PRESENT_SCALE_INTEGER, background);
         if (status != PW_OK) { say("present: frame %d -> %d", i, status); break; }
-        if (i == 0 || i == 1 || i == 59 || i == 599)
+        if (i == 0 || i == 59 || i == 599)
             say("present: %d frames, %llu flips", i + 1, (unsigned long long)video.flips);
+    }
+
+    if (pad_ready) {
+        say("pad: %llu polls, %llu connected, %llu empty, %llu errors, %llu generations",
+            (unsigned long long)pad.polls, (unsigned long long)pad.connected_samples,
+            (unsigned long long)pad.empty_reads, (unsigned long long)pad.read_errors,
+            (unsigned long long)pad.generation_changes);
+        (void)pw_pad_ps5_close(&pad);
     }
 
     say("");
     say("WHAT SHOULD BE ON SCREEN:");
     say("  a white bar along the TOP, and below it three columns,");
     say("  left to right: RED, GREEN, BLUE, on a dark grey surround.");
-    say("  If left is BLUE and right is RED, the channel order is reversed");
-    say("  and the fix is one line in pw_videoout_ps4.c's format argument.");
+    say("  Hold CROSS/CIRCLE/SQUARE/TRIANGLE to tint the surround,");
+    say("  and squeeze L2/R2 to dim it. That is upstream's pad core running");
+    say("  on a DualShock 4 through a vtable this port supplies.");
     say("");
     say("present: idling so the log can be read; close from the PS button menu");
     for (;;) sleep(1);
