@@ -102,3 +102,53 @@ the wrong turns.
 
 Measurements and console runs are mine, on my own hardware; the analysis and the
 patch were drafted with Claude.
+
+## Divergence from prospero-win, measured 2026-10-07
+
+Pinned pending the maintainer's answer on a GitHub issue asking whether he
+would accept PS4 support at all. Not a proposal yet.
+
+### Changes to upstream's own code: 9 added lines, 2 removed, 2 files
+
+| patch | change |
+|---|---|
+| `0001-compat-ptrace-signature-for-ps4-sdk` | `caddr_t` -> `void *`; the PS4 SDK declares ptrace's address argument differently. Same ABI. |
+| `0002-wine-library-getdents-declared-by-the-ps4-sdk` | extend the existing `!__linux__` guard to exclude PS4, where `<dirent.h>` already declares `getdents`. |
+
+Both are the same shape: prospero-win declares something because the PS5 SDK
+omits it, and the PS4 SDK provides it with a slightly different signature.
+
+### Wine patch series: 82 of 83 byte-identical
+
+None added, none dropped, one modified. Upstream's entire Wine strategy carries
+over unchanged -- which is the headline number for whether this is viable.
+
+`0883-ntdll-ps5-native-wow64-signal-entry` is the exception: 111 added lines of
+ours, all `__PS4__`-guarded.
+
+⚠ **Before any PR, delete the `PW_PS4_FAULTS_VIA_SONY` arm from 0883.** It
+routes the five fault signals through `sceKernelInstallExceptionHandler`, was
+written from nx-on-orbis's report that sigaction never receives faults on PS4,
+and is switched **off** because GLDS10004 measured that sigaction works fine.
+Nobody should be asked to carry a dead branch. Removing it leaves the mcontext
+offset override and the `UCONTEXT_MC`/`C_ASSERT` restatement -- tens of lines.
+
+### Everything else is additive: ~3,400 lines, no upstream file touched
+
+| area | lines |
+|---|---|
+| `src/native` — the PS4 platform layer | 1205 |
+| `src/freebsd-compat` — SDK header gaps | 763 |
+| `scripts` — build, package, deploy, log | 1230 |
+| `src/fault-probe` | 197 |
+
+The divergence is this small **because of upstream's design**: platform behind
+vtables, `*_HOST_TEST` guards, and a patch series keyed by number. Almost all
+of this port sits beside the PS5 code rather than through it.
+
+### Worth offering regardless of the port
+
+`-fvisibility-from-dllstorageclass` is on by default for the **PS4 and PS5**
+targets and silently overrides `__attribute__((visibility("default")))`, which
+is the branch Wine's `DECLSPEC_EXPORT` takes. A PS5 build may be affected too:
+the symptom is a clean build whose modules export only libc.
