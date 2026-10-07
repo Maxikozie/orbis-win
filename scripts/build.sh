@@ -28,6 +28,7 @@ case "$TARGET" in
   triangle) TITLE_ID=GLDS10001; TITLE="Gladius Triangle"; SRC="$BUNDLE/examples/triangle" ;;
   probe)    TITLE_ID=GLDS10002; TITLE="Gladius Probe";    SRC="$ROOT/src/probe" ;;
   present)  TITLE_ID=GLDS10003; TITLE="Prospero Presenter"; SRC="$ROOT/src/present-test" ;;
+  fault)    TITLE_ID=GLDS10004; TITLE="Gladius Fault Probe"; SRC="$ROOT/src/fault-probe" ;;
   *) die "usage: build.sh {hello|triangle|probe|present} [--pkg] [--deploy] [--neo] [--dev-mesa]" ;;
 esac
 

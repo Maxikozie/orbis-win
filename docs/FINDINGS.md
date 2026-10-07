@@ -1208,7 +1208,15 @@ things that may already be adjudicated."*
 The PS4 came **first**. Upstream's PS5 measurements are often rediscoveries of PS4
 facts that a ten-year-old homebrew scene already settled, and `orbis-compat`
 exists precisely to record them. I had been treating every PS5 constant as needing
-fresh measurement here. That is backwards, and it cost a console crash.
+fresh measurement here. That is backwards, and it cost a crashed title.
+
+⚠ **A bad probe kills the title, not the console** (Zak, 2026-10-07, correcting
+my note above -- the signal probe took the app down, the system stayed up).
+GoldHEN survives, FTP survives, and a reinstall-and-rerun is a couple of
+minutes. So on-hardware probing is CHEAP and is usually the fastest way to
+settle a constant. Do not reason around a question that one throwaway title
+would answer. (The thing that genuinely does kill GoldHEN is an FTP login --
+see `scripts/ftp-put.py`.)
 
 ### Patch 0510 was already settled — no measurement needed
 
@@ -1659,3 +1667,51 @@ consumer of the patch, and a reason to get it upstream.
   memory pools -- overlapping our probe but wider on memory.
 - GFX7 RADV hazard: an indirect draw with a count buffer **hangs the GPU**
   (`patches/eden/0009`). Relevant whenever we reach real rendering.
+
+## Patch 0883's native path is dead code on PS4 (2026-10-07)
+
+`native_libkernel_resolve()` does not merely call `sigaction` -- it resolves
+**libkernel's raw sigaction stub** and calls that, because the libc wrapper is
+not sufficient on PS5 either. The resolver is bound to one specific PS5
+libkernel build:
+
+- a 20-byte fingerprint of the module
+- the module name **`libkernel.sprx`**
+- an exact four-segment layout: offsets {0, 0x48000, 0x68000, 0x6c000},
+  sizes {0x48000, 0x20000, 0x4000, 0x38000}, protections {4, 1, 1, 3}
+- imports at `base+0xc3f0` / `base+0xde0`, entry points at `base+0x1600`
+  (sigaction) and `base+0x2a0` (sigreturn)
+
+Every one of those fails on PS4. So `pw_native_kernel.sigaction` stays NULL,
+`PW_SIGNAL_HANDLER()` selects the non-native handlers, and the whole path falls
+back to libc `sigaction` -- the one nx-on-orbis says never receives faults
+here. **Upstream's PS5 signal design does not reach PS4 at all**, silently.
+
+Note this also means the PS4 arm added to 0883 earlier (the mcontext offset
+override) sits on a path that would never have run.
+
+### The fix, at the seam that already existed
+
+`pw_native_sigaction()` is the single point every handler registration goes
+through, so the PS4 arm lives there: the five fault signals (SEGV, BUS, ILL,
+FPE, TRAP) install via **`sceKernelInstallExceptionHandler`** -- the PS4 SDK
+ships a `libkernel_exception.so` for exactly this, and `libkernel.so` exports
+it, though no SDK header declares it. Sony hands the handler
+`(int signal, void *ucontext)`; Wine wants `(int, siginfo_t *, void *)`, so a
+trampoline synthesises the siginfo. `si_addr` is the only member the fault
+paths read, and it is `mc_addr` at mcontext+136. Every other signal still goes
+to `sigaction`.
+
+Folded into 0883 rather than added as 0900: the series is capped at 0899 and
+0880-0899 are contiguous, and 0883 is what introduces the seam anyway, so the
+two PS4 arms belong together.
+
+⚠ **UNVERIFIED. The switch is `PW_PS4_FAULTS_VIA_SONY` (default 1).** Title
+**GLDS10004 "Gladius Fault Probe"** (`src/fault-probe`, built and packaged)
+settles it in one run: it faults once under each mechanism on its own PROT_NONE
+page, recovers by mprotecting the page so the instruction retries, and prints
+which handler caught it plus `mc_len` at both +64 and +16. If sigaction turns
+out to work, set the switch to 0 and the arm drops out entirely.
+
+The probe reads only named offsets and trusts nothing until `mc_len` reads 800
+-- the earlier signal probe scanned a range and took the title down.
