@@ -1267,3 +1267,74 @@ Before measuring anything upstream measured on a PS5: check `orbis-compat`'s
 corrections, the OpenOrbis headers, and FreeBSD 9's public layout. The PS4 is the
 older console and the better documented one. Measure only what none of them
 answer — and bound the measurement to a structure size that is known first.
+
+---
+
+## 2026-10-07 — Wine compiles for a PlayStation 4, and the 307 errors are all missing headers
+
+All **83 patches apply cleanly** to pinned Wine 11.17 — zero rejects. Configure
+**passes**: Wine accepts the PS4 compiler and takes its FreeBSD paths, which is
+the premise the whole port rests on.
+
+### The shim, and three obstacles between CMake and a compiler driver
+
+`tools/build_wine_ps5.sh` requires `$sdk/bin/prospero-clang` by that exact name.
+Rather than fork a 600-line script, `build/ps4-wine-sdk/bin/prospero-clang`
+presents the OpenOrbis toolchain under it with `ps4-openorbis.cmake`'s own flags.
+Getting it to *link* took three goes:
+
+1. **Compile flags are not enough** — configure's first act is "can the compiler
+   create executables", which needs the whole link rule: `-nostdlib`, the
+   overlay's linker script (not the SDK's `link.x`), and `crt1.o` **last**.
+2. **`-fuse-ld=lld` is rejected**: *"unsupported option '-fuse-ld' for target
+   'x86_64-scei-ps4'"*. The PS4 driver picks its own linker.
+3. **It then wants `orbis-ld`**, Sony's linker name. OpenOrbis ships `ld.lld`, so
+   `bin/orbis-ld` is a symlink and the shim prepends its own directory to `PATH`.
+
+CMake sidesteps all three by driving the linker directly instead of through the
+compiler driver — which is why the triangle built fine while this did not.
+
+### `-D__PROSPERO__` on purpose, as mechanical triage
+
+Sony sets `__PROSPERO__` for the PS5 and `__ORBIS__` for the PS4: siblings
+meaning "Sony console, FreeBSD derived, not Linux". 35 patches gate on it.
+Defining it turns all 35 arms on at once so the genuinely PS5-only ones fail and
+**name themselves** — faster and more honest than reading 35 patches and guessing.
+
+### The result: zero patch failures
+
+307 errors, and **not one of them is in a patched arm.** Every single one is a
+FreeBSD header the OpenOrbis SDK omits:
+
+| failing file | errors | wants |
+|---|---|---|
+| `ntdll/unix/cdrom.c` | 133 | `sys/cdio.h` — `CDIOC*`, `struct ioc_toc_header`, … |
+| `ntdll/unix/file.c` | 63 | `sys/mount.h` — `MNT_RDONLY` |
+| `ntdll/unix/system.c` | 28 | `sys/time.h` — `struct clockinfo` |
+| `server/sock.c` | 19 | `net/bpf.h` — `BPF_LD`, `struct sock_filter` |
+| `ntdll/unix/socket.c` | 7 | `sys/sockio.h` — `SIOCATMARK` |
+| `ntdll/unix/signal_x86_64.c` | 7 | `machine/sysarch.h` — `sysarch` |
+| `ntdll/unix/server.c`, `env.c` | 14 | `sys/ttycom.h` — `TIOCGWINSZ` |
+
+This is `orbis-compat` §2.2's category exactly — *"Headers the SDK omits although
+the platform has them"* — and the overlay already supplies eight of that kind
+(`cpuset.h`, `dirent.h`, `endian.h`, `ioccom.h`, `ioctl.h`, `param.h`,
+`sysctl.h`, `umtx.h`). Wine needs about six more.
+
+⚠ Note `signal_x86_64.c` fails on **`sysarch`**, not on anything patches 0500 or
+0501 touch. I had predicted those two would break first, on the Linux-vs-FreeBSD
+`ucontext_t` mismatch. They did not. The prediction was reasonable and wrong, and
+the compiler settled it in one run.
+
+⚠ **And a correction to my own first reading.** A grep for errors mentioning
+"ps5" returned 299 of 307 — which looked like near-total patch failure. It was
+matching the *directory name* `.deps/wine-ps5/` in every path. Matching the error
+MESSAGE instead gives **zero**. The same class of mistake as the cwd probe:
+instrumentation reporting confidently about itself.
+
+### What this leaves
+
+The patch series is viable on the PS4. What stands between here and `ntdll.so`
+is a set of missing FreeBSD headers — bounded, mechanical, and the exact kind of
+thing `orbis-compat` exists to carry. After that, the PRX link remains the one
+genuinely unknown piece.
