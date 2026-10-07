@@ -1772,3 +1772,71 @@ built yet either. Four of upstream's thirteen modules are still missing:
 
 So the first run tests: does the eboot start, does `ntdll.prx` load, does the
 launcher render, and does the fault path survive -- not whether a game runs.
+
+## Four findings from the nx-on-orbis developer (2026-10-07, by email)
+
+They confirmed our GPU result from their side: *"in my runs the driver came up
+with the base PS4 config (mesa.log reports the 18 CU / 72 TMU / 32 ROP spec, and
+that value is a spec number, not measured from the hardware), so I never used
+the Pro's full 36."* Their port is CPU-bound (0 ms GPU wait, emulated main core
+~80% busy in JIT), so it cost them little -- but they want the patches:
+*"your patches would matter for anything GPU-heavy, and I'd love to see them."*
+The project is closed on their side and explicitly free to fork or reuse.
+
+### 1. wchar_t: does NOT apply to us, and it is worth knowing why
+
+Their report: the SDK's static `wmemchr`/`wmem*`/`wcs*` work on **16-bit**
+units while clang's `wchar_t` is 32-bit, so with a newer libc++ `std::find` over
+any 4-byte type lowers to `wmemchr` and **silently fails unless the match is the
+first element**. They replaced them with 4-byte versions.
+
+Checked here: the `x86_64-scei-ps4` target defines `__WCHAR_TYPE__` as
+**`unsigned short`, 2 bytes** -- Sony's ABI default, not a flag we pass (bare
+clang for the triple agrees; host Linux says 4). So the SDK's 16-bit routines
+are correct for this target and the mismatch does not arise. Confirmed at the
+artifact level: `wine_app.elf` and `ntdll.shared.elf` import **zero**
+`wmem*`/`wcs*` symbols, Wine defines its own 40, and `liborbis-compat.a`
+imports none.
+
+⚠ It is still a tripwire: this holds only while `wchar_t` stays 16-bit here. Any
+C++ built for this port with a different triple, or any libc++ code doing
+`std::find` over a 4-byte type, brings it straight back -- and the failure is
+silent.
+
+### 2. ⚠ RADV flattens each submission into a 2 MiB staging buffer
+
+524288 dwords; a bigger submission **hangs the GPU** (`mesa.log`: "submission
+does not fit"). Their mitigation is submitting every 256 draws and after 96
+render passes. Applies the moment this port renders anything real, and sits
+alongside the other GFX7 hazard already recorded (an indirect draw with a count
+buffer hangs the GPU).
+
+### 3. Images cost direct memory on top of the arena
+
+The driver takes one ONION arena (`ORBIS_ARENA_MIB`, default 1024; they ship
+1280 because 1024 ran out). Images and other device-local buffers go to
+**GARLIC memory allocated outside that arena**, costing direct memory on top of
+it -- hundreds of MiB while a race loads. `ORBIS_VRAM_GARLIC=0` keeps them in
+the arena instead. So the arena figure is not the memory budget.
+
+Related trap they document: **`sceKernelAvailableDirectMemorySize` returns the
+largest free block, not the total.**
+
+### 4. Address space caps at 16 GiB per reservation
+
+The largest single `sceKernelReserveVirtualRange` they got was **16 GiB**;
+64 GiB fails with `0x8002000c`.
+
+Checked against what prospero-win asks for, and we are well clear: the reserved
+areas are `0x10000-0x68000000` (~1.6 GiB), `0x68000000-0x7f000000` (~368 MiB)
+and `0x7f000000-0x7fff0000` (~15 MiB) -- the 32-bit guest's address space, all
+far below the cap. It would only bite if this port ever wanted a fastmem-style
+aliased view of guest memory, which is exactly what they tried and why they
+measured it.
+
+### Also worth having
+
+- Threads get 2 MiB stacks and **64 KiB alternate signal stacks so a stack
+  overflow can still report** -- directly relevant to our fault-handler work.
+- Their `probe/probe.c` covers firmware, Neo mode, CPU/TSC clocks and boot
+  memory pools.
