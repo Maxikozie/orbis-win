@@ -11,3 +11,6 @@ pkgout/
 
 # local console settings
 config.env
+
+# Sony firmware modules, extracted from the console. NOT redistributable.
+sce_module/

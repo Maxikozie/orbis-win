@@ -92,8 +92,26 @@ printf '   eboot.bin %s\n' "$(du -h "$BUILD/eboot.bin" | cut -f1)"
 if (( PKG )); then
   say "package"
   OUT="$ROOT/pkgout/$TARGET"; mkdir -p "$OUT"
+
+  # ⚠ sce_module/ MUST BE POPULATED OR THE TITLE NEVER REACHES main().
+  # make-pkg.sh declares an empty sce_module directory in the gp4 and puts
+  # nothing in it. The console refuses the process before it runs:
+  #
+  #   # exception: 0xa0020102 (PRX_SCE_MODULE_LOAD_ERROR)
+  #   # === Lack of a .prx file in /app0/sce_module is detected!!! ===
+  #
+  # These are Sony firmware modules. The SDK cannot ship them and neither can
+  # this repository — see sce_module/README.md for taking them off your own
+  # console. They are gitignored.
+  EXTRA_FILES=()
+  for m in libc.prx libSceFios2.prx; do
+    [[ -f "$ROOT/sce_module/$m" ]] ||
+      die "missing sce_module/$m — see sce_module/README.md. Without it the title crashes with PRX_SCE_MODULE_LOAD_ERROR before main()."
+    EXTRA_FILES+=(--extra "$ROOT/sce_module/$m:sce_module/$m")
+  done
+
   "$PS4_SCRIPTS/make-pkg.sh" --eboot "$BUILD/eboot.bin" --out-dir "$OUT" \
-      --title-id "$TITLE_ID" --title "$TITLE"
+      --title-id "$TITLE_ID" --title "$TITLE" "${EXTRA_FILES[@]}"
 fi
 
 if (( DEPLOY )); then

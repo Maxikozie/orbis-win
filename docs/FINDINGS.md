@@ -280,3 +280,60 @@ calling primary — captures nothing from either of them.
 console's stdout write *blocks the calling thread* when nothing is reading that
 socket. That is also the reason preflight's connect-and-close klog check was a
 bad idea regardless of whether it caused anything, and it has been removed.
+
+---
+
+## 2026-10-06 — `hello` crashed before `main()`: empty `sce_module/`
+
+First launch on hardware. The klog named it exactly, which is the entire reason
+for running `hello` before anything that touches Mesa:
+
+```
+# A user thread receives a fatal signal
+# exception: 0xa0020102 (PRX_SCE_MODULE_LOAD_ERROR)
+# thread name: eboot.bin
+...
+# === Lack of a .prx file in /app0/sce_module is detected!!! ===
+# Copy the file (e.g. libc.prx) from target/sce_module.
+```
+
+Not a crash in our code — the process never reached `main`. `libkernel.sprx`,
+`libSceLibcInternal.sprx`, `libSceSysmodule.sprx` and `libSceDiscMap.sprx` all
+mapped; the loader then refused for want of `/app0/sce_module`.
+
+### The package declared the directory and shipped nothing in it
+
+`make-pkg.sh`'s gp4 carries `<dir targ_name="sce_module" />` under `rootdir`,
+and its `<files>` list had only `eboot.bin` and `sce_sys/param.sfo`. The
+OELF's own needs are modest — `readoelf -d` shows one `SCE_NEEDED_MODULE`,
+`libkernel` — so the requirement comes from the loader's rules for an app
+process, not from our link line.
+
+### Where the modules come from
+
+`libc.prx` and `libSceFios2.prx` are **Sony firmware modules**. The OpenOrbis
+SDK ships no `.prx` at all, for the obvious reason, and neither does this
+repository — `sce_module/` is gitignored and `sce_module/README.md` documents
+extracting them from your own console.
+
+Any installed OpenOrbis homebrew carries both. Here they came out of Apollo Save
+Tool (`APOL00004`): `RETR /user/app/APOL00004/app.pkg` over the same FTP path,
+then `PkgTool.Core pkg_extract`, and they land under `uroot/sce_module/`.
+
+```
+8ac205d14351edb241238b372b2f1c3350a6385a271483d4867fe9a33bc6e4d3  libc.prx          3424 B
+905cf6b7c699eccb6b95291fc4dcaf5ce2d2605f450f36496d9b973777afa745  libSceFios2.prx   3200 B
+```
+
+Both are a few kilobytes — stubs that satisfy the loader, not implementations.
+The real code is in `libSceLibcInternal.sprx`, which the process already maps.
+
+⚠ `PkgTool.Core pkg_extract` needs the same OpenSSL 1.x shim and
+`DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` that `make-pkg.sh` sets up, and
+without them it prints `No usable version of libssl was found` **and exits 0** —
+a failure that reads as a successful run with no output.
+
+`build.sh` now refuses to package at all if either module is missing, rather
+than building something that cannot boot.
+
+Packages rebuilt and re-uploaded: triangle and probe grew 27,394,048 → 27,525,120 B.
