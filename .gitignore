@@ -26,3 +26,7 @@ prospero-win/.deps/
 
 # the PS4 build shim (generated)
 build/ps4-wine-sdk/
+
+# ps5log destination: a workstation address, never committed (upstream's
+# dev.conf.example says the same: "never commit a workstation address").
+build/devconf/
