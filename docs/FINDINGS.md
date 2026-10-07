@@ -532,3 +532,57 @@ read-back that would have separated "our setenv never reached Mesa" from
 "something downstream overrode it" was added to the probe but only ever ran with
 the file absent, so it answered `(null)` and settled nothing. Moot for the fix —
 the driver now decides for itself — but not explained.
+
+---
+
+## 2026-10-07 — stage 5 opens: the translator cross-compiles for the PS4 unmodified
+
+Two console-free checks, both green.
+
+### The upstream host suite passes here
+
+`make test` in a fresh `prospero-win` checkout: **exit 0**, after installing
+`gcc-mingw-w64-i686` and `gcc-mingw-w64-x86-64` (one test hard-asserts on them;
+the rest of the Wine group skips cleanly without a host Wine). The line that
+matters:
+
+```
+dynarec benchmark regression passed: 5 deterministic workloads; reg_alu matches native i386
+```
+
+So the translator is correct on this machine before anything PS4-specific
+touches it. That is the baseline any later breakage gets measured against.
+
+### And it builds for Orbis with no edits
+
+`src/dbt/CMakeLists.txt` globs `prospero-win/src/*.c` through the bundle's
+toolchain file: **24 translation units, 0 errors, 0 warnings under
+`-Wall -Wextra`**, producing a 542 KB `libpw_dbt.a` for `elf64-x86-64`.
+
+The undefined set is 39 symbols and contains nothing surprising:
+
+```
+memcpy memmove memset memchr bcmp      <string.h>
+strchr strcmp strlen strncmp
+mmap mprotect munmap                   the POSIX VM backend (pw_vm_posix.c)
+orbis_sysconf                          orbis-compat interposing sysconf
+__udivti3 __umodti3                    compiler-rt, 128-bit divide
+pw_*                                   internal, resolved in-archive
+```
+
+No allocator, no formatter — which is upstream's deliberate choice, made so a
+PS5 firmware's wrong libc symbols could not be inherited, and it is precisely
+what makes the PS4 target cheap. `ARCHITECTURE.md` says so outright: *"the
+cheapest way not to inherit that class of bug is not to import the symbol."*
+
+⚠ **This is a build, not a run.** It says the headers and the ABI agree. Whether
+translated code is correct on Jaguar is a hardware question; the host suite
+answers the correctness half and the console has not seen any of this yet.
+
+### What this does to the stage 5 estimate
+
+The 13,519-LOC translator was the piece I could not cost without trying it. It
+needed nothing. What remains is unchanged: ~10,700 LOC of platform layer
+(`native/`, `wine/ps5/`, `wine/wineps5/`) to rewrite against PS4 APIs, and 81
+Wine patches whose constants are *measured* rather than ported and must be
+re-measured on Orbis.

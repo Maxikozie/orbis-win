@@ -17,3 +17,6 @@ sce_module/
 
 # local Mesa build tree (498 MB) — scripts/ rebuild it; the patch is in patches/
 mesa-build/
+
+# upstream PS5 source we port from
+prospero-win/
