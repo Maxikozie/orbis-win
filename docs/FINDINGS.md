@@ -1962,3 +1962,52 @@ of the SDK's. The title now links against Sony libraries only.
 One real dependency came out of this: `wine/ps5/pw_wine_prx.c` -- the PRX
 loader -- has to be compiled **into the title**. It is what loads the modules,
 so it cannot be imported from one.
+
+## prospero-win's launcher runs on the PS4 (2026-10-07)
+
+First real milestone of the port. GLDS10005 renders the launcher -- a Windows
+desktop -- on hardware, with upstream's own title code:
+
+    HELLO ps5log/1 title=PPSA99995 app=prospero-win-wine64 tag=ps4-gladius
+    PW_WINE64 data_mount   data_after=1 root=/data/prospero-win
+    PW_WINE64 library      status=not-found scan_errno=2 entries=0 games=0
+    PW_WINE64 args         argc=1 mode=launcher
+    PW_WINE64 hid          no PS4 implementation, continuing without keyboard or mouse
+    PW_WINE64 launcher     video=ok pad=ok hid=precondition frame=1 apps=0
+
+Every line is correct. `library status=not-found` (errno 2, ENOENT) is simply
+that no game library has been pushed yet, and `apps=0` follows from it. The hid
+line is this port's own stub reporting itself.
+
+**`video=ok pad=ok` and a drawn frame** means `src/native/pw_videoout_ps4.c` and
+`pw_pad_ps4.c` are driving *upstream's* title through the PS5 contract, not our
+own test harness: direct memory -> linear scanout -> the portable compositor ->
+`sceVideoOutSubmitFlip`, with the binding layer
+(`src/native/pw_platform_bind_ps4.c`) joining the two.
+
+The nine PRX modules are in the package but not yet exercised; they load when a
+game launches.
+
+### Three bugs stood between a working title and seeing it work
+
+The title had been running the launcher for **five launches** before any of
+this was visible. Nothing was wrong with it; the problem was entirely in our
+view of it, and each cause was silent by design:
+
+1. **ps5log picked the POSIX network backend.** It is a single-header library
+   whose hooks are `#ifndef`-guarded and chosen by what is included *before*
+   it. Nothing in the title includes `ps5log_ps5_net.h`, so it compiled against
+   `socket`/`connect`/`fcntl` -- which on Orbis are not sceNet. It opened a
+   socket that could never connect, took its "connect refused" path, and stored
+   the reason in a struct nobody reads.
+2. **Nothing calls `sceNetInit`.** Neither ps5log nor `wine64_main.c`; on PS5
+   the system evidently does it for a title.
+3. **`__attribute__((constructor))` is silently dead in an OpenOrbis eboot.**
+   The `.init_array` section exists and holds the entry, but `crt1.o` never
+   walks it. What `crt1.o` does carry is a **weak undefined `_init`**, which it
+   calls when something defines it -- that is the startup hook on this SDK.
+
+⚠ **Keep a log channel that cannot fail.** `sceKernelDebugOutText` needs no
+library, no configuration and no network, so it still reports when the
+configured channel is itself the broken thing. The `_init` breadcrumb is
+permanent for that reason: four launches were spent blind for want of it.
