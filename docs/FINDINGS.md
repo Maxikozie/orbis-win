@@ -170,3 +170,57 @@ That is most of what the `radeon_info` diff was going to tell us, through a
 standard extension, with no Mesa rebuild. It is not all 164 fields. If the full
 dump turns out to be needed, the path is to rebuild Mesa from the `orbis` branch
 with the log call site patched, which is a much larger job than this stage needs.
+
+---
+
+## 2026-10-06 — first contact with the console
+
+Preflight passed cleanly against `10.168.2.52`:
+
+```
+  console                10.168.2.52 up
+  this host              10.168.2.47 via eth0
+  ftp 2121               220 GoldHEN FTP server v2.2
+  ftp 1337               no answer
+  ftp 21                 no answer
+  klog 3232              open
+  udp 18194              free
+```
+
+The upload then failed on all three packages, and by the time it was traced both
+GoldHEN services — FTP **and** klog — had stopped listening while the console
+still answered ping. A TCP probe does not take down klog, so this reads as
+GoldHEN unloading rather than anything the probe did. Nothing was transferred.
+
+**Unresolved.** If it recurs, the thing to establish is whether GoldHEN survives
+between preflight and upload at all, and the cheap way to find that out is to
+re-run preflight immediately after a failed deploy rather than minutes later.
+
+### Two real bugs this shook out
+
+**`preflight.sh` read 96 bytes where it should have read one line.** An FTP
+server sends its greeting and then holds the connection open waiting for
+commands, so `head -c 96` blocked until `timeout` killed it — exit 124, and
+under `set -e` that took the whole script down after printing two lines. The
+first version was tested against a fake server that closed immediately, so the
+test never modelled the behaviour that matters. Now it reads a single line with
+`read -t`, and the replacement was checked against a responder that *holds* the
+socket open.
+
+**`deploy.sh` was being handed a symlink and sizing that.** `make-pkg.sh` leaves
+`<TITLE_ID>.pkg` pointing at the real `IV0000-…pkg`, and `deploy.sh` sizes its
+argument with `stat -c%s`, which reports **40 bytes** for the link:
+
+```
+== 40 B  .../pkgout/triangle/GLDS10001.pkg
+```
+
+deploy.sh's entire verification is *compare what arrived against what was sent* —
+written that way because this project has repeatedly had status codes report
+success over failure. A 40-byte local size silently guts that check on the one
+step it exists to protect. `build.sh` now resolves the link before handing it
+over.
+
+Neither bug was found by reasoning about the code. Both appeared the moment real
+hardware was on the other end, which is the argument for stage 1 existing as its
+own stage.

@@ -99,6 +99,11 @@ fi
 if (( DEPLOY )); then
   need_console
   say "deploy to $ORBIS_CONSOLE"
-  "$PS4_SCRIPTS/deploy.sh" --pkg "$ROOT/pkgout/$TARGET/$TITLE_ID.pkg" \
-      --name "$TARGET" --host "$ORBIS_CONSOLE"
+  # ⚠ RESOLVE THE SYMLINK. make-pkg.sh leaves <TITLE_ID>.pkg as a link to the
+  # real IV0000-...pkg, and deploy.sh sizes what it is given with `stat -c%s` —
+  # which reports 40 bytes for the link. Its whole verification is "compare what
+  # arrived against what was sent", so a 40-byte local size makes that check
+  # meaningless on exactly the step it exists to protect.
+  pkg=$(readlink -f "$ROOT/pkgout/$TARGET/$TITLE_ID.pkg")
+  "$PS4_SCRIPTS/deploy.sh" --pkg "$pkg" --name "$TARGET" --host "$ORBIS_CONSOLE"
 fi

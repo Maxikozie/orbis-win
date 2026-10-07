@@ -32,14 +32,26 @@ note "this host" "${local_ip:-?} via ${local_if:-?}"
 # --- which port is actually serving FTP -------------------------------------
 # A PS4 FTP server greets with a 220 line. Read it rather than trusting that
 # the connect succeeded: something else on the LAN may hold the port.
-probe() { timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2 && head -c 96 <&3" 2>/dev/null; }
+# ⚠ READ ONE LINE, DO NOT READ N BYTES. An FTP server sends its greeting and
+# then holds the connection open waiting for commands, so `head -c 96` blocks
+# until the timeout kills it — which returns 124 and, under `set -e`, takes the
+# whole script down. The first test of this used a fake server that closed
+# immediately and so never saw it.
+probe() {
+  timeout 4 bash -c '
+    exec 3<>/dev/tcp/'"$1"'/'"$2"' 2>/dev/null || exit 1
+    IFS= read -r -t 3 line <&3 || exit 1
+    printf "%s" "$line"
+  ' 2>/dev/null || true
+}
 
 found=""
+seen=""
 for port in "$ORBIS_FTP_PORT" 2121 1337 21; do
   [[ -z $port ]] && continue
   [[ ,$seen, == *",$port,"* ]] && continue
   seen="${seen:+$seen,}$port"
-  banner=$(probe "$ORBIS_CONSOLE" "$port" | tr -d '\r' | head -1)
+  banner=$(probe "$ORBIS_CONSOLE" "$port" | tr -d '\r' | head -1) || true
   if [[ $banner == 220* ]]; then
     note "ftp $port" "$banner"
     [[ -z $found ]] && found=$port
