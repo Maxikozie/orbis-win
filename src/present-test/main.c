@@ -35,6 +35,9 @@
 #include <math.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <setjmp.h>
+#include <sys/mman.h>
+#include <ucontext.h>
 
 void *pw_test_worker(void *);
 extern volatile int pw_test_stop;
@@ -65,6 +68,30 @@ static void say(const char *fmt, ...)
  * tint invisible and looked like the pad was broken. 300x170 scales 6x to
  * 1800x1020 and leaves a border on every side. */
 enum { SRC_W = 300, SRC_H = 170 };
+
+/* --- patch 0501: where does this kernel keep the signal frame's FP state? ---
+ * Load known values into MXCSR and XMM0, fault, and have the handler scan the
+ * ucontext for them. Exactly upstream's method; only the console differs. */
+static sigjmp_buf pw_fp_jmp;
+static volatile int pw_fp_mxcsr_off = -1, pw_fp_xmm0_off = -1, pw_fp_scanned;
+
+#define PW_FP_MXCSR 0x9fc0u
+static const uint32_t pw_fp_pattern[4] = { 0xA5A51234u, 0x5A5A8765u, 0xC3C3BEEFu, 0x3C3CF00Du };
+
+static void pw_fp_handler(int sig, siginfo_t *info, void *uc)
+{
+    (void)sig; (void)info;
+    const unsigned char *base = (const unsigned char *)uc;
+    /* 2 KiB is well past anything upstream found on the PS5 (+896). */
+    for (int off = 0; off + 16 <= 2048; off += 4) {
+        if (pw_fp_xmm0_off < 0 && memcmp(base + off, pw_fp_pattern, 16) == 0)
+            pw_fp_xmm0_off = off;
+        if (pw_fp_mxcsr_off < 0 && *(const uint32_t *)(base + off) == PW_FP_MXCSR)
+            pw_fp_mxcsr_off = off;
+    }
+    pw_fp_scanned = 1;
+    siglongjmp(pw_fp_jmp, 1);
+}
 
 volatile int pw_test_stop;
 static volatile sig_atomic_t *pw_test_flag;
@@ -156,6 +183,64 @@ int main(void)
             say("present: red-column px  = %02x %02x %02x %02x", red[0], red[1], red[2], red[3]);
             say("present:   red as B,G,R,A is 00 00 ff ff; VideoOut must read byte0 as BLUE");
             say("present:   for that to show red. Format in use is logged above.");
+        }
+    }
+
+    /* ------------------------------------------------- Wine patch constants
+     * Two of the 83 patches carry numbers MEASURED on PS5 firmware, not
+     * derived. Neither can be assumed here, and getting either wrong is
+     * silent: a wrong page size mis-sizes every reservation, a wrong FP offset
+     * means every exception CONTEXT carries corrupt XMM state.
+     *
+     *   0510  "PS5 hosts map memory in 16 KiB pages (measured with sysconf and
+     *          fixed reservations: 64 KiB-aligned requests are honoured,
+     *          4 KiB-aligned ones are not)"
+     *   0501  "found FXSAVE at +320 (XMM0 at +480, MXCSR as loaded), the XSAVE
+     *          header at +832 and the YMM upper halves at +896"
+     *
+     * Same method as upstream's, run on this console. */
+    {
+        /* ---------------------------------------------- 0501, the FP state */
+        say("patch: --- 0501, the signal frame's FP state ---");
+        struct sigaction fsa, fold;
+        memset(&fsa, 0, sizeof fsa);
+        fsa.sa_sigaction = pw_fp_handler;
+        fsa.sa_flags = SA_SIGINFO;
+        sigemptyset(&fsa.sa_mask);
+        if (sigaction(SIGSEGV, &fsa, &fold) == 0) {
+            if (sigsetjmp(pw_fp_jmp, 1) == 0) {
+                uint32_t mx = PW_FP_MXCSR;
+                __asm__ volatile ("ldmxcsr %0" :: "m"(mx));
+                __asm__ volatile ("movups %0, %%xmm0" :: "m"(pw_fp_pattern) : "xmm0");
+                say("patch: faulting deliberately to capture the frame...");
+                *(volatile int *)0 = 1;          /* SIGSEGV */
+            }
+            sigaction(SIGSEGV, &fold, NULL);
+            if (pw_fp_scanned) {
+                say("patch: handler ran. MXCSR 0x%04x found at ucontext+%d",
+                    PW_FP_MXCSR, pw_fp_mxcsr_off);
+                say("patch: XMM0 pattern found at ucontext+%d", pw_fp_xmm0_off);
+                say("patch:   PS5 measured XMM0 at +480 and MXCSR at +464");
+                say("patch:   a different offset here means patch 0501 needs this number");
+            } else {
+                say("patch: handler did not run - the fault was not recoverable");
+            }
+        } else {
+            say("patch: could not install a SIGSEGV handler (errno %d)", errno);
+        }
+
+        say("patch: --- 0510, the host page size ---");
+        say("patch: sysconf(_SC_PAGESIZE) = %ld", sysconf(_SC_PAGESIZE));
+
+        /* The real question is which alignments a FIXED mapping honours, which
+         * is what Wine's reservations depend on — sysconf can disagree. */
+        for (size_t align = 0x1000; align <= 0x10000; align <<= 1) {
+            void *want = (void *)(uintptr_t)(0x60000000u + align);
+            void *got = mmap(want, align, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+            say("patch:   mmap FIXED at %p (align 0x%zx) -> %s", want, align,
+                got == want ? "honoured" : (got == MAP_FAILED ? "refused" : "MOVED"));
+            if (got != MAP_FAILED) munmap(got, align);
         }
     }
 

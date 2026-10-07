@@ -1196,3 +1196,74 @@ it is substitutable rather than impossible — but it is a port, not a flag.
 Mesa RADV checkout instead of Sony's `ps5vk`, and `mesa-build/` holds a working
 Gladius-patched one. One of the harder-looking dependencies was solved days
 before it was needed.
+
+---
+
+## 2026-10-07 — ⚠ checking what is already adjudicated beats re-measuring it
+
+Zak's correction, and it was right: *"The PS4 and PS5 seem similar, so lots learned
+from the PS4 was brought to the PS5. In some cases you are making assumptions on
+things that may already be adjudicated."*
+
+The PS4 came **first**. Upstream's PS5 measurements are often rediscoveries of PS4
+facts that a ten-year-old homebrew scene already settled, and `orbis-compat`
+exists precisely to record them. I had been treating every PS5 constant as needing
+fresh measurement here. That is backwards, and it cost a console crash.
+
+### Patch 0510 was already settled — no measurement needed
+
+```
+orbis_jit.h:54   /// The unit sceKernelMprotect and sceKernelMapDirectMemory work in.
+                 /// 16 KiB, not the 4096 a Linux…
+orbis_jit.h:58   #define ORBIS_JIT_GRANULE 0x4000u
+orbis_mmap.h:77  // rounded up to a 16 KiB page (`addq $0x400f; andq $-0x4000`, so
+                 // PAGE_SIZE is 16 KiB on…
+```
+
+**16 KiB, same as the PS5**, and derived by disassembling the kernel's own
+rounding — better evidence than the probe I was about to run. Patch 0510 applies
+unchanged.
+
+### Patch 0501 is genuinely open, and the header proves why
+
+The SDK's `bits/signal.h` declares a **Linux** `ucontext_t`:
+
+```c
+typedef struct __ucontext {
+    unsigned long uc_flags;        /* FreeBSD puts uc_sigmask FIRST */
+    struct __ucontext *uc_link;
+    stack_t uc_stack;
+    mcontext_t uc_mcontext;
+    ...
+#define SA_SIGINFO 4               /* FreeBSD: 0x0040 */
+#define SA_ONSTACK 0x08000000      /* FreeBSD: 0x0001 */
+```
+
+FreeBSD's is `{ uc_sigmask, uc_mcontext, uc_link, uc_stack, uc_flags }`.
+`orbis-compat` corrects the `SA_*` flags and `stack_t`, but **not** `ucontext_t`
+— so patches 0500 and 0501 are needed here too. What does not transfer is the
+PS5's numbers; what does transfer is that FreeBSD 9's layout is **public source**,
+so these offsets can be derived and then confirmed rather than discovered by
+faulting.
+
+### ⚠ The crash was mine, and reading first would have prevented it
+
+The probe scanned 2048 bytes from `uc`. FreeBSD's `ucontext_t` is around 800;
+upstream's +896 fits a larger PS5 frame, not this one. So it ran off the end into
+unmapped memory **inside a signal handler**, which is unrecoverable.
+
+`orbis-compat` warns about exactly this area in its own words — *"this port's own
+crash reporter has been dying of it since the day it was written"* — and I wrote
+a novel faulting probe anyway.
+
+The same file also documents, measured on hardware, that musl's `SA_SIGINFO` of 4
+means `SA_RESETHAND` to this kernel, so a handler asking for siginfo is installed
+**one-shot and without siginfo**, and arrives with FreeBSD's original
+`void(*)(int, int, struct sigcontext *)` signature.
+
+### The rule this earns
+
+Before measuring anything upstream measured on a PS5: check `orbis-compat`'s
+corrections, the OpenOrbis headers, and FreeBSD 9's public layout. The PS4 is the
+older console and the better documented one. Measure only what none of them
+answer — and bound the measurement to a structure size that is known first.
