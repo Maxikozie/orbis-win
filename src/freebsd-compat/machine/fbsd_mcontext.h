@@ -32,7 +32,12 @@ struct pw_fbsd_mcontext {
     int64_t  mc_len;              /* sizeof(mcontext_t) */
     int64_t  mc_fpformat;
     int64_t  mc_ownedfp;
-    int64_t  mc_spare1[1];
+    /* No mc_spare1 here. Later FreeBSD carries one "to align the next field to
+     * 16 bytes", but in this layout mc_ownedfp ends at 224, which is already
+     * 16-aligned -- adding it pushes mc_fpstate to 240 and makes the struct
+     * 816. The registers above are corroborated offset-for-offset by
+     * nx-on-orbis; this tail is pinned by the total instead, since mc_len must
+     * read 800 and only this arrangement gives it. */
     int64_t  mc_fpstate[64] __attribute__((aligned(16)));
     int64_t  mc_fsbase, mc_gsbase;
     int64_t  mc_spare2[6];
@@ -42,14 +47,20 @@ struct pw_fbsd_mcontext {
  *
  * FreeBSD's ucontext_t begins { sigset_t uc_sigmask; mcontext_t uc_mcontext; }
  * and its sigset_t is 16 bytes, so mcontext sits at +16. The PS5 was MEASURED
- * at +64 (patch 0500's own comment), which means Sony moved it there at least
- * once — so +16 is FreeBSD's answer, not necessarily this console's.
+ * at +64 (patch 0500's own comment).
  *
- * PW_PS4_UCONTEXT_MC_OFFSET overrides it without a rebuild of anything but this
- * file, and mc_len carries sizeof(mcontext_t) which is a cheap self-check: read
- * it at the chosen offset and it should be 800. A wrong offset gives nonsense
- * there rather than silently wrong registers. */
+ * RESOLVED 2026-10-07: the offset is 64 on PS4 too, NOT FreeBSD's 16.
+ * The PS4 ucontext is a 16-byte signal mask + 48 bytes of padding, then the
+ * FreeBSD amd64 mcontext. Corroborated independently by alechurri/nx-on-orbis
+ * (frontend/ps4_platform.cpp: "constexpr std::size_t Mc = 64"), which runs on
+ * the same console with the same SDK and verified its register order against
+ * FreeBSD releng/9.0 sys/amd64/include/ucontext.h. Every one of its register
+ * offsets -- rdi 8 ... ss 192 -- matches this struct exactly, so only the base
+ * was ever in doubt.
+ *
+ * mc_len still carries sizeof(mcontext_t) and remains the cheap self-check:
+ * read it at this offset and it should be 800. */
 #ifndef PW_PS4_UCONTEXT_MC_OFFSET
-#define PW_PS4_UCONTEXT_MC_OFFSET 16
+#define PW_PS4_UCONTEXT_MC_OFFSET 64
 #endif
 #endif

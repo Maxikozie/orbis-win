@@ -1585,3 +1585,77 @@ rejects the conflicting definition.
 remains a guess (+16 from FreeBSD vs the PS5's measured +64), and patch 0883's
 assembly depends on the same number; `mc_len == 800` is the intended runtime
 check.
+
+## Cross-check against alechurri/nx-on-orbis (2026-10-07)
+
+A port of the Eden Switch emulator to PS4 Pro, on the **same stack we use**:
+OpenOrbis 0.5.4, orbis-sdk-v1 (orbis-compat), Mesa RADV, LLVM/libc++ 18. The
+closest prior art to this project -- a large C++ codebase with a JIT running
+natively on this exact console -- so its platform findings are directly
+comparable. Three results:
+
+### 1. The mcontext offset is 64, not 16 -- RESOLVED without a hardware probe
+
+`frontend/ps4_platform.cpp`:
+
+    // PS4 ucontext: 16-byte signal mask + 48 bytes of padding, then a FreeBSD amd64 mcontext.
+    constexpr std::size_t Mc = 64;
+
+So PS4 matches the PS5's measured +64 after all; **our +16 guess was wrong**,
+and it would have produced garbage registers rather than an obvious failure.
+They verified register order against FreeBSD releng/9.0
+`sys/amd64/include/ucontext.h`, and every offset they publish -- rdi 8, rbx 64,
+rbp 72, r15 120, trapno 128, addr 136, err 152, rip 160, cs 168, rflags 176,
+rsp 184, ss 192 -- matches `struct pw_fbsd_mcontext` exactly. Only the base was
+ever in doubt.
+
+Fixing the offset also exposed a real error in our struct: it carried an
+`mc_spare1[1]` that pushed `mc_fpstate` off its 16-byte alignment and made the
+struct 816 bytes. Removed; `sizeof` is now exactly 800, which is what `mc_len`
+must read. Patch 0883 takes the offset from the macro, so the correction
+propagates with no edit to the patch.
+
+They also note the SDK's `bits/signal.h` describes musl's Linux layout rather
+than the kernel's context -- the same orbis-compat trap we hit elsewhere.
+
+### 2. ⚠ OPEN RISK: faults may never reach sigaction on PS4
+
+They install fault handlers with **`sceKernelInstallExceptionHandler`**, not
+`sigaction`, and their dynarmic patch excludes the POSIX path outright:
+
+    -elseif (UNIX AND NOT HAIKUOS)
+    +elseif (UNIX AND NOT HAIKUOS AND NOT PS4)
+    +    # (PS4: faults never reach sigaction there, and the ucontext layout differs; generic below)
+
+**prospero-win uses `sigaction`** (patches 0610, 0710, 0883) and evidently
+works on PS5. If this is a genuine PS4/PS5 divergence it hits the core of the
+port: the DBT's guard pages, lazy commit, and every guest access violation
+depend on SIGSEGV arriving.
+
+Likely fix: install through `sceKernelInstallExceptionHandler` on PS4. The
+handler signature is `void (*)(int signal, void *ucontext)` and the ucontext is
+the same FreeBSD one, so everything above the offset is reusable. Testable on
+hardware cheaply -- take a deliberate fault and see which handler runs.
+
+### 3. They are running a PS4 Pro with the GPU configured as a base PS4
+
+They use the stock orbis-sdk-v1 RADV, described as `"Liverpool" GFX7`. No
+`gladius`, no `0x9924`, no `cu_bitmap` or `num_shader_engines` override
+anywhere in the tree. `sceKernelIsNeoMode()` appears only in `probe/` to
+*print* whether the console is a Pro -- it never reaches the GPU
+configuration.
+
+So this project leaves **half the Pro's CUs masked**, which is the bug
+`patches/0001-orbis-gladius-neo-detection.patch` fixes: compute knee 72 -> 144
+SIMDs, plateau 950 -> 1830 GFLOP/s. They are GPU- and memory-bound (a session
+uses ~4.5 of ~4.6 GiB), so it should matter to them. A second independent
+consumer of the patch, and a reason to get it upstream.
+
+### Worth borrowing
+
+- **~4.4 GiB usable via package layout** -- more than we have arranged; Wine
+  will want it. Their `package-eden.sh` is the reference.
+- Their `probe/probe.c` covers firmware, Neo mode, CPU/TSC clocks and boot
+  memory pools -- overlapping our probe but wider on memory.
+- GFX7 RADV hazard: an indirect draw with a count buffer **hangs the GPU**
+  (`patches/eden/0009`). Relevant whenever we reach real rendering.
