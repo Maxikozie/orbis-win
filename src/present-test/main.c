@@ -24,6 +24,7 @@
 #include "pw_pad_ps4.h"
 #include "pw_pad_ps5.h"
 #include "pw_audio_ps4.h"
+#include "pw_wine_dl_ps4.h"
 #include <math.h>
 #include "pw_present.h"
 #include "prospero_win.h"
@@ -126,6 +127,47 @@ int main(void)
             say("present: red-column px  = %02x %02x %02x %02x", red[0], red[1], red[2], red[3]);
             say("present:   red as B,G,R,A is 00 00 ff ff; VideoOut must read byte0 as BLUE");
             say("present:   for that to show red. Format in use is logged above.");
+        }
+    }
+
+    /* ------------------------------------------------------- module loader
+     * ⚠ THIS CHECKS AN ARITHMETIC CLAIM AGAINST THE CONSOLE.
+     *
+     * pw_prx_parse_module_info() hardcodes PS5 offsets — name at 8, four
+     * segments at 0x108, their count at 0x148, 0x160 bytes total. The PS4
+     * SDK's OrbisKernelModuleInfo computes to exactly the same layout, which
+     * is why the parser is used unmodified. But "computes to" is a claim about
+     * a header, and the kernel is the authority.
+     *
+     * So: ask the kernel about a module, hand the raw bytes to upstream's
+     * parser, and see whether a sane name and plausible segments come back. A
+     * wrong offset here would not error — it would silently read segment
+     * addresses from the wrong place and the descriptor scan would later fail
+     * looking like a missing descriptor. */
+    {
+        PwWineDlOps dlops;
+        if (pw_wine_dl_ps4_ops(&dlops, NULL) == PW_OK) {
+            uint8_t info[PW_PRX_MODULE_INFO_BYTES];
+            memset(info, 0, sizeof info);
+            *(uint64_t *)info = PW_PRX_MODULE_INFO_BYTES;   /* size, as the ABI wants */
+
+            int rc = dlops.module_info(0, info);            /* 0 = this eboot */
+            say("dl: sceKernelGetModuleInfo(0) -> %d", rc);
+            if (rc >= 0) {
+                char name[PW_PRX_MAX_NAME];
+                PwPrxSegment segs[PW_PRX_MAX_SEGMENTS];
+                uint32_t nseg = 0;
+                int prc = pw_prx_parse_module_info(info, name, segs, &nseg);
+                say("dl: pw_prx_parse_module_info -> %d, name '%s', %u segment(s)",
+                    prc, prc == PW_PRX_OK ? name : "?", nseg);
+                for (uint32_t i = 0; i < nseg && i < PW_PRX_MAX_SEGMENTS; i++)
+                    say("dl:   seg %u  %p  %u bytes  prot 0x%x",
+                        i, segs[i].address, segs[i].size, segs[i].protection);
+                say("dl:   a sane name and a text segment here means the PS5");
+                say("dl:   offsets match this console and the parser is portable");
+            }
+        } else {
+            say("dl: ops refused");
         }
     }
 

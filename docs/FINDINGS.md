@@ -778,3 +778,75 @@ heap, threads and a working-directory shim — none of it sits behind a vtable,
 and the 81 Wine patches carry constants that were *measured* on PS5 firmware
 rather than ported. The easy three were easy because somebody designed them that
 way.
+
+---
+
+## 2026-10-07 — the module loader ports too, and the PS5 offsets are right on this console
+
+```
+dl: sceKernelGetModuleInfo(0) -> 0
+dl: pw_prx_parse_module_info -> 0, name 'eboot.bin', 3 segment(s)
+dl:   seg 0  0x400000  589824 bytes  prot 0x5
+dl:   seg 1  0x49c000  688128 bytes  prot 0x3
+dl:   seg 2  0x490000   49152 bytes  prot 0x1
+```
+
+I expected `wine/ps5/` to break the pattern. It mostly does not:
+
+- `pw_wine_prx.c` uses **no Sony APIs at all** — pure PRXDESC1 parsing, which
+  upstream calls host-testable and means it.
+- `pw_wine_dl.c` reaches the kernel only through `PwWineDlOps`: *"The kernel
+  calls are injected so the logic is host-testable."*
+- All three calls exist on the PS4 — `sceKernelLoadStartModule`,
+  `sceKernelGetModuleInfo`, `sceKernelStopUnloadModule` — and `sceKernelDlsym`
+  besides.
+
+`src/native/pw_wine_dl_ps4.c` is **73 lines of forwards**. No guard macro was
+even needed: upstream keeps the Sony calls in a separate `*_libc.c` companion,
+which this build simply does not compile.
+
+### The layout claim, and why it was worth testing rather than computing
+
+`pw_prx_parse_module_info()` hardcodes PS5 offsets. The PS4 SDK's
+`OrbisKernelModuleInfo` computes to the same ones:
+
+| field | computed from the PS4 header | parser expects |
+|---|---|---|
+| `name` | 0x0008 | 0x0008 |
+| `segmentInfo[4]` | 0x0108 | 0x0108 |
+| `segmentCount` | 0x0148 | 0x0148 |
+| total | 0x0160 | 0x0160 |
+
+But that is a claim about a **header**, and the kernel is the authority — so the
+test asks the kernel about module 0 and hands the raw bytes to upstream's
+parser. The result is not merely "no error":
+
+```
+text   0x400000 + 0x90000 = 0x490000   where rodata begins
+rodata 0x490000 + 0x0C000 = 0x49C000   where data begins
+```
+
+**The segments tile exactly**, in the right order, with the right protections
+(0x5 R|X, 0x1 R, 0x3 R|W), and 0x400000 matches the load address from this
+morning's `PRX_SCE_MODULE_LOAD_ERROR` dump. Wrong offsets do not produce a
+contiguous correctly-permissioned tiling by accident.
+
+⚠ A wrong offset here would not have errored. It would have read segment
+addresses from the wrong place, and the descriptor scan would have failed later
+looking like a missing PRXDESC1 — several layers from the cause.
+
+### Four for four
+
+| upstream | lines | this port | lines | upstream reused |
+|---|---|---|---|---|
+| videoout + tiling + AGC | ~350 | `pw_videoout_ps4.c` | 170 | the compositor |
+| pad platform block | ~15 | `pw_pad_ps4.c` | 96 | the whole pad core |
+| audio platform block | ~20 | `pw_audio_ps4.c` | 62 | `pw_audio_ps5_open_port` |
+| dl platform block (`*_libc.c`) | ~70 | `pw_wine_dl_ps4.c` | 73 | dlopen/dlsym/dladdr **and** all PRXDESC1 parsing |
+
+⚠ **Still not generalising to everything.** This proves the *loader* ports. It
+does not load a Wine PRX, because none is built yet — that needs
+`tools/build_wine_ps5.sh`, the 81-patch series, and a working-directory, heap
+and thread shim none of which sits behind a vtable. What it does establish is
+that when a Wine PRX exists, the machinery to find and resolve it is in place
+and its module-info reading is correct on this hardware.
