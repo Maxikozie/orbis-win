@@ -40,6 +40,12 @@ add_library(pw_native_ps4 STATIC
   "${PW}/wine/ps5/pw_wine_prx.c"
   "${PW}/wine/ps5/pw_wine_dl.c"
   "${PW}/wine/ps5/pw_wine_dmem.c"
+  # ⚠ NOTHING TO PORT. pw_wine_heap.c uses only pthread, string.h and
+  # sys/mman.h — no Sony calls at all — so it compiles for the PS4 as-is.
+  # Its *_libc.c companion is deliberately NOT built: that one interposes
+  # malloc/free/realloc globally, and a test should exercise the heap through
+  # its own API before every allocation in the process depends on it.
+  "${PW}/wine/ps5/pw_wine_heap.c"
   pw_videoout_ps4.c
   pw_pad_ps4.c
   pw_audio_ps4.c

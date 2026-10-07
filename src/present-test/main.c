@@ -26,6 +26,7 @@
 #include "pw_audio_ps4.h"
 #include "pw_wine_dl_ps4.h"
 #include "pw_wine_dmem_ps4.h"
+#include "pw_wine_heap.h"
 #include <math.h>
 
 /* One 16 KiB page, for the zero-fill probe. */
@@ -132,6 +133,72 @@ int main(void)
             say("present:   red as B,G,R,A is 00 00 ff ff; VideoOut must read byte0 as BLUE");
             say("present:   for that to show red. Format in use is logged above.");
         }
+    }
+
+    /* ------------------------------------------------------------------ heap
+     * pw_wine_heap exists because of a MEASURED PS5 limit: "the title's libc
+     * malloc stops near 13 MiB". Nobody has that number for a PS4, and it is
+     * the number that decides whether the heap is needed here at all.
+     *
+     * So measure both. Walk libc malloc in 1 MiB blocks until it refuses, then
+     * do the same through prospero's heap. Everything is freed either way, and
+     * the walk is capped well below anything that would disturb the console.
+     */
+    {
+        /* ⚠ TOUCH EVERY 4 KiB, NOT EVERY 16 KiB, AND RAISE THE CEILING.
+         *
+         * The first run reported libc malloc reaching 512 MiB — the ceiling —
+         * against pw_wine_heap's 433. That gap is suspicious in the wrong
+         * direction: both walk the same pool. If flexible memory pages at
+         * 4 KiB, touching one byte per 16 KiB committed only a quarter of each
+         * block and libc's figure is inflated by exactly that. 4 KiB is the
+         * smallest page any of this could use, so it commits whatever the
+         * granule turns out to be. */
+        enum { BLOCK = 1u << 20, CAP = 1024, TOUCH = 4096 };   /* 1 GiB ceiling */
+        static void *held[CAP];
+
+        unsigned n = 0;
+        while (n < CAP && (held[n] = malloc(BLOCK)) != NULL) {
+            /* Touch a byte per page: a pointer that is never written can be
+             * a reservation the kernel has not actually committed. */
+            for (size_t o = 0; o < BLOCK; o += TOUCH) ((volatile char *)held[n])[o] = 1;
+            n++;
+        }
+        say("heap: libc malloc reached %u MiB in %u-byte blocks%s",
+            n, BLOCK, n == CAP ? " (hit the test's ceiling)" : " before refusing");
+        for (unsigned i = 0; i < n; i++) free(held[i]);
+
+        n = 0;
+        while (n < CAP && (held[n] = pw_wine_heap_malloc(BLOCK)) != NULL) {
+            for (size_t o = 0; o < BLOCK; o += TOUCH) ((volatile char *)held[n])[o] = 1;
+            n++;
+        }
+        say("heap: pw_wine_heap reached %u MiB%s",
+            n, n == CAP ? " (hit the test's ceiling)" : " before refusing");
+
+        PwWineHeapStats hs;
+        pw_wine_heap_stats(&hs);
+        say("heap: live %llu mapped %llu peak %llu, %llu allocs %llu failures %llu large",
+            (unsigned long long)hs.live_bytes, (unsigned long long)hs.mapped_bytes,
+            (unsigned long long)hs.peak_mapped_bytes, (unsigned long long)hs.allocations,
+            (unsigned long long)hs.failures, (unsigned long long)hs.large_live);
+        for (unsigned i = 0; i < n; i++) pw_wine_heap_free(held[i]);
+
+        /* ⚠ A POINTER THIS HEAP DID NOT RETURN MUST BE IGNORED, not freed:
+         * Wine's Unix side has allocations from both sides in flight, and
+         * touching a libc block here would corrupt it. */
+        void *foreign = malloc(64);
+        pw_wine_heap_free(foreign);
+        pw_wine_heap_stats(&hs);
+        say("heap: foreign free counted %llu times (expect 1), live now %llu",
+            (unsigned long long)hs.foreign_frees, (unsigned long long)hs.live_bytes);
+        free(foreign);
+
+        /* Alignment and usable size, which realloc and Wine both lean on. */
+        void *a = pw_wine_heap_memalign(4096, 100);
+        say("heap: memalign(4096,100) -> %p aligned=%d usable=%zu",
+            a, a && ((uintptr_t)a & 4095u) == 0, pw_wine_heap_usable_size(a));
+        pw_wine_heap_free(a);
     }
 
     /* --------------------------------------------------------- direct memory

@@ -924,3 +924,69 @@ compiled unmodified.
 these five sits behind a vtable or a `*_HOST_TEST` guard that somebody put there
 on purpose. What is left — the heap, threads, the working-directory shim, and
 the 81 Wine patches whose constants were *measured* on PS5 firmware — does not.
+
+---
+
+## 2026-10-07 — the heap's reason for existing does not apply to the PS4
+
+`pw_wine_heap.c` needed **no porting at all** — 265 lines of pthread, string.h
+and sys/mman.h, no Sony calls anywhere, compiles for the PS4 as-is. Its
+`*_libc.c` companion is deliberately not built: that one interposes malloc/free
+globally, and the heap should be exercised through its own API before every
+allocation in the process depends on it.
+
+But it exists for a **measured PS5 reason**, stated in its own header: *"Heap for
+Wine's Unix side on the PS5, where the title's libc malloc stops near 13 MiB."*
+
+That is not true here.
+
+```
+heap: libc malloc reached 1024 MiB in 1048576-byte blocks (hit the test's ceiling)
+heap: pw_wine_heap reached 433 MiB before refusing
+heap: live 454033408 mapped 461127680 peak 461127680, 433 allocs 1 failures 433 large
+heap: foreign free counted 1 times (expect 1), live now 0
+heap: memalign(4096,100) -> 0x229c01000 aligned=1 usable=100
+```
+
+**PS5 libc malloc: ~13 MiB. PS4 libc malloc: over 1 GiB, never refused.** At
+least 80x, and the real ceiling is unknown because the test stopped first.
+
+And prospero's heap is the *more* constrained of the two on this console: 433
+MiB, because it maps each large block separately and meets a mapping limit libc
+does not.
+
+⚠ **The first run's numbers were right and I distrusted them for a good reason.**
+It touched one byte per 16 KiB, so if flexible memory paged at 4 KiB only a
+quarter of each block would have been committed and libc's figure inflated by
+exactly that. Re-run committing every 4 KiB: **both numbers identical**, 433 MiB
+and the ceiling again. The hypothesis was worth testing and was wrong.
+
+That 433 MiB repeating exactly across two runs is itself the signal — a pool
+limit, not noise.
+
+### What it means for the port
+
+On the PS4, Wine's Unix side can likely use libc malloc directly and skip this
+heap entirely: simpler, and more than twice the headroom. The heap becomes
+insurance rather than necessity.
+
+⚠ **Not yet a decision.** What is measured is *large-block* behaviour, 1 MiB at
+a time. The PS5 cap may bite differently on the small-block path (the heap
+carves power-of-two classes out of 1 MiB mappings for anything under 64 KiB),
+and Wine allocates small far more often than large. Worth measuring before
+anything is removed.
+
+The rest of the heap checks out regardless: foreign frees counted and ignored
+exactly once, `memalign(4096,100)` correctly aligned with usable size 100, live
+bytes back to 0 after every free.
+
+### Six for six
+
+| upstream | lines | this port | lines |
+|---|---|---|---|
+| videoout + tiling + AGC | ~350 | `pw_videoout_ps4.c` | 170 |
+| pad platform block | ~15 | `pw_pad_ps4.c` | 96 |
+| audio platform block | ~20 | `pw_audio_ps4.c` | 62 |
+| dl platform block | ~70 | `pw_wine_dl_ps4.c` | 73 |
+| dmem platform block | ~130 | `pw_wine_dmem_ps4.c` | 121 |
+| **heap** | — | **nothing** | **0** |
