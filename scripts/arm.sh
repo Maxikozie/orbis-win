@@ -22,7 +22,7 @@ say "waiting for GoldHEN on $ORBIS_CONSOLE:$ORBIS_FTP_PORT"
 until [[ $(banner) == 220* ]]; do sleep 5; done
 say "up: $(banner)"
 
-for t in probe triangle; do
+for t in present probe triangle; do
   local_pkg=$(readlink -f "$ROOT/pkgout/$t"/*.pkg 2>/dev/null | head -1)
   [[ -f $local_pkg ]] || { say "no local $t package, skipping"; continue; }
   want=$(stat -c%s "$local_pkg")
