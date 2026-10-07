@@ -29,9 +29,16 @@ static inline int thr_self(long *id)
  * Wine calls thr_set_name purely for debugger and profiler display, so a
  * no-op loses nothing observable; returning 0 keeps the caller's error path
  * quiet about something that was never going to work here. */
+/* prospero-win's wine/ps5/pw_wine_compat_libc.c defines the real one for the
+ * Wine PRX modules; a static inline here would be a redefinition against it.
+ * Standalone titles (presenter, probe) have no such definition and keep this. */
+#ifdef PW_WINE_PRX_BUILD
+int thr_set_name(long id, const char *name);
+#else
 static inline int thr_set_name(long id, const char *name)
 {
     (void)id; (void)name;
     return 0;
 }
+#endif
 #endif

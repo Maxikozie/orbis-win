@@ -1492,3 +1492,96 @@ Sony has moved it at least once.
 
 Nothing here has run on the console. A wrong offset means every exception reads
 the wrong registers.
+
+## Wine PRX modules build for PS4 (2026-10-07)
+
+All eight Unix-side modules now convert to loadable PRX:
+ntdll, win32u, wineserver, winevulkan, opengl32, ws2_32, crypt32, dwrite.
+
+### The export bug that would have wasted a hardware session
+
+`-fvisibility-from-dllstorageclass` is **on by default for the
+`x86_64-scei-ps4` target** (with `-fvisibility-nodllstorageclass=hidden`).
+It makes `__declspec(dllexport)` the only thing that can export a symbol and
+**silently overrides explicit `__attribute__((visibility("default")))`**.
+
+Wine's `DECLSPEC_EXPORT` (include/winnt.h) picks the `visibility("default")`
+branch, not the `__declspec` one, because clang satisfies the `__GNUC__ >= 3.3`
+test first. So every Unix-side export compiled to `GLOBAL HIDDEN` and the
+linker then localized it. The build was clean -- 0 errors, 8 targets, correct
+sizes -- and `ntdll.so` exported **only libc**: `__wine_main` was `LOCAL
+HIDDEN`, so `pw_prx_lookup(descriptor, "__wine_main")` would have found
+nothing at runtime, with no build-time signal anywhere.
+
+Fix: `-fno-visibility-from-dllstorageclass` in CFLAGS. Verified minimal case --
+the attribute alone yields `GLOBAL HIDDEN`, with the flag it yields
+`GLOBAL DEFAULT`.
+
+⚠ Worth reporting upstream: any Wine-on-PS5 build hits this if Sony's clang
+defaults match (it is a PS4/PS5 target feature, not an OpenOrbis one).
+
+### The PRX stage is upstream's, not hand-rolled
+
+`tools/build_wine_ps5.sh` skips its PRX stage on PS4 (`no built
+ps5-native-tool` -- it needs ps5-native-app-boilerplate). Converting the `.so`
+files directly with `create-fself` is **wrong**: exports come from a generated
+**PRXDESC1 descriptor** (`tools/gen_prx_descriptor.py`), not the dynamic
+symbol table, so a direct conversion yields a module exporting libc and
+nothing prospero-win looks up.
+
+`scripts/prx-ps4.sh` reproduces upstream's four steps, substituting
+`create-fself -lib` for the PS5's `ps5-native-tool link --module` + `self
+--sign`. Export lists are upstream's verbatim.
+
+Things that had to be right:
+
+- **`.data.sce_module_param` must be its own output section.** lld merges
+  `.data.*` into `.data`, after which create-fself crashes rather than
+  erroring: `panic: nil pointer dereference` at
+  `OELFGenProgramHeaders.go:151`, because it looks the section up by name and
+  dereferences nil. `src/freebsd-compat/prx_module_param.ld` keeps it with
+  `KEEP` + `INSERT BEFORE .data`.
+- **`crtlib.o`, not `crt1.o`** carries that section -- but it also defines
+  `module_start`/`module_stop`, which the descriptor defines too. Extract the
+  section alone: `llvm-objcopy --only-section=.data.sce_module_param`.
+- **DT_NEEDED is what create-fself resolves imports through.** Without linking
+  against the already-built modules it reports `missing library for symbol
+  (RtlSetLastWin32Error)`. Modules must be built in dependency order, and the
+  stub file must be named for the **soname** (`ntdll.prx`), which is what
+  create-fself opens verbatim -- a `.so` next to it is not found.
+- `libwineshim.a` (this port's stand-in for `wine/ps5/*`) must step aside when
+  the real units are linked, or every `__wrap_*` is defined twice:
+  `PW_PRX_LINK=1`.
+- `link_objects()` drops absolute paths out of make.log, so ntdll's heap and
+  direct-memory objects are named explicitly, as upstream's `link_prx` takes
+  them as its `$3`.
+
+Recorded dependency graph: `win32u → ntdll`; `opengl32 → ntdll, win32u`;
+`ws2_32 → ntdll, win32u, wineserver`.
+
+### Three more header gaps (same musl-vs-BSD shape)
+
+- `RTLD_SELF` -- FreeBSD's `((void *)-3)`, absent from the SDK's dlfcn.h
+- `termios` -- musl spells the speed fields `__c_ispeed`/`__c_ospeed`; BSD code
+  uses `c_ispeed`/`c_ospeed`. The SDK struct has no member by the BSD name, so
+  the macros cannot shadow anything.
+- `sys/extattr.h` -- absent; Orbis carries no extattrs and prospero-win stubs
+  every entry point, so declarations and namespace constants suffice.
+
+Both resolved with `#include_next`, so the SDK header still leads.
+
+`ptrace` needed a one-word patch to prospero-win instead: the PS4 SDK declares
+the address argument `void *` where the PS5 uses `caddr_t`. Same ABI, but C
+rejects the conflicting definition.
+`src/prospero-win-patches-ps4/0001-compat-ptrace-signature-for-ps4-sdk.patch`.
+
+`pw_wine_thread_set_priority` needed no porting at all: it is plain
+`pthread_setschedparam`, and patch 0882 feeds it SCHED_RR with priorities
+695-700 -- inside the 256-767 range measured on Orbis.
+
+### Still unverified on hardware
+
+**Nothing of the Wine build has run on the console.** The mcontext offset
+remains a guess (+16 from FreeBSD vs the PS5's measured +64), and patch 0883's
+assembly depends on the same number; `mc_len == 800` is the intended runtime
+check.
