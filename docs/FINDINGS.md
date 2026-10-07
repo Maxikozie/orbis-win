@@ -1153,3 +1153,46 @@ its virtual symlink table.
 
 What is left is not a vtable: `tools/build_wine_ps5.sh` and the 81-patch series,
 whose constants were *measured* on PS5 firmware rather than ported.
+
+---
+
+## 2026-10-07 — Wine's PE runtime builds (step 1 of 3)
+
+```
+wine runtime manifest check passed: 3 modules, 76 data file(s),
+  wine=490f6d5dcbb2, digest=429f37b6477f264beec5b719a0d9d857412bf20a39bca20bef515faa115a35e4
+```
+
+**Wine 11.17**, the pinned revision, configured `--enable-archs=i386,x86_64
+--disable-tests`. Output: `ntdll.dll`, `kernelbase.dll`, `kernel32.dll`, all
+`PE32 executable for WINE (DLL), Intel i386`, 11 MB, with 11 MB of NLS data
+beside them. The manifest's reproducibility check passed, so a later rebuild of
+the same commit gives byte-identical files.
+
+Needed one host package the script does not name: **FreeType development
+headers**. Configure's other misses (EGL, X11, GL, v4l2) are warnings; FreeType
+is fatal and it is the only one.
+
+### The Wine build is three pieces, not one
+
+Reading `tools/build_wine_ps5.sh` properly changed the estimate:
+
+| piece | needs | state |
+|---|---|---|
+| host PE runtime | mingw, bison, flex, FreeType | **done** |
+| the 81-patch series + ELF link | OpenOrbis SDK | next |
+| **PRX link** | `ps5-native-tool`, foundation `30597512…`, branch `exp/prx-module` | **the obstacle** |
+
+⚠ **The PRX link is the part that could stall this.** It converts and signs
+Wine's modules into something the console loads, and it runs through PS5 tooling
+from a separate repository. Without it the script *skips the PRX link and says
+why* — Wine would build as ELF and never become loadable.
+
+The PS4 substitute is OpenOrbis's own `.sprx` path, which demonstrably works:
+`libc.prx` and `libSceFios2.prx` in our own packages are exactly that format. So
+it is substitutable rather than impossible — but it is a port, not a flag.
+
+⚠ **Vulkan, by contrast, is already in hand.** The script's `--radv DIR` takes a
+Mesa RADV checkout instead of Sony's `ps5vk`, and `mesa-build/` holds a working
+Gladius-patched one. One of the harder-looking dependencies was solved days
+before it was needed.

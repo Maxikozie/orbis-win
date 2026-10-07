@@ -20,3 +20,6 @@ mesa-build/
 
 # upstream PS5 source we port from
 prospero-win/
+
+# Wine source and the staged PE runtime (built by tools/)
+prospero-win/.deps/
