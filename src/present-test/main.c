@@ -203,8 +203,29 @@ int main(void)
             for (int i = 0; i < 1000 && !signalled; i++) usleep(1000);
             say("threads: kill(registered) -> %d, handler ran = %d", k, (int)signalled);
 
-            int p = pw_wine_thread_set_priority(TID, SCHED_OTHER, 0);
-            say("threads: set_priority -> %d (0 is success, else an errno)", p);
+            /* ⚠ SCHED_OTHER=0 WAS REFUSED WITH EINVAL, AND THE HEADER IS THE
+             * SUSPECT. The SDK's sched.h carries musl's LINUX policy numbers —
+             * OTHER 0, FIFO 1, RR 2 — while this kernel is FreeBSD-derived,
+             * where they are FIFO 1, OTHER 2, RR 3. A Linux SCHED_OTHER is
+             * therefore not a policy this kernel knows.
+             *
+             * That is the exact class of defect orbis-compat exists to correct
+             * (musl declaring something differently from Sony's
+             * implementation), so rather than pick a number, ask the kernel
+             * which policies it admits and what priorities each allows. Wine
+             * sets thread priorities, so this has to be right. */
+            say("threads: probing scheduling policies --");
+            for (int pol = 0; pol <= 3; pol++) {
+                int lo = sched_get_priority_min(pol);
+                int hi = sched_get_priority_max(pol);
+                int mid = (lo >= 0 && hi >= lo) ? (lo + hi) / 2 : 0;
+                int rc_lo = pw_wine_thread_set_priority(TID, pol, lo);
+                int rc_mid = pw_wine_thread_set_priority(TID, pol, mid);
+                say("threads:   policy %d  min=%-5d max=%-5d  set(min)=%-3d set(mid)=%d",
+                    pol, lo, hi, rc_lo, rc_mid);
+            }
+            say("threads:   0 means accepted; 22 is EINVAL. FreeBSD numbers them");
+            say("threads:   FIFO 1, OTHER 2, RR 3 — musl's header says OTHER 0.");
 
             pw_wine_thread_unregister(TID);
             int after = pw_wine_thread_kill(getpid(), TID, SIGUSR1);

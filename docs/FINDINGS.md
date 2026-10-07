@@ -990,3 +990,84 @@ bytes back to 0 after every free.
 | dl platform block | ~70 | `pw_wine_dl_ps4.c` | 73 |
 | dmem platform block | ~130 | `pw_wine_dmem_ps4.c` | 121 |
 | **heap** | — | **nothing** | **0** |
+
+---
+
+## 2026-10-07 — threads, and a scheduling fact no header states
+
+`pw_wine_threads.c` needed no porting: 62 lines of pthread, errno, sched,
+signal and unistd. Its companion did — `pw_wine_threads_libc.c` includes
+`<sys/thr.h>` and **the PS4 SDK has no such header**. Replaced in eight lines.
+
+```
+threads: register(0x7357) -> 0
+threads: kill(unregistered) -> -1 errno 3 (ESRCH)
+threads: kill(registered) -> 0, handler ran = 1
+threads: kill after unregister -> -1
+```
+
+The signal reached the specific registered thread, an unregistered id was
+refused rather than guessed at, and unregistering took effect — which matters
+because the kernel reuses thread ids, and a stale entry would deliver Wine's
+suspend signal to the wrong thread.
+
+### ⚠ thr_self is not a function on the PS4
+
+The SDK knows it only as syscall number 432 (`SYS_thr_self`); libkernel exports
+no `thr_self`, `thr_kill` or `thr_kill2`. Which is exactly why this registry
+exists — wineserver signals with `thr_kill2(pid, lwpid, sig)`, no console
+provides it, so ntdll maps kernel ids onto `pthread_t` and `thr_kill2` becomes a
+lookup plus `pthread_kill`.
+
+**Open, deliberately not guessed at:** which `long` ntdll will register as the id
+here. musl's `syscall()` is on the link line but uses Linux conventions, and
+whether `SYS_thr_self` survives that on a FreeBSD-derived kernel is untested. It
+does not matter yet — the registry is a map and any unique key works, which is
+why the test uses synthetic ids — but ntdll and wineserver must agree once both
+are real.
+
+### Orbis admits only the realtime policies, and the range is 256..767
+
+`pthread_setschedparam(SCHED_OTHER, 0)` returned **EINVAL**. Probed on hardware
+rather than reasoned about:
+
+| policy | `sched_get_priority_min` | `max` | `pthread_setschedparam` |
+|---|---|---|---|
+| 0 — musl's `SCHED_OTHER` | -1 | -1 | **22 EINVAL** |
+| 1 — `SCHED_FIFO` | 256 | 767 | **0** |
+| 2 — musl's `SCHED_RR`, FreeBSD's `SCHED_OTHER` | -1 | -1 | **22 EINVAL** |
+| 3 — FreeBSD's `SCHED_RR` | 256 | 767 | **0** |
+
+⚠ **My hypothesis was half right, and the half that was wrong is the
+interesting half.** The SDK's `sched.h` is musl's and carries Linux policy
+numbers (`OTHER 0, FIFO 1, RR 2`) while this kernel is FreeBSD-derived
+(`FIFO 1, OTHER 2, RR 3`) — so I expected policy 2 to be accepted as FreeBSD's
+`SCHED_OTHER`. It is not. **Orbis admits only 1 and 3, the two realtime
+policies, and rejects `SCHED_OTHER` under either numbering.** That is a console
+deciding something, not a header disagreeing.
+
+Consequences for anything using this SDK:
+
+- `SCHED_OTHER` from `sched.h` is **never** valid. Code that passes it gets
+  EINVAL, and the header gives no hint.
+- `SCHED_RR` from `sched.h` is **2**, which is also rejected. The accepted RR is
+  **3**.
+- `SCHED_FIFO` is the one value where musl and this kernel agree.
+- The priority range is **256..767**, stated in no SDK header. `sched_get_
+  priority_min/max` is the only source, and it returns -1 for a policy the
+  kernel does not take — which is a usable probe.
+
+This is the class of defect `orbis-compat` exists to correct, and it is
+uncorrected. Worth sending upstream with the Gladius measurement.
+
+### Seven for seven
+
+| upstream | lines | this port | lines |
+|---|---|---|---|
+| videoout + tiling + AGC | ~350 | `pw_videoout_ps4.c` | 170 |
+| pad platform block | ~15 | `pw_pad_ps4.c` | 96 |
+| audio platform block | ~20 | `pw_audio_ps4.c` | 62 |
+| dl platform block | ~70 | `pw_wine_dl_ps4.c` | 73 |
+| dmem platform block | ~130 | `pw_wine_dmem_ps4.c` | 121 |
+| heap | — | nothing | 0 |
+| threads companion | ~7 | `pw_wine_threads_ps4.c` | 8 |
