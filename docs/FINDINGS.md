@@ -493,7 +493,7 @@ Essentially **identical efficiency on twice the hardware**, which is what
 doubling a compute array looks like and is not what a mislabelled constant looks
 like. It also pins the GPU clock at ~800 MHz rather than the Pro's nominal 911 —
 at 911 the efficiency would have to be 44%, and it would have had to *drop* on
-the larger配置 for no reason.
+the larger configuration for no reason.
 
 ### Attribution is clean
 
