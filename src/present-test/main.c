@@ -42,7 +42,11 @@ static void say(const char *fmt, ...)
 /* A BGRX pixel as pw_present.c lays it down: byte0=B, byte1=G, byte2=R. */
 #define BGRX(r, g, b) (((uint32_t)(r) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(b))
 
-enum { SRC_W = 320, SRC_H = 180 };
+/* ⚠ DELIBERATELY NOT AN EXACT DIVISOR OF 1920x1080. 480x270 (4x) and 320x180
+ * (6x) both fill the screen exactly, leaving no surround — which made the pad
+ * tint invisible and looked like the pad was broken. 300x170 scales 6x to
+ * 1800x1020 and leaves a border on every side. */
+enum { SRC_W = 300, SRC_H = 170 };
 
 int main(void)
 {
@@ -127,16 +131,40 @@ int main(void)
      * The core is upstream's native/pw_pad_ps5.c, unmodified; only the vtable
      * underneath it is ours. If the DualShock drives this, the batching,
      * generation tracking and edge detection above it are working too. */
+    /* ⚠ pw_pad_init REFUSES A NULL MAP: `if(!pad || !map || !count ...) return
+     * PW_ERR_PRECONDITION`. Passing NULL,0 made pw_pad_ps5_open return before
+     * it touched a single platform call, and the failure then printed
+     * pad_init_rc and user_initialize_rc — both still zero from the memset,
+     * which read like the platform had succeeded. A map is not optional. */
+    static const PwPadKeyMap keymap[] = {
+        { 0x4000u, 0x0D, 0x1C, 0, "accept" },   /* CROSS    -> VK_RETURN */
+        { 0x2000u, 0x1B, 0x01, 0, "cancel" },   /* CIRCLE   -> VK_ESCAPE */
+        { 0x8000u, 0x20, 0x39, 0, "space"  },   /* SQUARE   -> VK_SPACE  */
+        { 0x1000u, 0x09, 0x0F, 0, "tab"    },   /* TRIANGLE -> VK_TAB    */
+        { 0x0010u, 0x26, 0x48, 1, "up"     },
+        { 0x0040u, 0x28, 0x50, 1, "down"   },
+        { 0x0080u, 0x25, 0x4B, 1, "left"   },
+        { 0x0020u, 0x27, 0x4D, 1, "right"  },
+    };
+
     PwPadPs5 pad;
     PwPadPs5Ops ops;
     int pad_ready = 0;
-    if (pw_pad_ps4_platform_ops(&ops) == PW_OK &&
-        pw_pad_ps5_open(&pad, &ops, NULL, 0) == PW_OK) {
+    int ops_rc = pw_pad_ps4_platform_ops(&ops);
+    int open_rc = (ops_rc == PW_OK)
+                ? pw_pad_ps5_open(&pad, &ops, keymap, sizeof keymap / sizeof keymap[0])
+                : PW_ERR_PRECONDITION;
+    if (open_rc == PW_OK) {
         pad_ready = 1;
         say("pad: open, user 0x%x handle %d", (unsigned)pad.user_id, pad.pad_handle);
     } else {
-        say("pad: NOT open (init rc %d, user rc %d) - the picture still runs",
-            pad.pad_init_rc, pad.user_initialize_rc);
+        /* Every step, so the failing one names itself rather than being
+         * inferred from two zeroes. */
+        say("pad: NOT open - ops_rc=%d open_rc=%d user_id=%d handle=%d",
+            ops_rc, open_rc, pad.user_id, pad.pad_handle);
+        say("pad:   user_init_rc=%d pad_init_rc=%d terminate_rc=%d",
+            pad.user_initialize_rc, pad.pad_init_rc, pad.terminate_rc);
+        say("pad:   the picture still runs");
     }
 
     /* 320x180 at 6x is 1920x1080, but INTEGER picks the largest fit with the

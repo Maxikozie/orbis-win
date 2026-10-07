@@ -28,7 +28,7 @@ So this is not a port. It is a bring-up, and most of it is measurement.
 | 2c | Gladius detection in RADV | **done — 36 CU confirmed live** |
 | 3 | CTS, and the ring-sizing deltas | — |
 | 4 | OpenGothic, for a frame rate | — |
-| 5 | prospero-win port | **started** — translator builds, presenter works on screen |
+| 5 | prospero-win port | **started** — translator builds; presenter and pad working on hardware |
 
 Target console: PS4 Pro, firmware 9.60, GoldHEN.
 

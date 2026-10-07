@@ -661,3 +661,72 @@ prospero-win (`src/`, 13.5k LOC) builds for the PS4 unmodified and its output
 reaches the screen through a PS4-native presenter. `native/pw_videoout_ps5.c`
 and `pw_agc_ps5.c` are the first two of the ~10.7k LOC platform layer to be
 replaced, and they came to 170 lines.
+
+---
+
+## 2026-10-07 — the DualShock 4 drives prospero-win's pad core
+
+```
+pad: open, user 0x173c98d4 handle 50922752
+pad: pressed 0x00004000 held 0x00004000 L(121,119) R(125,122) L2=  0 R2=  0
+pad: pressed 0x00000200 held 0x00000200 L(121,116) R(125,122) L2=  0 R2=198
+pad: 3600 polls, 30587 connected, 732 empty, 0 errors, 1 generations
+```
+
+CROSS red, CIRCLE green, TRIANGLE yellow, SQUARE blue, L2/R2 dim — all four
+face buttons and both analogue triggers, confirmed on screen.
+
+### The core is upstream's, compiled unmodified
+
+`native/pw_pad_ps5.c` reaches the platform only through `PwPadPs5Ops`, and
+already guards its own PS5 filling of that vtable behind
+`PW_PAD_PS5_HOST_TEST`. Defining it keeps the batching, connect/disconnect
+generations, intercepted samples, edge detection and analogue centring, and
+drops the eight PS5 forwards. `src/native/pw_pad_ps4.c` supplies those — 96
+lines, of which seven functions are one line because **the PS4 exports the same
+eight symbols**.
+
+The ninth is the only real work. `OrbisPadData` and the DualSense sample are not
+binary compatible: `connected` is `uint8_t` here and `int32_t` there, which
+moves every field after it, and the accelerometer and gyro are swapped. So the
+read lands in the PS4's struct and the seven fields `read_batch()` consumes are
+copied by name. Everything else in `PwPadPs5Data` stays zeroed rather than
+inventing a DualSense this console does not have. Button bits need no
+translation — both consoles use Sony's layout.
+
+### What the numbers prove
+
+| reading | what it establishes |
+|---|---|
+| `pressed 0x4000` etc. | edge detection works through a vtable it was never written for |
+| `L(121,117) R(125,121)` at rest | the struct translation landed on the right offsets — near 128 centre with a used pad's drift |
+| `L2=50 R2=198` | the analogue path survives the copy |
+| `0 errors, 1 generations` | it never once thought the controller had disconnected |
+| 30587 samples / 3600 polls | ~8.5 per read: upstream's batching, running |
+
+### Two bugs on the way, both mine, neither the PS4's
+
+**A NULL key map silently disabled the pad.** `pw_pad_init` refuses one outright
+(`if(!pad || !map || !count ...) return PW_ERR_PRECONDITION`), so
+`pw_pad_ps5_open` returned before touching a single platform call. The failure
+message then printed `pad_init_rc` and `user_initialize_rc` — both still zero
+from the memset — which read exactly like the platform layer had succeeded.
+
+⚠ **A misleading diagnostic is worse than none.** The fix was not only the map
+but printing every step, so the failing one names itself instead of being
+inferred from two zeroes.
+
+**The surround kept being invisible** because 480x270 (4x) and 320x180 (6x) both
+fill 1920x1080 *exactly*, leaving no border for the pad to tint — which looked
+like the pad was broken when the pad was fine. 300x170 scales to 1800x1020 at
+60,30 and leaves one. `surround px[0] = 20 18 18 ff` now matches the expected
+value exactly, where before it was reading the white bar.
+
+### Stage 5 platform layer so far
+
+| upstream file | lines | replaced by | lines |
+|---|---|---|---|
+| `pw_videoout_ps5.c` + `pw_videoout_tile.h` + `pw_agc_ps5.c` | ~350 | `pw_videoout_ps4.c` | 170 |
+| `pw_pad_ps5.c`'s platform block | ~15 | `pw_pad_ps4.c` | 96 |
+
+The pad core itself, and the whole of `src/`, are upstream code compiled as-is.
