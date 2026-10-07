@@ -730,3 +730,51 @@ value exactly, where before it was reading the white bar.
 | `pw_pad_ps5.c`'s platform block | ~15 | `pw_pad_ps4.c` | 96 |
 
 The pad core itself, and the whole of `src/`, are upstream code compiled as-is.
+
+---
+
+## 2026-10-07 — audio, and the pattern that has held for three pieces
+
+```
+audio: port 536870919 open, 256 frames per grain at 48000 Hz, S16 stereo
+audio: 187 grains played - a 440 Hz tone, about a second
+```
+
+187 x 256 = 47,872 frames at 48 kHz, 0.997 s, no failed output. Audible on the
+television.
+
+`src/native/pw_audio_ps4.c` is **62 lines**, all forwards. The constants are
+identical on both consoles — `PORT_MAIN` 0, `FORMAT_S16_STEREO` 1, the `0xff`
+system user, `0x8000` for 0 dB — so nothing translates. Worth checking rather
+than assuming: upstream names them privately instead of importing them, and a
+wrong format constant produces **silence rather than an error**, which is the
+hardest kind of wrong to notice.
+
+⚠ The tone plays *before* the video loop, not interleaved. `sceAudioOutOutput`
+blocks until the port takes the grain, and 256 frames at 48 kHz is 5.33 ms
+against a 16.6 ms frame: one grain per frame starves the port, three couples the
+render loop to the audio clock. Wine's driver hands down one grain at a time and
+clocks itself, so the real integration will not have this shape — but a test
+whose job is "does the port open and play" should not inherit a timing problem
+it is not testing.
+
+## The platform layer so far
+
+| upstream | lines | this port | lines | upstream code reused |
+|---|---|---|---|---|
+| `pw_videoout_ps5.c` + `pw_videoout_tile.h` + `pw_agc_ps5.c` | ~350 | `pw_videoout_ps4.c` | 170 | the compositor, unmodified |
+| `pw_pad_ps5.c` platform block | ~15 | `pw_pad_ps4.c` | 96 | the whole pad core, unmodified |
+| `pw_audio_ps5.c` platform block | ~20 | `pw_audio_ps4.c` | 62 | `pw_audio_ps5_open_port`, unmodified |
+| `src/` — the i386 translator | — | — | 0 | 13,519 LOC, unmodified |
+
+**The pattern, three for three:** upstream separated portable code from platform
+code with a vtable and a `*_HOST_TEST` guard, built for host testing, and that
+seam serves a different console just as well. Two of the three ports are forwards
+with one translating function between them; the presenter is larger only because
+the PS4 needs *less* than the PS5 and the difference had to be written down.
+
+⚠ **This does not generalise to what is left.** `wine/ps5/` is a PRX loader, a
+heap, threads and a working-directory shim — none of it sits behind a vtable,
+and the 81 Wine patches carry constants that were *measured* on PS5 firmware
+rather than ported. The easy three were easy because somebody designed them that
+way.
