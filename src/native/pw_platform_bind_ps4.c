@@ -21,6 +21,44 @@
 #include "pw_audio_ps5.h"
 #include "pw_hid_ps5.h"
 
+/* ---- startup: net, and a log channel that cannot fail ----
+ *
+ * ps5log opens its socket in main() before anything else, and NEITHER it nor
+ * wine64_main.c calls sceNetInit. On PS5 the system evidently initialises the
+ * net library for a title; on PS4 sceNetSocket fails without it, and ps5log --
+ * which by design never blocks and never complains -- then streams to nowhere.
+ * Measured 2026-10-07: dev.conf present and correct, listener up, title
+ * running, and not one line arrived.
+ *
+ * A constructor runs before main, so the socket works by the time ps5log asks.
+ * The result also goes to klog via sceKernelDebugOutText, which needs no
+ * library, no configuration and no network -- so there is always one channel
+ * that reports, even when the configured one is the thing that is broken. */
+extern int sceNetInit(void);
+extern int sceKernelDebugOutText(int, const char *);
+
+static void pw_ps4_klog(const char *line)
+{
+    sceKernelDebugOutText(0, line);
+}
+
+/* ⚠ NOT __attribute__((constructor)). The eboot HAS a .init_array holding the
+ * entry, but the SDK's crt1.o never walks it -- measured 2026-10-07: a
+ * constructor produced no klog line while the title plainly ran. What crt1.o
+ * does carry is a WEAK UNDEFINED reference to _init, which it calls when
+ * something defines it. Nothing else here does, so this is the startup hook. */
+void _init(void);
+void _init(void)
+{
+    char line[96];
+    int rc = sceNetInit();
+    /* snprintf would pull in more of libc than a constructor should need. */
+    const char *tail = (rc == 0) ? "ok\n" : "FAILED\n";
+    (void)line;
+    pw_ps4_klog("[ps4-gladius] constructor: sceNetInit ");
+    pw_ps4_klog(tail);
+}
+
 /* ---- our PS4 implementations ---- */
 #include "pw_videoout_ps4.h"
 #include "pw_present.h"

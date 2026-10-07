@@ -25,7 +25,15 @@ say(){ printf '== %s\n' "$*"; }
 
 rm -rf "$OBJ"; mkdir -p "$OBJ"
 INC="-I$PW -I$PW/include -I$PW/src -I$PW/native -I$ROOT/src/native"
-CFL="-std=gnu11 -O2 -fPIC $INC"
+# ⚠ ps5log is a single-header library whose network backend is chosen by what
+# is included BEFORE it (ps5log.h guards every hook with #ifndef). Nothing in
+# the title includes ps5log_ps5_net.h, so it compiled against POSIX
+# socket/connect/fcntl -- which on Orbis are not sceNet, so the channel opened
+# a socket that could never connect and then disabled itself in silence.
+# Measured 2026-10-07: ps5log.o imported plain socket/connect/fcntl.
+# Force-include the sceNet adapters so the hooks resolve to sceNet* instead.
+PS5LOG_NET="-include $PW/native/ps5log/ps5log_ps5_net.h"
+CFL="-std=gnu11 -O2 -fPIC $INC $PS5LOG_NET"
 
 say "compile: portable core (DBT + launcher) and the portable half of native/"
 for f in "$PW"/src/*.c "$PW"/native/wine64_main.c "$PW"/native/pw_data_mount.c \
@@ -86,6 +94,14 @@ if (( PKG )); then
     [ -f "$ROOT/sce_module/$m" ] || { echo "missing sce_module/$m — see sce_module/README.md" >&2; exit 1; }
     EXTRA+=(--extra "$ROOT/sce_module/$m:sce_module/$m")
   done
+  # ⚠ dev.conf must be in the PACKAGE, at /app0/dev.conf. ps5log reads its
+  # destination in main() BEFORE pw_hid_ps5_preload, which wine64_main.c marks
+  # as running "before the /data grant changes the title's credentials" -- so
+  # /data/homebrew/dev.conf is not yet readable and the title logs nowhere.
+  # Measured 2026-10-07: a copy at /data/homebrew alone produced total silence.
+  # The file is gitignored; it holds this workstation's address.
+  [ -f "$ROOT/build/devconf/dev.conf" ] && EXTRA+=(--extra "$ROOT/build/devconf/dev.conf:dev.conf")
+
   # The Wine runtime: eight PRX modules the title dlopens through pw_wine_dl.
   for m in "$PRX"/sce_module/*.prx; do
     EXTRA+=(--extra "$m:sce_module/$(basename "$m")")
