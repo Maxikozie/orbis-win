@@ -79,12 +79,15 @@ gen "$prx/obj/wineserver_desc.c" \
     pw_wineserver_connect pw_wine_thread_register pw_wine_thread_unregister \
     pw_wineserver_call_direct pw_wineserver_try_fast_mutex \
     pw_wineserver_mutex_backend pw_wineserver_sync_backend pw_cwd_share_changes
+gen "$prx/obj/wowprospero_desc.c" __wine_unix_call_funcs
 for m in winevulkan opengl32 ws2_32 crypt32 dwrite; do
     gen "$prx/obj/${m}_desc.c" __wine_unix_call_funcs __wine_unix_call_wow64_funcs
 done
-for d in ntdll win32u wineserver winevulkan opengl32 ws2_32 crypt32 dwrite; do
+for d in ntdll win32u wineserver wowprospero winevulkan opengl32 ws2_32 crypt32 dwrite; do
     $CC -std=gnu11 -O2 -fPIC -I"$root/wine/ps5" -c "$prx/obj/${d}_desc.c" -o "$prx/obj/${d}_desc.o"
 done
+
+stubs=$prx/stubs; rm -rf "$stubs"; mkdir -p "$stubs"
 
 echo "== 3. link + 4. container =="
 # ntdll: loader, compat, sink, cwd. The thread registry belongs to the server.
@@ -108,7 +111,6 @@ status=0
 # create-fself resolves each imported symbol to a providing library, so a module
 # must be built after everything it imports: win32u needs ntdll's Rtl*, the five
 # unixlibs need ntdll's __wine_dbg_*, opengl32/winevulkan need win32u's.
-stubs=$prx/stubs; rm -rf "$stubs"; mkdir -p "$stubs"
 for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
             "win32u|dlls/win32u/win32u.so|" \
             "wineserver|server/wineserver|$srv_shims" \
@@ -145,4 +147,30 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
         echo "  ✗ $name: link"; grep -E "error|undefined" "$log" | head -4 | sed 's/^/      /'; status=1
     fi
 done
+echo "== 5. wowprospero (the i386 DBT as Wine's WoW64 CPU backend) =="
+# Built last because it links against ntdll, which the loop above produces.
+# Not a Wine make target: tools/build_wowprospero.sh builds it with one
+# compiler command over unix.c and prospero-win's DBT, so it is absent from
+# make.log and link_objects() cannot see it. Same source list as upstream.
+WOW_DBT="$root/src/pw_x86_engine.c $root/src/pw_x86_block.c $root/src/pw_x86_cache.c
+         $root/src/pw_x86_hostexec.c $root/src/pw_x86_reencode.c $root/src/pw_x87.c
+         $root/src/pw_guest_fp.c $root/src/pw_vm.c $root/src/pw_vm_posix.c"
+# shellcheck disable=SC2086
+$CC -shared -Wl,-Bsymbolic -Wl,-soname,wowprospero.prx \
+    -D__WINESRC__ -DWINE_UNIX_LIB -D_REENTRANT \
+    -I"$root/wine/wowprospero" -I"$build/include" -I"$work/source/include" \
+    -I"$root/src" -I"$root/include" \
+    "$root/wine/wowprospero/unix.c" $WOW_DBT "$prx/obj/wowprospero_desc.o" \
+    -L"$stubs" "$stubs/ntdll.so" -o "$prx/wowprospero.shared.elf" \
+    > "$prx/wowprospero.link.log" 2>&1 || { echo "  ✗ wowprospero: link"; grep -E "error" "$prx/wowprospero.link.log" | head -3; }
+
+if [ -f "$prx/wowprospero.shared.elf" ]; then
+    if "$oo/bin/linux/create-fself" -in "$prx/wowprospero.shared.elf" \
+           -out "$prx/wowprospero.oelf" -lib "$prx/sce_module/wowprospero.prx" \
+           -libname "wowprospero.prx" -library-path "$stubs:$oo/lib" \
+           >> "$prx/wowprospero.link.log" 2>&1
+    then echo "  ✓ wowprospero  $(du -h "$prx/sce_module/wowprospero.prx" | cut -f1)"
+    else echo "  ✗ wowprospero: create-fself"; tail -3 "$prx/wowprospero.link.log" | sed 's/^/      /'; status=1; fi
+fi
+
 exit $status
