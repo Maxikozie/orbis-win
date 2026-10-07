@@ -20,6 +20,24 @@ enum {
  * what the PS5 original passes (0x200000) and what every PS4 sample passes; a
  * smaller value is accepted and then the scanout reads a misaligned surface. */
 enum { DIRECT_ALIGN = 0x200000 };
+
+/* ⚠ THE PIXEL FORMAT IS MEASURED, NOT ASSUMED.
+ *
+ * MEASURED on hardware 2026-10-07: with A8B8G8R8_SRGB (0x80002200) a source
+ * red column reached memory as 00 00 ff ff — correct B,G,R,A from the portable
+ * compositor — and the television showed it BLUE. So VideoOut reads byte 0 as
+ * red: the memory order it wants is R,G,B,A, exactly as the SDK's name says
+ * when read MSB-first.
+ *
+ * pw_present.c's store_opaque writes B,G,R,A and is portable code we do not
+ * get to change. A8R8G8B8 is the format whose byte 0 is blue, which matches it
+ * without a swizzle pass over 8 MB per frame.
+ *
+ * The SDK #defines only A8B8G8R8, so A8R8G8B8's value is named here. If it is
+ * rejected, open() falls back to the defined one and records which was used —
+ * a wrong guess then costs reversed colours rather than a black screen. */
+enum { PIXEL_A8R8G8B8_SRGB = 0x80000000,   /* byte0=B — what the compositor writes */
+       PIXEL_A8B8G8R8_SRGB = 0x80002200 }; /* byte0=R — reversed from it */
 /* Direct-memory type 3 is WB_ONION on both consoles: CPU-written, GPU/display
  * readable without an explicit flush. WC_GARLIC (type 0) is faster for the GPU
  * and much slower for the CPU writes the compositor does, which is the whole
@@ -72,18 +90,22 @@ int pw_videoout_ps4_open(PwVideoOutPs4 *video)
     for (int i = 0; i < COUNT; i++)
         buffers[i] = (uint8_t *)video->memory + (size_t)i * FRAME;
 
-    OrbisVideoOutBufferAttribute attribute;
-    memset(&attribute, 0, sizeof attribute);
-    sceVideoOutSetBufferAttribute(&attribute,
-                                  ORBIS_VIDEO_OUT_PIXEL_FORMAT_A8B8G8R8_SRGB,
-                                  ORBIS_VIDEO_OUT_TILING_MODE_LINEAR,
-                                  ORBIS_VIDEO_OUT_ASPECT_RATIO_16_9,
-                                  WIDTH, HEIGHT, WIDTH /* pixelPitch */);
-
     (void)sceVideoOutSetFlipRate(video->handle, ORBIS_VIDEO_OUT_FLIP_60HZ);
 
-    if (sceVideoOutRegisterBuffers(video->handle, 0, buffers, COUNT, &attribute) < 0)
-        goto state_failed;
+    static const uint32_t formats[2] = { PIXEL_A8R8G8B8_SRGB, PIXEL_A8B8G8R8_SRGB };
+    int registered = 0;
+    for (unsigned f = 0; f < 2 && !registered; f++) {
+        OrbisVideoOutBufferAttribute attribute;
+        memset(&attribute, 0, sizeof attribute);
+        sceVideoOutSetBufferAttribute(&attribute, formats[f],
+                                      ORBIS_VIDEO_OUT_TILING_MODE_LINEAR,
+                                      ORBIS_VIDEO_OUT_ASPECT_RATIO_16_9,
+                                      WIDTH, HEIGHT, WIDTH /* pixelPitch, in pixels */);
+        video->register_rc = sceVideoOutRegisterBuffers(video->handle, 0, buffers,
+                                                        COUNT, &attribute);
+        if (video->register_rc >= 0) { registered = 1; video->pixel_format = formats[f]; }
+    }
+    if (!registered) goto state_failed;
     video->buffers_registered = 1;
     video->opened = 1;
 
@@ -145,6 +167,24 @@ int pw_videoout_ps4_acquire(PwVideoOutPs4 *video, PwPresentTarget *target)
     if (!video || !target) return PW_ERR_PRECONDITION;
     if (!video->opened) return PW_ERR_STATE;
 
+    /* ⚠ DO NOT HAND OUT A BUFFER THE DISPLAY MAY STILL BE SCANNING.
+     *
+     * The first version flipped and then waited one vblank, with two buffers.
+     * On hardware that flickered: composing 1920x1080x4 with the CPU does not
+     * reliably finish inside a frame, so the flip lands late and the next
+     * compose starts writing the buffer still on screen. A vblank is not the
+     * same event as a flip retiring.
+     *
+     * Three buffers and a wait on numFlipPending fixes both halves: the extra
+     * buffer absorbs a compose that overruns, and the status read is the actual
+     * question ("has the display let go of this one") rather than a proxy. */
+    for (int spin = 0; spin < 600; spin++) {
+        OrbisVideoOutFlipStatus status;
+        if (sceVideoOutGetFlipStatus(video->handle, &status) < 0) break;
+        if (status.numFlipPending < (int32_t)(COUNT - 1)) break;
+        sceVideoOutWaitVblank();
+    }
+
     *target = (PwPresentTarget){
         .pixels = (uint8_t *)video->memory + (size_t)video->next * FRAME,
         .width  = WIDTH,
@@ -171,11 +211,9 @@ int pw_videoout_ps4_present(PwVideoOutPs4 *video)
 
     video->flips++;
     video->next = (video->next + 1u) % COUNT;
-
-    /* Synchronous, as pw_present.h's sink contract requires: when this returns
-     * the lent target may be reused. With two buffers the wait is what stops
-     * the next frame being drawn into the one still on screen. */
-    sceVideoOutWaitVblank();
+    /* The wait moved into acquire(), which is where the question actually
+     * matters — blocking here would stall the caller even when a free buffer
+     * is already available. */
     return PW_OK;
 }
 

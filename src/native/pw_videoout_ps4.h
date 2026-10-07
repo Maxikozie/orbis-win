@@ -28,7 +28,10 @@
 enum { PW_VIDEOOUT_PS4_WIDTH = 1920, PW_VIDEOOUT_PS4_HEIGHT = 1080 };
 /* 1920 * 1080 * 4, rounded up to the 2 MiB direct-memory alignment. */
 #define PW_VIDEOOUT_PS4_FRAME_BYTES 0x800000u
-#define PW_VIDEOOUT_PS4_BUFFERS     2
+/* Three, not two. Two flickered on hardware: a CPU compose of a 1080p surface
+ * does not reliably fit in a frame, so the flip lands late and the next compose
+ * starts on the buffer still being scanned. */
+#define PW_VIDEOOUT_PS4_BUFFERS     3
 
 typedef struct PwVideoOutPs4 {
     void    *memory;
@@ -44,6 +47,9 @@ typedef struct PwVideoOutPs4 {
     int unregister_rc, close_rc, munmap_rc, release_rc;
     /* Which user id opened the output, and what 0xFF returned if it did not. */
     int32_t open_user, open_rc_system;
+    /* Which pixel format VideoOut accepted, and what registration returned. */
+    uint32_t pixel_format;
+    int      register_rc;
 } PwVideoOutPs4;
 
 int pw_videoout_ps4_open(PwVideoOutPs4 *);

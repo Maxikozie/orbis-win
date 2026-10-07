@@ -85,6 +85,10 @@ int main(void)
         video.bytes, PW_VIDEOOUT_PS4_BUFFERS, video.frame_bytes);
     say("present: opened with user 0x%x%s", (unsigned)video.open_user,
         video.open_rc_system ? " (0xFF was refused, fell back)" : "");
+    say("present: pixel format 0x%08x %s (register rc %d)", video.pixel_format,
+        video.pixel_format == 0x80000000u ? "A8R8G8B8 - byte0=B, matches the compositor"
+                                          : "A8B8G8R8 - byte0=R, colours will be REVERSED",
+        video.register_rc);
 
     /* ⚠ READ THE SURFACE BACK BEFORE TRUSTING THE SCREEN. A black television
      * is the same picture whether the compositor wrote nothing, wrote the
@@ -112,8 +116,8 @@ int main(void)
             const uint8_t *red = px + ((size_t)placement.top + 40) * probe_target.stride
                                     + ((size_t)placement.left + 40) * 4u;
             say("present: red-column px  = %02x %02x %02x %02x", red[0], red[1], red[2], red[3]);
-            say("present:   if that reads ff 00 00 ff the surface is B,G,R,A as the compositor");
-            say("present:   intends; if 00 00 ff ff the bytes are reversed from what VideoOut wants");
+            say("present:   red as B,G,R,A is 00 00 ff ff; VideoOut must read byte0 as BLUE");
+            say("present:   for that to show red. Format in use is logged above.");
         }
     }
 
