@@ -586,3 +586,78 @@ needed nothing. What remains is unchanged: ~10,700 LOC of platform layer
 (`native/`, `wine/ps5/`, `wine/wineps5/`) to rewrite against PS4 APIs, and 81
 Wine patches whose constants are *measured* rather than ported and must be
 re-measured on Orbis.
+
+---
+
+## 2026-10-07 — the first prospero-win frame on a PlayStation 4
+
+`Prospero Presenter` (GLDS10003) draws three colour bars through the
+**unmodified** portable compositor and flips them: white bar on top, RED GREEN
+BLUE left to right, 600 flips, steady.
+
+```
+present: 25165824 bytes mapped, 3 buffers of 8388608
+present: opened with user 0xff
+present: pixel format 0x80000000 A8R8G8B8 - byte0=B, matches the compositor (register rc 0)
+present: compose -> 0, placed 1920x1080 at 0,0 scale 4
+present: 600 frames, 600 flips
+```
+
+### The port is 170 lines, against ~350 on the PS5
+
+| PS5 | PS4 |
+|---|---|
+| tiled intermediate + `pw_videoout_tile.h` index tables | `ORBIS_VIDEO_OUT_TILING_MODE_LINEAR` — gone |
+| `pw_agc_ps5.c`: DMA the tiled frame into scanout, `sceAgcDcbSetFlip` | `sceVideoOutSubmitFlip` — gone |
+| one copy per frame | none: the compositor draws straight into scanout |
+
+`pw_present.h`'s target is already *"a writable linear BGRX surface"*, which is
+exactly what a linear VideoOut buffer is. The PS5 needed the tiling pass and the
+DMA because its scanout is tiled; the PS4's is not, so the whole intermediate
+disappears.
+
+### Two bugs, both found by running it, both measured rather than reasoned
+
+**The pixel format was reversed.** With `A8B8G8R8_SRGB` (the only format the SDK
+`#define`s) a red source column reached memory as `00 00 ff ff` — *correct*
+B,G,R,A from the compositor — and the television showed it **blue**. So VideoOut
+reads byte 0 as red: the order it wants is R,G,B,A, exactly as the name says
+read MSB-first.
+
+`pw_present.c`'s `store_opaque` writes B,G,R,A and is portable code we do not
+change, so the fix is the format whose byte 0 is blue: **`A8R8G8B8`,
+`0x80000000`**. Not in the SDK headers; named in `pw_videoout_ps4.c` with the
+measurement beside it. `open()` tries it first and falls back to the defined
+one, recording which was accepted — so a wrong guess would cost reversed colours
+rather than a black screen. It was accepted first try.
+
+⚠ My diagnostic *text* had the interpretation backwards on the first run. The
+numbers were right and the conclusion from them was wrong by one inversion,
+which is worth remembering: a dump is only as good as the sentence next to it.
+
+**Two buffers flickered.** "Flip, then wait one vblank" is not enough — a CPU
+compose of 1920x1080x4 does not reliably finish inside a frame, so the flip
+lands late and the next compose starts writing the buffer still being scanned.
+**A vblank is not the same event as a flip retiring.**
+
+Three buffers now, and `acquire()` waits on `numFlipPending` from
+`sceVideoOutGetFlipStatus` — the actual question — rather than on a vblank. The
+wait lives in `acquire()` rather than `present()`, because blocking after a flip
+stalls a caller that already has a free buffer to draw into.
+
+### Two things the run corrected about my own expectations
+
+- 480x270 at 4x is **exactly** 1920x1080, so there is no surround; the
+  "surround pixel" check was reading the white bar. The composition was right
+  and the expectation was wrong.
+- `sceVideoOutOpen` with `0xFF` worked, so the signed-in-user fallback never
+  fired. Kept anyway — it costs one call and removes a failure mode that has no
+  other symptom.
+
+### What this establishes for stage 5
+
+The platform boundary is real now, not theoretical. The portable half of
+prospero-win (`src/`, 13.5k LOC) builds for the PS4 unmodified and its output
+reaches the screen through a PS4-native presenter. `native/pw_videoout_ps5.c`
+and `pw_agc_ps5.c` are the first two of the ~10.7k LOC platform layer to be
+replaced, and they came to 170 lines.

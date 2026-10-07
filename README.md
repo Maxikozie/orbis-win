@@ -28,7 +28,7 @@ So this is not a port. It is a bring-up, and most of it is measurement.
 | 2c | Gladius detection in RADV | **done — 36 CU confirmed live** |
 | 3 | CTS, and the ring-sizing deltas | — |
 | 4 | OpenGothic, for a frame rate | — |
-| 5 | prospero-win port | — |
+| 5 | prospero-win port | **started** — translator builds, presenter works on screen |
 
 Target console: PS4 Pro, firmware 9.60, GoldHEN.
 
@@ -71,6 +71,8 @@ the left-hand name; the home screen shows the right-hand one.
 | `triangle` | GLDS10001 | Gladius Triangle |
 | `probe` | GLDS10002 | Gladius Probe |
 | `present` | GLDS10003 | Prospero Presenter |
+
+The presenter is the first prospero-win code to put a frame on a PS4.
 
 Read them back out of a built package with the SFO parser in `docs/FINDINGS.md`
 rather than trusting this table — an installed title keeps the name it was
