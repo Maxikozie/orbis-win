@@ -46,11 +46,15 @@ add_library(pw_native_ps4 STATIC
   # malloc/free/realloc globally, and a test should exercise the heap through
   # its own API before every allocation in the process depends on it.
   "${PW}/wine/ps5/pw_wine_heap.c"
+  # Also pure POSIX; its *_libc.c companion includes <sys/thr.h>, which the
+  # PS4 SDK does not have, so src/native/pw_wine_threads_ps4.c replaces it.
+  "${PW}/wine/ps5/pw_wine_threads.c"
   pw_videoout_ps4.c
   pw_pad_ps4.c
   pw_audio_ps4.c
   pw_wine_dl_ps4.c
-  pw_wine_dmem_ps4.c)
+  pw_wine_dmem_ps4.c
+  pw_wine_threads_ps4.c)
 target_include_directories(pw_native_ps4 PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}" "${PW}/src" "${PW}/native" "${PW}/wine/ps5" "${PW}/include")
 target_compile_options(pw_native_ps4 PRIVATE -std=c11 -O2 -Wall -Wextra)

@@ -27,7 +27,15 @@
 #include "pw_wine_dl_ps4.h"
 #include "pw_wine_dmem_ps4.h"
 #include "pw_wine_heap.h"
+#include "pw_wine_threads.h"
+#include <pthread.h>
+#include <signal.h>
+#include <sched.h>
 #include <math.h>
+#include <errno.h>
+
+void *pw_test_worker(void *);
+extern volatile int pw_test_stop;
 
 /* One 16 KiB page, for the zero-fill probe. */
 #define PW_WINE_DMEM_PAGE_PROBE 0x4000u
@@ -55,6 +63,20 @@ static void say(const char *fmt, ...)
  * tint invisible and looked like the pad was broken. 300x170 scales 6x to
  * 1800x1020 and leaves a border on every side. */
 enum { SRC_W = 300, SRC_H = 170 };
+
+volatile int pw_test_stop;
+static volatile sig_atomic_t *pw_test_flag;
+static volatile int *pw_test_ready;
+
+void pw_test_sigusr(int sig) { (void)sig; if (pw_test_flag) *pw_test_flag = 1; }
+
+void *pw_test_worker(void *unused)
+{
+    (void)unused;
+    if (pw_test_ready) *pw_test_ready = 1;
+    while (!pw_test_stop) usleep(2000);
+    return NULL;
+}
 
 int main(void)
 {
@@ -132,6 +154,65 @@ int main(void)
             say("present: red-column px  = %02x %02x %02x %02x", red[0], red[1], red[2], red[3]);
             say("present:   red as B,G,R,A is 00 00 ff ff; VideoOut must read byte0 as BLUE");
             say("present:   for that to show red. Format in use is logged above.");
+        }
+    }
+
+    /* --------------------------------------------------------------- threads
+     * The in-process wineserver suspends, interrupts and kills Wine's threads
+     * with thr_kill2(pid, lwpid, sig). No console provides it, so ntdll
+     * registers each thread's kernel id against its pthread_t and thr_kill2
+     * becomes a lookup plus pthread_kill. This is that registry, driven.
+     *
+     * ⚠ SYNTHETIC IDS ON PURPOSE. thr_self is not an exported function on the
+     * PS4 — the SDK knows it only as syscall 432 — and which `long` ntdll will
+     * end up registering is unsettled. The registry does not care: it is a map
+     * from a key to a pthread_t, and what is under test is the map, the signal
+     * delivery and the priority call, not the provenance of the key. */
+    {
+        static volatile sig_atomic_t signalled;
+        static volatile int worker_ready;
+        signalled = 0; worker_ready = 0;
+        pw_test_flag = &signalled; pw_test_ready = &worker_ready;
+
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = (void (*)(int))(void *)0;   /* replaced below */
+        /* A handler that only sets a flag: everything else is unsafe here. */
+        extern void pw_test_sigusr(int);
+        sa.sa_handler = pw_test_sigusr;
+        sigemptyset(&sa.sa_mask);
+        int sig_rc = sigaction(SIGUSR1, &sa, NULL);
+
+        pthread_t worker;
+        int t_rc = pthread_create(&worker, NULL, pw_test_worker, NULL);
+        say("threads: sigaction -> %d, pthread_create -> %d", sig_rc, t_rc);
+
+        if (t_rc == 0) {
+            for (int i = 0; i < 1000 && !worker_ready; i++) usleep(1000);
+
+            const long TID = 0x7357;                 /* any unique key */
+            int r = pw_wine_thread_register(TID, worker);
+            say("threads: register(0x%lx) -> %d", TID, r);
+
+            /* An id that was never registered must be refused, not guessed at. */
+            int miss = pw_wine_thread_kill(getpid(), 0xBAD1, SIGUSR1);
+            say("threads: kill(unregistered) -> %d errno %d (expect -1/ESRCH=%d)",
+                miss, errno, ESRCH);
+
+            int k = pw_wine_thread_kill(getpid(), TID, SIGUSR1);
+            for (int i = 0; i < 1000 && !signalled; i++) usleep(1000);
+            say("threads: kill(registered) -> %d, handler ran = %d", k, (int)signalled);
+
+            int p = pw_wine_thread_set_priority(TID, SCHED_OTHER, 0);
+            say("threads: set_priority -> %d (0 is success, else an errno)", p);
+
+            pw_wine_thread_unregister(TID);
+            int after = pw_wine_thread_kill(getpid(), TID, SIGUSR1);
+            say("threads: kill after unregister -> %d (expect -1)", after);
+
+            pw_test_stop = 1;
+            pthread_join(worker, NULL);
+            say("threads: worker joined");
         }
     }
 
