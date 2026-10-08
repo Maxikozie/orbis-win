@@ -86,6 +86,8 @@ char *__wrap_strdup(const char *text)
  * and it terminates on the first entry instead of faulting. The init array runs
  * from module_start, so this is in place before any entry point is called. */
 extern char **environ;
+extern char *program_invocation_short_name;
+extern char *program_invocation_name;
 static char *pw_empty_environ[1] = { NULL };
 
 __attribute__((constructor)) static void pw_publish_environ(void)
@@ -96,4 +98,25 @@ __attribute__((constructor)) static void pw_publish_environ(void)
         environ = pw_empty_environ;
         sceKernelDebugOutText(0, "libvulkan: environ was NULL, published an empty one\n");
     }
+
+    /* ⚠ And the process name, which is the NULL driconf actually met. Mesa's
+     * util_get_process_name() returns program_invocation_short_name, a glibc
+     * convention: the symbol exists here as a weak object the static libc
+     * carries, but nothing on this console ever sets it, so it is NULL. That
+     * NULL reaches driParseConfigFiles as the application name and is strdup'd
+     * on the way -- which is why the strdup guard fired and the fault stayed in
+     * driconf after environ turned out to be fine:
+     *
+     *     libvulkan: strdup(NULL) refused
+     *     syscall fault ... at libSceLibcInternal.sprx+0xbb8af, address 0
+     *       called from libvulkan.prx+0x13fa734  -> driParseConfigFiles+0xbe4
+     *
+     * A constant is the honest answer: driconf uses the name only to match
+     * per-application workarounds, and there are none for a title that reports
+     * itself as this. Both symbols are writable data in the module. */
+    if (!program_invocation_short_name) {
+        program_invocation_short_name = (char *)"prospero-win";
+        sceKernelDebugOutText(0, "libvulkan: process name was NULL, set to prospero-win\n");
+    }
+    if (!program_invocation_name) program_invocation_name = program_invocation_short_name;
 }
