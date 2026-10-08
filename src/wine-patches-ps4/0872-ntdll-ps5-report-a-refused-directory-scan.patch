@@ -2,48 +2,46 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: prospero-win <prospero-win@invalid>
 Subject: [PATCH] ntdll: Report a refused directory scan on ps5.
 
-Every lookup that needs a case-insensitive search fails on this console. A
-32-bit game asks for its imports exactly as its import table spells them --
-USER32.dll, OLEAUT32.dll, PSAPI.DLL -- while the prefix holds user32.dll and
-the rest in lower case, so the fstatat shortcut misses and the whole lookup
-rests on pw_cwd_scan_directory. It answers no, GTA IV loses all 21 of its
-imports, and loader_init ends the process with c0000135.
+find_file_in_dir's case-insensitive search is the only caller of
+pw_cwd_scan_directory, so when that call breaks nothing else notices: a
+prefix written in lower case reaches the search only for a name spelled
+some other way, and then every such lookup fails at once. That is how
+readdir failing on /data went unseen until a 32-bit game asked for its
+imports exactly as its import table spells them and GTA IV lost all
+twenty-one of them to c0000135.
 
-The two ways it can answer no are far apart. Either the directory was never
-resolved (ret < 0: pw_cwd_resolve_at answers EBADF for a descriptor whose
-path it does not track, and root_fd may well be one), or it was listed and
-nothing matched (ret == 0), which would put the fault in the listing or in
-match_dir_entry instead. Name which, with the directory and the wanted name,
-and stop after 24 so the game's own opens cannot drown it.
+Report a refusal, with the directory, the name and errno. Not a miss: a
+name that is simply not in the directory is the ordinary answer -- the
+loader looks in the game's own folder first -- and reporting those spends
+the budget before anything interesting happens. The cap is 32.
+
+This also says whether a DLL load ending in STATUS_NO_MEMORY took it from
+here or from somewhere further in.
 
 Diagnostic only; no behaviour changes.
 diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
-index ec35dea354..f4733ccb58 100644
+index ec35dea354..46bf0d69bc 100644
 --- a/dlls/ntdll/unix/file.c
 +++ b/dlls/ntdll/unix/file.c
-@@ -3177,6 +3177,27 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
+@@ -3177,6 +3177,23 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
      match.length = length;
      match.is_name_8_dot_3 = is_name_8_dot_3;
      ret = pw_cwd_scan_directory( root_fd, unix_name, match_dir_entry, &match, &flags );
-+    /* ⚠ DIAGNOSTIC. Every lookup that needs this scan fails on this console,
-+     * and nothing says which half is wrong. A 32-bit game asks for its imports
-+     * exactly as its import table spells them -- USER32.dll, OLEAUT32.dll,
-+     * PSAPI.DLL -- while the prefix holds user32.dll, so the fstatat shortcut
-+     * above misses and everything then rests on this one call. It is answering
-+     * no, and the only two ways it can are far apart: the directory could not
-+     * be resolved at all (ret < 0, and pw_cwd_resolve_at answers EBADF for a
-+     * descriptor whose path it is not tracking, which root_fd may well be), or
-+     * it was read and no entry matched (ret == 0), which would put the fault in
-+     * the listing or the comparison instead. Say which, with the directory and
-+     * the name, and stop after a few so a game's own opens cannot drown it. */
++    /* ⚠ DIAGNOSTIC. Only a refusal, never a miss: a name that is simply not in
++     * the directory is the ordinary answer here -- the loader looks for every
++     * dll in the game's own folder first -- and reporting those spends the
++     * budget before anything interesting happens. A refusal is different: this
++     * search is the only caller, so when it breaks, every lookup that needs a
++     * name spelled some other way fails at once and nothing else notices.
++     * errno names which, and whether a DLL load that ends in STATUS_NO_MEMORY
++     * got it from here or from somewhere further in. */
 +    {
 +        static int reported;
-+        if (ret <= 0 && reported < 24)
++        if (ret < 0 && reported < 32)
 +        {
 +            reported++;
-+            ERR( "ps5 scan: dir %s want %s -> ret %d errno %d (root_fd %d)\n",
-+                 debugstr_a(unix_name), debugstr_wn(name, length), ret,
-+                 ret < 0 ? errno : 0, root_fd );
++            ERR( "ps5 scan refused: dir %s want %s -> errno %d (root_fd %d)\n",
++                 debugstr_a(unix_name), debugstr_wn(name, length), errno, root_fd );
 +        }
 +    }
      if (ret < 0) return errno_to_status( errno );
