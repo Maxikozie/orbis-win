@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] diagnostics: name the module a fault happened in.
+
+early_fault maps rip against ntdll's segments, which covers nothing once the
+fault is inside another PRX -- and on PS4 every interesting crash so far has
+been, most recently a null dereference in the in-process server reported only
+as
+
+    PW_WINE64 fault signal=0xb addr=0x0 rip=0x800c99c4d
+
+with no way to tell which module that address belongs to. pw_wine_dl already
+tracks every module it loaded and pw_wine_dl_addr maps an address to one, so
+resolve that once at install time (pw_prx_lookup is not for a signal handler)
+and add module= and module_offset= to the emergency line.
+---
+diff --git a/native/pw_diagnostics.c b/native/pw_diagnostics.c
+index d1bec99..3987663 100644
+--- a/native/pw_diagnostics.c
++++ b/native/pw_diagnostics.c
+@@ -226,9 +226,10 @@ static size_t append_hex(char *line, size_t n, uint64_t value)
+ }
+ 
+ void pw_diagnostics_emergency(int signal, uintptr_t address, uint64_t pc,
+-                              int segment, uint64_t segment_offset)
++                              int segment, uint64_t segment_offset,
++                              const char *module, uint64_t module_offset)
+ {
+-    char line[192];
++    char line[320];
+     size_t n = 0;
+ 
+     n = append_text(line, n, "PW_WINE64 fault signal=0x");
+@@ -243,6 +244,15 @@ void pw_diagnostics_emergency(int signal, uintptr_t address, uint64_t pc,
+         n = append_text(line, n, " offset=0x");
+         n = append_hex(line, n, segment_offset);
+     }
++    /* ⚠ A bare rip names nothing once the fault is outside ntdll -- which is
++     * where every interesting crash has been. pw_wine_dl tracks each module it
++     * loaded, so report which one and the offset inside it. */
++    if (module) {
++        n = append_text(line, n, " module=");
++        for (const char *p = module; *p && n < sizeof(line) - 24; p++) line[n++] = *p;
++        n = append_text(line, n, " module_offset=0x");
++        n = append_hex(line, n, module_offset);
++    }
+     line[n++] = '\n';
+     /* write() and send() only: no lock, no allocation, no formatting library. */
+     if (fd >= 0) { ssize_t result = write(fd, line, n); (void)result; }
+diff --git a/native/pw_diagnostics.h b/native/pw_diagnostics.h
+index b7aead5..5282c82 100644
+--- a/native/pw_diagnostics.h
++++ b/native/pw_diagnostics.h
+@@ -22,7 +22,8 @@ void pw_diagnostics_status(char *buffer, size_t size);
+  * the live channel; never takes a mutex. segment is the ntdll segment holding
+  * pc (-1 when none), and segment_offset pc's offset in it. */
+ void pw_diagnostics_emergency(int signal, uintptr_t address, uint64_t pc,
+-                              int segment, uint64_t segment_offset);
++                              int segment, uint64_t segment_offset,
++                              const char *module, uint64_t module_offset);
+ #ifdef PW_DIAGNOSTICS_TESTING
+ void pw_diagnostics_test_retry_interval(uint64_t ns);
+ #endif
+diff --git a/native/pw_wine_library.c b/native/pw_wine_library.c
+index a2b28e3..e1fb5c1 100644
+--- a/native/pw_wine_library.c
++++ b/native/pw_wine_library.c
+@@ -8,7 +8,10 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include <dirent.h>
+-#ifndef __linux__
++/* The PS4 SDK declares getdents in <dirent.h> as
++ *   int getdents(int, struct dirent *, size_t);
++ * so redeclaring it here is a conflicting type rather than a missing one. */
++#if !defined(__linux__) && !defined(__PS4__)
+ int getdents(int fd, char *buffer, int size);
+ #endif
+ 
+@@ -112,7 +115,11 @@ static int scan_getdents(PwWineLibrary *library, const char *directory)
+     int fd = open(directory, O_RDONLY | O_DIRECTORY), got, error;
+ 
+     if (fd < 0) return -1;
++    #if defined(__PS4__)
++    while ((got = (int)getdents(fd, (struct dirent *)buffer, sizeof(buffer))) > 0)
++#else
+     while ((got = getdents(fd, (char *)buffer, sizeof(buffer))) > 0)
++#endif
+         if (pw_wine_library_dirents(buffer, (size_t)got, add_name, library) < 0) {
+             errno = EINVAL;
+             got = -1;
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 23e8331..79a05c8 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -38,6 +38,7 @@
+ #include "pw_videoout_ps5.h"
+ #include "pw_wine_library.h"
+ #include "pw_wine_prefix.h"
++#include "../wine/ps5/pw_wine_dl.h"
+ #include "../src/pw_present.h"
+ #include "../src/pw_spinner.h"
+ #include "pw_wine_display.h"
+@@ -814,9 +815,13 @@ static void run_launcher(void)
+  * RIP is read at the measured ucontext offset (224). */
+ static PwWineStart *fault_start;
+ 
++/* Resolved once, at install time: pw_prx_lookup is not for a signal handler. */
++static int (*fault_dl_addr)(const void *, PwWineDlInfo *);
++
+ static void early_fault(int sig, siginfo_t *info, void *opaque)
+ {
+-    uint64_t rip = 0, offset = 0;
++    uint64_t rip = 0, offset = 0, module_offset = 0;
++    const char *module = NULL;
+     int segment = -1;
+ 
+     memcpy(&rip, (const uint8_t *)opaque + 224, sizeof(rip));
+@@ -828,7 +833,15 @@ static void early_fault(int sig, siginfo_t *info, void *opaque)
+             break;
+         }
+     }
+-    pw_diagnostics_emergency(sig, (uintptr_t)(info ? info->si_addr : NULL), rip, segment, offset);
++    if (segment < 0 && fault_dl_addr) {
++        PwWineDlInfo where = { 0 };
++        if (fault_dl_addr((const void *)(uintptr_t)rip, &where) && where.path) {
++            module = where.path;
++            module_offset = rip - (uint64_t)(uintptr_t)where.base;
++        }
++    }
++    pw_diagnostics_emergency(sig, (uintptr_t)(info ? info->si_addr : NULL), rip,
++                             segment, offset, module, module_offset);
+     _exit(3);
+ }
+ 
+@@ -837,6 +850,8 @@ static void install_early_fault_report(PwWineStart *start)
+     struct sigaction action;
+ 
+     fault_start = start;
++    fault_dl_addr = (int (*)(const void *, PwWineDlInfo *))
++        (uintptr_t)pw_prx_lookup(start->descriptor, "pw_wine_dl_addr");
+     memset(&action, 0, sizeof(action));
+     action.sa_sigaction = early_fault;
+     action.sa_flags = SA_SIGINFO;
