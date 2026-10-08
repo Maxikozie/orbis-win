@@ -2116,3 +2116,46 @@ which is itself the shared-libc fix working.
    directly.
 2. The raw-syscall/SIGSYS issue is worth solving on its own: it is the same
    fault that kills a title returning from `main`, and it will keep appearing.
+
+## The SIGSYS was fatal_error; the real failure is create_server_dir (2026-10-07)
+
+SIGSYS is **not catchable** on this kernel -- it kills the title before any
+handler runs, so installing one changed nothing. What does work: the crash dump
+carries a **dynamic libraries** section listing every module's text range, and
+the title now logs its own segment bases at load, so klog's backtrace can be
+symbolised afterwards against the unstripped `.shared.elf` files.
+
+Doing that turned a bare list of addresses into:
+
+    wineserver+0x8a0e6   fatal_error
+    wineserver+0x8ba16   create_server_dir
+    wineserver+0x8bc52   open_master_socket
+    wineserver+0x69a63   start_inprocess_server
+    ntdll+0x7e507        connect_inprocess_server
+    ntdll+0x7cc25        server_connect
+    ntdll+0x6d544        start_main_thread
+
+So the SIGSYS is a **red herring**: `create_server_dir` fails, calls
+`fatal_error`, and `fatal_error` dies trying to write its message to a stderr
+that goes nowhere on this console. The message that would have told us
+everything is the thing that killed the process.
+
+### ⚠ A prefix written over FTP is not writable by the title
+
+Same ownership problem seen earlier in reverse: `/data/prospero-win` was created
+by the title and the FTP server could not write into it until `SITE CHMOD 777`.
+The prefix pushed by `pw_prefix.py` belongs to the FTP server, and the title
+has to create its server directory inside it. Chmod the library root, the
+prefix and its drive_c after any push.
+
+### Also confirmed by this dump
+
+`libSceLibcInternal.sprx` **is loaded** (text 0x800090000-0x8001b8000), which
+settles the doubt about whether `PW_SHARED_LIBC` could bind at runtime. It can,
+and does.
+
+### Worth keeping
+
+Logging module segment bases at load costs three lines and is the only reason
+an uncatchable crash is diagnosable at all. Combined with the dump's own module
+list, any address in any module can be named after the fact.
