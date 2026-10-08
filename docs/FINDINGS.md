@@ -2506,3 +2506,85 @@ only `fd->fd_ops->` use in `server/fd.c` that checks neither the pointer nor the
 member -- every other site guards with `if (fd->fd_ops->member)`, which still
 assumes `fd_ops` itself. On a build where an ownerless fd can reach a handle
 this is a server-killing NULL dereference rather than an error return.
+
+## readdir does not list /data, and it cost GTA IV every import (2026-10-08)
+
+With patch 0871 in, GTA IV's own startup ran -- opening files, mapping its
+archives, reading the registry -- and then the process ended with no
+explanation. The log stopped mid-startup and the native alive ticks stopped at
+the same instant, which read as a hang on a shared lock. It was neither.
+
+**The instrument was lying.** `pw_diagnostics_log` buffers into a 64 KiB
+`pending` and writes only on `flush()`, which runs on a 100 ms tick or at
+`pw_diagnostics_close`. A process Wine terminates returns to neither, so
+everything still buffered is dropped -- and the runs worth reading are exactly
+those. One buffer explained both symptoms: the Wine records and the alive ticks
+were simply never written. Flushing per record took the session log from 4.7 KB
+to 115 KB and the answer was in the part that had always been discarded:
+
+    err:module:import_dll Library USER32.dll (needed by GTAIV.exe) not found
+    err:module:import_dll Library PSAPI.DLL  (needed by GTAIV.exe) not found
+    err:module:loader_init Importing dlls for GTAIV.exe failed, status c0000135
+
+Twenty-one imports, every one of them.
+
+### The shape that pointed the wrong way
+
+`USER32.dll` failed instantly while `user32.dll` loaded moments later at
+7B720000 -- the same file, differing only in case, requested by another builtin
+whose import table spells it in lower case. Fourteen modules loaded that way;
+every name a game spelled itself failed. That looks exactly like a case-folding
+bug, and four candidates were ruled out before touching anything:
+
+* `find_builtin_dll` already lowercases its path (`loader.c:1176`), so the
+  builtin search is not it.
+* `ntdll_wcsnicmp` disassembles to 16-bit loads folding through Wine's
+  `uctable` -- **not** another instance of the `orbis_wchar32.o` `wchar_t`
+  width bug, though that finding warned it would spread.
+* `get_dir_case_sensitivity` returns TRUE, so `file.c:3119` enters the scan
+  rather than skipping it.
+* All 851 files are present in the prefix's `syswow64`.
+
+Patch 0872 reported what the scan actually answered:
+
+    ps5 scan: dir ".../dosdevices/c:/windows/syswow64" want L"USER32.dll"
+              -> ret -1 errno 22 (root_fd -100)
+
+`EINVAL`, and **every** call failed that way -- including lower-case
+`kernel32.dll`. Not case at all. `pw_cwd_scan_directory` was broken for every
+input, and the case-insensitive search is simply its only caller, so it is the
+only thing that ever noticed.
+
+### The cause was already written down in this repo
+
+Compiling `pw_wine_cwd.c` on the host and running the failing paths through
+`pw_cwd_resolve_at`, `pw_cwd_follow` and `pw_cwd_fold` cleared all three, which
+left the one console-specific step. `read_names` listed with
+`fdopendir`/`readdir`, and `native/pw_wine_library.c:108` had already measured
+why that cannot work:
+
+> The buffer is a whole directory block: libc's readdir reads with one at
+> least a page (16 KiB on the console), and /data's directories use 64 KiB
+> blocks, while a 4 KiB buffer got EINVAL there.
+
+The launcher hit this months earlier, wrote the note, and answered it with
+`getdents` over a whole 64 KiB block. The cwd layer never got the same
+treatment. `read_names` now uses that method first and keeps libc's as the
+fallback -- and keeps **every** entry, directories included, where the
+launcher's parser deliberately drops all but `DT_UNKNOWN` and `DT_REG`: these
+names are what resolves the components of a path, and without them `\windows`
+and `\syswow64` disappear along with the files.
+
+Two smaller faults of the same family went with it: the old loop returned
+success when `readdir` failed part-way (`readdir` ends by returning NULL, and
+only `errno` says which end), and on failure it left the half-built buffer to
+the caller.
+
+### The lesson, again
+
+The instrument was wrong before the code was. Three launches read as "the game
+goes quiet and exits", and the quiet was the log dropping its tail. The symptom
+that survived -- upper case fails, lower case works -- was real but was a
+consequence, and would have sent anyone into Wine's case folding, which was
+correct the whole time. Check what the repo already measured: the answer had
+been sitting in a comment in the launcher.
