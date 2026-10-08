@@ -95,9 +95,14 @@ say "link"
 # particular address there is a game that cannot run. Link above it instead, out
 # of 32-bit reach altogether, which costs the guest nothing and frees the lot.
 #
-# 0x200000000 is clear of the guest's 4 GiB and of the PRX region at
-# 0x800000000. pw_dso_handle_ps4.c is what makes any of this link.
-$CC -o "$OBJ/../wine_app.elf" "$OBJ"/*.o -Wl,--image-base=0x200000000 \
+# ⚠ NOT YET: the kernel relocates a PIE whatever base the ELF asks for. Built
+# at 0x200000000 the title died before its first instruction --
+#   SIGSEGV, page fault (user read instruction, page not present)
+#   fault address 0x4004790a8 = 0x200000000 + 0x200000000 + 0x400000 + entry
+# -- the loader having added its own bias on top of ours. Moving the title needs
+# ET_EXEC, not a different base. pw_dso_handle_ps4.c stays: it is what lets the
+# image link anywhere at all, and is needed whichever way that is done.
+$CC -o "$OBJ/../wine_app.elf" "$OBJ"/*.o \
     -lSceNet -lSceAudioOut -lSceSystemService -lSceVideoOut -lScePad -lSceUserService
 printf '   elf %s\n' "$(du -h "$OBJ/../wine_app.elf" | cut -f1)"
 
