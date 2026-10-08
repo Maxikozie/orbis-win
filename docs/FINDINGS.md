@@ -2836,3 +2836,41 @@ This is the third heap-boundary bug in a day, and the third time the answer was
 a sentence already written in the tree. The server had the same asymmetry, found
 the same way. Worth asking of any new module: **which allocator does it bind,
 and who allocated what it frees?**
+
+### One heap fixed the syscall fault; the next one is graphics (2026-10-08)
+
+Routing every unixlib's malloc family to ntdll's heap removed the syscall fault
+entirely -- **zero** this run, against one on every previous run -- and the run
+reached t=11.75 s. What ends it now is a different exception, and this one is
+the game's own:
+
+    err:d3d:wined3d_adapter_gl_init Failed to get a GL context for adapter 00AE4BD0.
+    err:wow:raise_guest_exception guest exception 0xc0000005 at eip 0x79b1d308
+                                  esp 0x21fe64 address 0x2c write 0
+
+`0x79b1d308` lands between `1911.dll` at `79AE0000` (2,485,760 bytes, so it
+spans to `79D3F800`) and `uxtheme` at `79D90000`: offset `0x3D308` inside
+**1911.dll**, the Razor crack. Its imports say why it is in the graphics path at
+all --
+
+    d3d12.dll  dcomp.dll  dxgi.dll  MSVCP140.dll  VCRUNTIME140.dll  WINMM.dll
+
+-- so the chain is 1911.dll -> Wine's builtin dxgi/d3d12 -> wined3d ->
+`wined3d_adapter_gl_init`, which wants an OpenGL context this console does not
+provide. wined3d returns nothing, and 1911.dll dereferences it at `+0x2c`
+without checking.
+
+Note what is *not* wrong: DXVK loaded and is in use for d3d9
+(`d3d9.dll at 7ACE0000: native`). This is the **builtin** d3d stack, pulled in
+behind it by the crack's own imports.
+
+wined3d has a Vulkan backend; it only tried GL because `renderer` defaults to
+AUTO (`wined3d_main.c:132`, selected at `:459`). `WINE_D3D_CONFIG=renderer=vulkan`
+is the environment route, but the profile only emits a fixed set of variables
+(`pw_game_runtime_env`), so the registry is the place:
+`HKCU\Software\Wine\Direct3D`, `"renderer"="vulkan"`, written into the prefix's
+`user.reg` (original kept as `user.reg.bak-pre-renderer`).
+
+That is preferred over forcing `dxgi=n` to DXVK's: DXVK has no d3d12, so Wine's
+builtin d3d12 would still come back to wined3d and still want GL. Setting the
+renderer fixes the whole builtin stack at once.
