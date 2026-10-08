@@ -2427,3 +2427,82 @@ transferred. That is the PS4 analogue of what ps5-native-tool does natively.
 Whether the loader tolerates the main image being unmapped is unknown, and the
 libc parameter block lives in the eboot's data, so Sony's libc may follow a
 pointer into it later.
+
+## The server died on an fd it never gave a user to (2026-10-08)
+
+GTA IV got all the way to loading Windows DLLs -- `GTAIV.exe` at `00D90000`,
+then 32-bit `ntdll`, `kernelbase`, `kernel32` -- and then wineserver died. The
+request trace (patch 0748) ended on the same four every time:
+
+    64 open_mapping -> 65 get_mapping_info -> 48 get_handle_fd -> 67 map_view
+
+with request 48, `REQ_get_handle_fd`, never returning.
+
+Three launches were spent before the real fault was visible, because every one
+of them reported the *messenger* instead. The server's own thread has no Wine
+thread data -- `pthread_getspecific` returns NULL -- so the fault handler's
+attempt to describe the fault faulted in turn, at `0x7c` in
+`__wine_dbg_header`'s `get_info()`, then `0x1c` in `PsGetCurrentThreadId`, then
+`0x1c` in `server_call_unlocked`, that last one reached through
+`segv_handler -> setup_raise_exception -> send_debug_event -> NtTerminateProcess
+-> wine_server_call`. **Wine's entire exception path assumes it is running on a
+Wine thread.** Patches 0612 and 0749 guard the three sites we hit; the general
+problem is upstream's and worth reporting.
+
+With 0612 in place the original fault finally printed:
+
+    wineserver: FAULT on a thread without Wine data: sig 11 addr 10 rip 800b9bae9
+
+`rip` less the wineserver.prx text base `0x800b3c000` resolves to
+`req_get_handle_fd+0x79`, `server/fd.c:3312`:
+
+    reply->type = fd->fd_ops->get_fd_type( fd );
+
+`get_fd_type` is the third pointer in `struct fd_ops`, so its offset is `0x10`
+-- exactly the faulting address. `fd->fd_ops` was NULL.
+
+### Where an ownerless fd comes from
+
+`load_intl_file()` returns `l_intl.nls` straight out of `open_fd()` and never
+calls `set_fd_user()`. That is deliberate upstream: the server reaches that fd
+only through `get_unix_fd()` and `pread()` to build the casemap table, and when
+it hands the fd to `create_fd_mapping()`, `mapping_init()` calls
+`dup_fd_object()`, which builds a **separate** fd, and gives *that* one
+`mapping_fd_ops`. The ownerless original is never reachable by handle.
+
+Neither path left on this console builds anything:
+
+* `get_fd_object_for_mapping()` walks the inode's open list and `grab_object()`s
+  a matching fd -- the original, with whatever user it had.
+* the fallback added in 0735 does the same explicitly, because no descriptor
+  here can be duplicated at all (`src/dup-probe`), and because the NLS file has
+  no `unix_name` for 0734's reopen-instead-of-dup to use.
+
+0735 skipped `set_fd_user()` on purpose -- an fd that already belongs to a file
+object must keep its own ops, and `set_fd_user()` asserts on a second call. The
+case it did not account for is the fd that belongs to *nobody*, which is
+precisely the fd its own comment names. A mapping is reachable by handle, so the
+moment a client asked for the NLS section the server dereferenced NULL.
+
+Patch 0871 installs `mapping_fd_ops` only when the slot is empty, after both
+paths rather than inside the fallback, since both can return the original.
+
+### The audit
+
+Every fd-creating call site in the server was checked, not just the one that
+crashed. `alloc_pseudo_fd()` and `create_anonymous_fd()` take the ops as an
+argument and every caller passes them, with one apparent exception --
+`d3dkmt.c:519` passes NULL -- which sets `d3dkmt_fd_ops` before the fd can reach
+an object, and releases it otherwise. Of the three `open_fd()` callers,
+`file.c:252` goes through `create_file_obj()` and `device.c:409` sets the user on
+the next line. **`load_intl_file()` is the only ownerless fd in the server, and
+`mapping_init()` is the only place it becomes handle-reachable.** One fix closes
+the whole class.
+
+### Worth reporting upstream
+
+`REQ_get_handle_fd` dereferences `fd->fd_ops` with no NULL check, and it is the
+only `fd->fd_ops->` use in `server/fd.c` that checks neither the pointer nor the
+member -- every other site guards with `if (fd->fd_ops->member)`, which still
+assumes `fd_ops` itself. On a build where an ownerless fd can reach a handle
+this is a server-killing NULL dereference rather than an error return.
