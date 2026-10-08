@@ -13,7 +13,7 @@ status set_error() recorded, which says why -- then return, so the startup
 continues and every failure is named.
 ---
 diff --git a/server/object.c b/server/object.c
-index e977b89480..c4d5c78b1a 100644
+index e977b89480..0c5b58972a 100644
 --- a/server/object.c
 +++ b/server/object.c
 @@ -562,6 +562,24 @@ struct object *grab_object( void *ptr )
@@ -32,8 +32,8 @@ index e977b89480..c4d5c78b1a 100644
 +        extern int sceKernelDebugOutText( int channel, const char *text );
 +        char line[160];
 +        snprintf( line, sizeof(line),
-+                  "wineserver: release_object(NULL) from %p -- create_* failed, status 0x%08x\n",
-+                  __builtin_return_address(0), get_error() );
++                  "wineserver: release_object(NULL) from %p (anchor %p) -- create_* failed, status 0x%08x\n",
++                  __builtin_return_address(0), (void *)(uintptr_t)&release_object, get_error() );
 +        sceKernelDebugOutText( 0, line );
 +        return;
 +    }

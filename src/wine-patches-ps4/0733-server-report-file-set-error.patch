@@ -12,10 +12,10 @@ Log the errno and the caller's return address, which together identify the
 failing call exactly.
 ---
 diff --git a/server/file.c b/server/file.c
-index 20680ef5b3..b2fc02db42 100644
+index 20680ef5b3..331741ba34 100644
 --- a/server/file.c
 +++ b/server/file.c
-@@ -572,6 +572,19 @@ static void file_destroy( struct object *obj )
+@@ -572,6 +572,24 @@ static void file_destroy( struct object *obj )
  /* set the last error depending on errno */
  void file_set_error(void)
  {
@@ -27,8 +27,13 @@ index 20680ef5b3..b2fc02db42 100644
 +    {
 +        extern int sceKernelDebugOutText( int channel, const char *text );
 +        char line[128];
-+        snprintf( line, sizeof(line), "wineserver: file_set_error errno=%d from %p\n",
-+                  errno, __builtin_return_address(0) );
++        /* ⚠ Print this function's own address too. Module bases move between
++         * runs and a crash dump's library list is only there when the title
++         * actually crashes -- a clean exit leaves the return address
++         * unmappable. base = (this address) - (file_set_error's offset in the
++         * unstripped .shared.elf), which makes every other address resolvable. */
++        snprintf( line, sizeof(line), "wineserver: file_set_error errno=%d from %p (anchor %p)\n",
++                  errno, __builtin_return_address(0), (void *)(uintptr_t)&file_set_error );
 +        sceKernelDebugOutText( 0, line );
 +    }
 +#endif
