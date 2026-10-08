@@ -129,6 +129,11 @@ if (( PKG )); then
   if [ -d "$NLS" ]; then
     for f in "$NLS"/*.nls; do
       EXTRA+=(--extra "$f:win/wine/share/wine/nls/$(basename "$f")")
+      # ⚠ AND beside the modules. ntdll locates the in-process server with
+      # dladdr and derives the server's NLS directory as "<that dir>/nls"
+      # (patch 0111), which is NOT where Wine itself looks. Two consumers, two
+      # paths, same files.
+      EXTRA+=(--extra "$f:win/wine/lib/wine/x86_64-unix/nls/$(basename "$f")")
     done
     printf '   nls: %s files\n' "$(ls "$NLS"/*.nls 2>/dev/null | wc -l)"
   fi
