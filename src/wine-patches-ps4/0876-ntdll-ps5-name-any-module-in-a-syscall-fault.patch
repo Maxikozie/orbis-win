@@ -1,28 +1,32 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: prospero-win <prospero-win@invalid>
-Subject: [PATCH] ntdll: Name any module in a syscall fault on ps5.
+Subject: [PATCH] ntdll: Name the module and syscall in a syscall fault on ps5.
 
 With the loader finished, GTA IV runs its own code and ends on a fault
-inside a syscall: c0000005 at 8000e1eca, with rcx holding 0x58585858 and
-the same registers on every run. The existing report fell through to its
-bare-address branch, because dladdr here is pw_wine_dl, which knows only
-the modules it opened or adopted -- ours. The address is below ntdll's
-base, so the module is one the system loader brought in, and with
-PW_SHARED_LIBC that is most likely the shared libc.
+inside a syscall: c0000005, the same registers on every run, rcx holding
+0x58585858. The existing report fell to its bare-address branch, because
+dladdr here is pw_wine_dl, which knows only the modules it opened or
+adopted -- ours -- and this address was below ntdll's base.
 
-Guessing is not an option: offset 0xe1eca lands on a plausible symbol in
-win32u, winevulkan and opengl32 alike, so the address alone settles
-nothing.
+Fall back to the kernel, which knows every module. sceKernelGetModuleInfo
+is already declared in this file as (int32_t, void *) and the SDK's own
+types are not in scope, so take the buffer the way pw_native_resolve_kernel
+does -- 0x160 opaque bytes with its size at the front -- using the layout
+native_libkernel_resolver.c already settles: name at 8, four 16-byte
+segments at 0x108, their count at 0x148.
 
-Fall back to the kernel, which knows every module: walk
-sceKernelGetModuleList and sceKernelGetModuleInfo for the one whose
-segments contain the address. For a module we have no symbols for, its
-name is worth more than a symbol would be. Every future fault report
-gains this, not just this one.
+That named it libSceLibcInternal.sprx+0x51eca, faulting on 2202daf860:
+Sony's own libc, called from a Wine syscall and walking off a buffer.
+Which syscall the module cannot say, so print syscall_id as well -- its
+low bits index the table and bit 12 picks win32u's over ntdll's -- and
+the return ip. The fault arrives during USER32's PROCESS_ATTACH, directly
+after Wine reports no FreeType, so a win32u font call is the one to
+expect; this says so rather than assuming it.
 
 Diagnostic only; no behaviour changes.
+
 diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
-index 2956c64e1c..0460c310ed 100644
+index 2956c64e1c..44fd0785fa 100644
 --- a/dlls/ntdll/unix/signal_x86_64.c
 +++ b/dlls/ntdll/unix/signal_x86_64.c
 @@ -2151,6 +2151,56 @@ static BOOL check_atl_thunk( struct thread_data *data, ucontext_t *sigcontext,
@@ -82,7 +86,7 @@ index 2956c64e1c..0460c310ed 100644
  /***********************************************************************
   *           handle_syscall_fault
   *
-@@ -2183,12 +2233,18 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *sigconte
+@@ -2183,18 +2233,38 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *sigconte
           * success: user32 took STATUS_ACCESS_VIOLATION for a class atom. */
          void *where = context->Rip ? (void *)context->Rip : context->Rsp ? *(void **)context->Rsp : NULL;
          Dl_info info;
@@ -101,3 +105,23 @@ index 2956c64e1c..0460c310ed 100644
          else
              ERR_(seh)( "syscall fault %#x %s %p\n", (int)rec->ExceptionCode,
                         context->Rip ? "at" : "calling NULL from", where );
+     }
+ #endif
+ 
++#ifdef __PROSPERO__
++    /* ⚠ The module says where it died, not what was running. syscall_id names
++     * the call: its low bits index the table, bit 12 picks win32u's over
++     * ntdll's, so a fault reached through a font or window call is told apart
++     * from one in a file or memory call without reading the stack. GTA IV's
++     * arrives during USER32's PROCESS_ATTACH, right after Wine reports no
++     * FreeType, which makes a win32u font call the one to expect. */
++    if ((frame = get_syscall_frame( data )))
++        ERR_(seh)( "syscall fault in syscall %#x (%s #%u), return ip %p\n",
++                   (unsigned int)frame->syscall_id,
++                   (frame->syscall_id & 0x1000) ? "win32u" : "ntdll",
++                   (unsigned int)(frame->syscall_id & 0xfff), (void *)frame->rip );
++#endif
++
+     if (data->jmp_buf)
+     {
+         TRACE_(seh)( "returning to handler\n" );
