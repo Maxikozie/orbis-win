@@ -275,7 +275,7 @@ index 549dbd4..a64d382 100644
               * first, which marks the process as exiting, so the call for
               * itself leaves through exit() and the host's exit handlers run
 diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
-index 01d21a5..9183927 100644
+index 01d21a5..3ff0adf 100644
 --- a/wine/wowprospero/unix.c
 +++ b/wine/wowprospero/unix.c
 @@ -43,6 +43,16 @@
@@ -340,7 +340,7 @@ index 01d21a5..9183927 100644
  }
  
  static void release( void *base, size_t bytes )
-@@ -453,7 +483,25 @@ static struct pw_thread *get_thread(void)
+@@ -453,7 +483,41 @@ static struct pw_thread *get_thread(void)
      int first, attempt;
  
      if (thread) return thread;
@@ -356,6 +356,22 @@ index 01d21a5..9183927 100644
 +    }
 +    if (!(thread = calloc( 1, sizeof(*thread) )))
 +    {
++#ifdef __PROSPERO__
++        /* ⚠ ntdll keeps the one allocator known to work in this process: it
++         * links prospero-win's heap and exports it (scripts/prx-ps4.sh), while
++         * this module's malloc is the console libc's and answered NULL for
++         * 145 KiB. Fall back to ntdll's before giving up. */
++        extern void *pw_wine_heap_malloc( size_t bytes );
++        if ((thread = pw_wine_heap_malloc( sizeof(*thread) )))
++        {
++            memset( thread, 0, sizeof(*thread) );
++            PW_WOW_NOTE( "wowprospero: thread state from ntdll's heap (libc refused %zu bytes, errno %d)\n",
++                         sizeof(*thread), errno );
++        }
++    }
++    if (!thread)
++    {
++#endif
 +        /* ⚠ This returned NULL in silence, and the caller turns that into
 +         * PW_ERR_VM with no fault address -- which reaches the log as
 +         *     err:wow:BTCpuSimulate DBT error -9 ... fault address 0
