@@ -1,0 +1,118 @@
+#!/bin/sh
+# OpenOrbis presented under the name tools/build_wine_ps5.sh requires.
+# Nothing here is PS5; only the filename is.
+#
+# COMPILE flags are orbis-porting-kit's ps4-openorbis.cmake PS4_COMMON_FLAGS,
+# with orbis-compat AHEAD of the SDK — it corrects four pthread types musl
+# declares smaller than Sony writes, and behind the SDK it would compile, do
+# nothing, and say nothing.
+#
+# ⚠ -D__PROSPERO__ IS DELIBERATE. Sony sets __PROSPERO__ for the PS5 and
+# __ORBIS__ for the PS4: siblings meaning "Sony console, FreeBSD derived, not
+# Linux". 35 of the 83 patches gate on it and most of those arms are
+# console-generic. Defining it turns them all on so the genuinely PS5-only ones
+# fail loudly — each failure names a patch that needs a PS4 arm, which is faster
+# triage than reading 35 patches.
+# ⚠ clang's PS4 driver invokes "orbis-ld", Sony's own linker name, and refuses
+# -fuse-ld to be told otherwise. OpenOrbis ships ld.lld under its ordinary name,
+# so bin/orbis-ld is a symlink to it and this prepends that directory to PATH —
+# which is how clang finds a linker. CMake sidesteps the whole question by
+# driving the linker directly instead of through the compiler driver.
+PATH="$(dirname "$0"):$PATH"; export PATH
+
+SDKLIB="/home/zpeirce/ps4-gladius/sdk/orbis-sdk-v1/sdk/lib"
+# ⚠ EACH PRX LINKS ITS OWN libunwind, so each must define the four symbols it
+# finds unwind tables through. The executable linker script provides them;
+# a shared link does not, and create-fself refuses the undefined
+# __eh_frame_end. prospero-win ships exactly this script for its own PRX link.
+# ⚠ THE 28 WRAPS BELONG ON EVERY MODULE THAT LINKS THE cwd SHIM.
+# pw_wine_cwd_libc.c defines __wrap_open and calls __real_open; lld creates
+# that pairing only when told to, per symbol. Without them the link leaves
+# __real_stat undefined — which a .so tolerates and create-fself does not.
+CWDWRAPS="-Wl,--wrap=access -Wl,--wrap=chdir -Wl,--wrap=chmod -Wl,--wrap=close -Wl,--wrap=fchdir -Wl,--wrap=fopen -Wl,--wrap=fstatat -Wl,--wrap=getcwd -Wl,--wrap=link -Wl,--wrap=lstat -Wl,--wrap=mkdir -Wl,--wrap=mkdirat -Wl,--wrap=open -Wl,--wrap=openat -Wl,--wrap=opendir -Wl,--wrap=readlink -Wl,--wrap=realpath -Wl,--wrap=rename -Wl,--wrap=renameat -Wl,--wrap=rmdir -Wl,--wrap=stat -Wl,--wrap=statfs -Wl,--wrap=symlink -Wl,--wrap=symlinkat -Wl,--wrap=truncate -Wl,--wrap=unlink -Wl,--wrap=unlinkat -Wl,--wrap=utimes"
+# ⚠ crtlib.o, NOT crt1.o, FOR MODULES. create-fself needs a
+# .data.sce_module_param section and crashes without it:
+#   panic: nil pointer dereference in GenerateProgramHeaders
+# because procParamSection is nil. crtlib.o carries that section — it is a
+# MODULE's entry point, which is why orbis-compat keeps it off the executable
+# link line and why a .so built like an executable can never convert.
+IALD="/home/zpeirce/ps4-gladius/src/freebsd-compat/prx_init_array.ld"
+# ⚠ -lSceLibcInternal BEFORE -lc. The SDK ships libc only as a STATIC archive,
+# so every module linking it gets a private copy of __environ: the title set
+# WINE_PS5_NTDLL_DIR through its own setenv and ntdll.prx's getenv read a
+# different, empty environment --
+#     WINE wine: cannot get path to ntdll.so (set WINE_PS5_NTDLL_DIR)
+# even though the title reported environment status=0. libSceLibcInternal is the
+# stub for the libc.prx the process already loads, and exports getenv/setenv/
+# putenv, so resolving them there gives the title and every module ONE
+# environment. Measured on hardware 2026-10-07.
+MPOBJ="/home/zpeirce/ps4-gladius/build/ps4-wine-sdk/module_param.o"
+MPLD="/home/zpeirce/ps4-gladius/src/freebsd-compat/prx_module_param.ld"
+EHLD="/home/zpeirce/ps4-gladius/prospero-win/wine/ps5/prx_eh_frame.ld"
+# ⚠ THE WINE SHIMS ONLY — not the title's platform layer. Linking the full
+# libpw_native_ps4.a dragged the presenter in and left ntdll importing
+# sceVideoOutOpen, which it has no business touching. The presenter, pad and
+# audio belong to the title; cwd, dl, dmem, heap and threads belong to Wine.
+PWSHIM="/home/zpeirce/ps4-gladius/build/ps4-wine-sdk/libwineshim.a"
+STUBS="/home/zpeirce/ps4-gladius/build/ps4-wine-sdk/libps4stubs.a"
+OCLIB="/home/zpeirce/ps4-gladius/mesa-build/orbis-compat/build/liborbis-compat.a"
+
+CFLAGS='--target=x86_64-scei-ps4 -fPIC -funwind-tables
+  -D__PS4__ -DPS4 -DORBIS -D__ORBIS__ -D__PROSPERO__ -D_BSD_SOURCE=1 -fno-visibility-from-dllstorageclass
+  -isysroot /home/zpeirce/ps4-gladius/sdk/orbis-sdk-v1/sdk -isystem /home/zpeirce/ps4-gladius/src/freebsd-compat -isystem /home/zpeirce/ps4-gladius/mesa-build/orbis-compat/include -isystem /home/zpeirce/ps4-gladius/sdk/orbis-sdk-v1/sdk/include'
+
+# ⚠ LINKING NEEDS THE WHOLE RULE, which is why configure's "can the compiler
+# create executables" failed with compile flags alone. From the same toolchain
+# file: no default libs, PIE, the overlay's OWN linker script (not the
+# SDK's link.x), and crt1.o LAST after the SDK libs — the order the SDK's own
+# link rule uses. Only crt1.o: crtlib.o belongs on a .prx line, crti/crtn are a
+# fragment pair this libc does not use, and crt_dyn.o would run every static
+# constructor twice.
+# ⚠ NO -fuse-ld=lld. CMake passes it, but clang refuses it for this target:
+# "unsupported option '-fuse-ld' for target 'x86_64-scei-ps4'". The PS4 driver
+# already selects lld itself, so the flag is both rejected and redundant — CMake
+# gets away with it by driving the linker directly rather than through clang.
+LDFLAGS='-nostdlib -pie -Wl,-m,elf_x86_64
+  -Wl,--script=/home/zpeirce/ps4-gladius/mesa-build/orbis-porting-kit/cmake/orbis-tls.ld -Wl,--eh-frame-hdr -Wl,--no-rosegment
+  -L/home/zpeirce/ps4-gladius/sdk/orbis-sdk-v1/sdk/lib'
+LDLIBS='-Wl,--whole-archive /home/zpeirce/ps4-gladius/mesa-build/orbis-compat/build/liborbis-compat.a -Wl,--no-whole-archive
+  -lSceLibcInternal -lc -lkernel -lc++ /home/zpeirce/ps4-gladius/sdk/orbis-sdk-v1/sdk/lib/crt1.o'
+
+# Add the link half only when actually linking: -c/-S/-E produce no executable
+# and clang warns about unused link arguments, which configure reads as failure.
+for a in "$@"; do
+  case "$a" in -c|-S|-E|-M|-MM) exec clang $CFLAGS "$@" ;; esac
+done
+
+# ⚠ -pie AND crt1.o ARE FOR EXECUTABLES ONLY. Wine's Unix side is .so modules,
+# and orbis-ld refuses "-shared and -pie may not be used together". crt1.o is
+# equally wrong there: it carries _start and the process parameter block, which
+# a shared object must not define.
+# PW_PRX_LINK=1 means prospero-win's real wine/ps5 units are already on the
+# link line. libwineshim.a is this port's stand-in for those same units, so
+# linking both defines every __wrap_* and shim entry twice; the --wrap flags
+# come from scripts/prx-ps4.sh in that case too.
+if [ -n "${PW_PRX_LINK:-}" ]; then SHIMLIB=""; SHIMWRAPS=""; else SHIMLIB="$PWSHIM"; SHIMWRAPS="$CWDWRAPS"; fi
+for a in "$@"; do
+  case "$a" in
+    -shared)
+      # ⚠ -z max-page-size=0x4000. Orbis pages are 16 KiB and the module loader
+      # checks it; without this the first two PT_LOADs come out 0x1000-aligned
+      # and sceKernelLoadStartModule refuses the module:
+      #   [rtld] ERROR scan_phdr: segment #1 of "(null)" is not page aligned.
+      #   [rtld] ERROR self_load_shared_object: found illegal segment header
+      #   -> 0x80020008 ENOEXEC
+      # ⚠ max-page-size ALONE IS NOT ENOUGH. It only makes lld keep
+      #   offset = vaddr (mod page), which ELF already requires, and segments
+      #   still start mid-page: segment 1 landed at file offset 0x13fae0.
+      #   The PS4 loader wants each PT_LOAD to START on a 16 KiB boundary, so
+      #   -z separate-loadable-segments is the one that actually matters.
+      # The executable link already gets 0x4000 from the toolchain; the shared
+      # link did not. Measured on hardware 2026-10-07 (GLDS10006).
+      exec clang $CFLAGS -nostdlib -shared -Wl,-z,max-page-size=0x4000 -Wl,-z,separate-loadable-segments -Wl,-m,elf_x86_64 \
+        -Wl,--eh-frame-hdr -Wl,--no-rosegment -T "$EHLD" -T "$MPLD" -T "$IALD" $SHIMWRAPS -L"$SDKLIB" "$@" \
+        -Wl,--whole-archive "$OCLIB" $SHIMLIB -Wl,--no-whole-archive -lSceLibcInternal -lc -lkernel -lc++ -lSceNet "$MPOBJ"
+      ;;
+  esac
+done
+exec clang $CFLAGS $LDFLAGS "$@" $LDLIBS
