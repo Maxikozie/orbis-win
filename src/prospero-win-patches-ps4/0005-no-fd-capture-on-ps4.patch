@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] wine64: do not try to capture fd 1 and 2 on PS4.
+
+capture_fd() closes the descriptor and then dup2()s a socketpair onto it.
+dup2 onto fd 1 or 2 returns EPERM on this kernel -- orbis-compat measured it on
+2026-08-25 and says so in src/orbis_abort_report.c: "The descriptor table is
+not ours to rearrange."
+
+So on PS4 the call always failed:
+
+    PW_WINE64 fd2_capture=failed status=-3
+    PW_WINE64 fd1_capture=failed status=-3
+
+and, worse, left both descriptors CLOSED, since the close() happens before the
+dup2 that fails. Every later write to stdout then went to a closed fd, with
+%rdi=1 on the thread the kernel killed with SIGSYS.
+
+Wine's own output already reaches the log through __wine_ps5_set_output_sink
+(patch 0560), so there is nothing to capture here and something to break by
+trying.
+---
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 23e8331..12039c7 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -38,6 +38,7 @@
+ #include "pw_videoout_ps5.h"
+ #include "pw_wine_library.h"
+ #include "pw_wine_prefix.h"
++#include "../wine/ps5/pw_wine_dl.h"
+ #include "../src/pw_present.h"
+ #include "../src/pw_spinner.h"
+ #include "pw_wine_display.h"
+@@ -814,9 +815,13 @@ static void run_launcher(void)
+  * RIP is read at the measured ucontext offset (224). */
+ static PwWineStart *fault_start;
+ 
++/* Resolved once, at install time: pw_prx_lookup is not for a signal handler. */
++static int (*fault_dl_addr)(const void *, PwWineDlInfo *);
++
+ static void early_fault(int sig, siginfo_t *info, void *opaque)
+ {
+-    uint64_t rip = 0, offset = 0;
++    uint64_t rip = 0, offset = 0, module_offset = 0;
++    const char *module = NULL;
+     int segment = -1;
+ 
+     memcpy(&rip, (const uint8_t *)opaque + 224, sizeof(rip));
+@@ -828,7 +833,15 @@ static void early_fault(int sig, siginfo_t *info, void *opaque)
+             break;
+         }
+     }
+-    pw_diagnostics_emergency(sig, (uintptr_t)(info ? info->si_addr : NULL), rip, segment, offset);
++    if (segment < 0 && fault_dl_addr) {
++        PwWineDlInfo where = { 0 };
++        if (fault_dl_addr((const void *)(uintptr_t)rip, &where) && where.path) {
++            module = where.path;
++            module_offset = rip - (uint64_t)(uintptr_t)where.base;
++        }
++    }
++    pw_diagnostics_emergency(sig, (uintptr_t)(info ? info->si_addr : NULL), rip,
++                             segment, offset, module, module_offset);
+     _exit(3);
+ }
+ 
+@@ -837,6 +850,8 @@ static void install_early_fault_report(PwWineStart *start)
+     struct sigaction action;
+ 
+     fault_start = start;
++    fault_dl_addr = (int (*)(const void *, PwWineDlInfo *))
++        (uintptr_t)pw_prx_lookup(start->descriptor, "pw_wine_dl_addr");
+     memset(&action, 0, sizeof(action));
+     action.sa_sigaction = early_fault;
+     action.sa_flags = SA_SIGINFO;
+@@ -1076,6 +1091,18 @@ int main(int argc, char **argv)
+     }
+     PS5LOG_LOG("PW_WINE64 ntdll=%s prefix=%s exe=%s", config.ntdll_path, config.prefix,
+                launch.executable);
++#ifdef __PS4__
++    /* ⚠ NOT ON PS4, AND NOT WORTH RETRYING. capture_fd() closes the descriptor
++     * and then dup2()s the socketpair onto it, and dup2 onto fd 1 or 2 returns
++     * EPERM on this kernel -- measured by orbis-compat 2026-08-25
++     * (src/orbis_abort_report.c: "The descriptor table is not ours to
++     * rearrange"). So the capture always failed with status=-3 AND LEFT THE
++     * DESCRIPTOR CLOSED, after which every write to stdout went to a closed fd.
++     * Wine's own output already reaches the log through
++     * __wine_ps5_set_output_sink (patch 0560), which is the channel that works
++     * here, so there is nothing to capture and something to break by trying. */
++    PS5LOG_LOG("PW_WINE64 fd_capture=skipped reason=dup2-onto-1-or-2-is-EPERM");
++#else
+     {
+         static PwFdForward forward_stderr = { -1, "WINESERVER" }, forward_stdout = { -1, "STDOUT" };
+         status = capture_fd(2, &forward_stderr);
+@@ -1083,6 +1110,7 @@ int main(int argc, char **argv)
+         status = capture_fd(1, &forward_stdout);
+         if (status != 0) PS5LOG_LOG("PW_WINE64 fd1_capture=failed status=%d", status);
+     }
++#endif
+ 
+     status = pw_wine_start_load(&start, &config, &ops);
+     PS5LOG_LOG("PW_WINE64 load status=%d stage=%d module=0x%x segments=%u module_start=%d "
