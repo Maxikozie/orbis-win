@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Date: Tue, 7 Oct 2026 19:00:00 +0000
+Subject: [PATCH] server: skip the prefix ownership check on PS5/PS4 too.
+
+create_dir() already skips its st_uid test under __PROSPERO__, with the note
+"one user; its file systems do not keep unix owners". create_server_dir() makes
+the same test against the prefix itself and was left unguarded, so it fires
+whenever the prefix was not written by the running user.
+
+On PS4 that is always: the prefix is pushed with tools/pw_prefix.py over the
+console's FTP server, so every file in it belongs to that server's uid, and
+chmod cannot change ownership. wineserver then called
+
+    fatal_error( "%s is not owned by you\n", config_dir )
+
+and fatal_error died writing to a stderr that goes nowhere, taking the title
+with it as an uncatchable SIGSYS. The backtrace, symbolised against the module
+bases, read create_server_dir -> fatal_error.
+
+Guard it the same way as the first.
+---
+diff --git a/server/request.c b/server/request.c
+index 81fe8f4ab8..ca91a38baf 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -1009,8 +1009,10 @@ static char *create_server_dir( int force )
+         fatal_error( "open %s: %s\n", config_dir, strerror( errno ));
+     if (fstat( config_dir_fd, &st ) == -1)
+         fatal_error( "stat %s: %s\n", config_dir, strerror( errno ));
++#ifndef __PROSPERO__  /* one user; its file systems do not keep unix owners */
+     if (st.st_uid != getuid())
+         fatal_error( "%s is not owned by you\n", config_dir );
++#endif
+ 
+     /* create the base directory if needed */
+ 
