@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] cwd: "." is the directory itself, not a name inside it.
+
+pw_cwd_join() turned a relative "." into "<cwd>/.". On a normal file system
+that still resolves to the directory, but not on this console's: wineserver
+creates its server directory, chdir()s there, open(".")s it and compares
+st_dev/st_ino with the directory it just created. The comparison failed and it
+died with
+
+    wineserver: chdir did not end up in /data/prospero-win/prefixes/oblivion/
+                .wineserver/server-290bff49-7e78bd
+
+Collapse "." (and "./") to the base in join_locked, which every relative path
+already passes through.
+---
+diff --git a/wine/ps5/pw_wine_cwd.c b/wine/ps5/pw_wine_cwd.c
+index a65d1f8..6075693 100644
+--- a/wine/ps5/pw_wine_cwd.c
++++ b/wine/ps5/pw_wine_cwd.c
+@@ -75,6 +75,16 @@ static int join_locked(const char *base, const char *path, char *out, size_t siz
+ {
+     size_t base_length = strlen(base), path_length = strlen(path);
+ 
++    /* ⚠ "." IS THE DIRECTORY ITSELF, not a name inside it. Joining it gave
++     * "<base>/.", which this console's file systems do not resolve back to the
++     * same inode: wineserver creates its server directory, chdir()s there,
++     * open(".")s it and compares st_dev/st_ino against the directory it just
++     * made -- and that comparison failed, so it died with
++     *     wineserver: chdir did not end up in <server dir>
++     * Collapse it here, where every relative path already passes through. */
++    if (!strcmp(path, ".") || !strcmp(path, "./"))
++        return copy_out(base, base_length, out, size);
++
+     if (base_length && base[base_length - 1] == '/') base_length--;
+     if (base_length + 1 + path_length >= size) { errno = ENAMETOOLONG; return -1; }
+     memcpy(out, base, base_length);
