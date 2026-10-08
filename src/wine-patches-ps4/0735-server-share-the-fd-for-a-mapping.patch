@@ -14,13 +14,18 @@ and only falls through to dup_fd_object when none matches exactly. A mapping
 never seeks -- it mmaps and nothing else -- so the file offset a duplicate
 would have owned is never used.
 
-Take the original when duplication is refused.
+Take the original when duplication is refused, and leave it to its owner, as
+the sharing path above does: set_fd_user asserts that an fd has no user yet,
+and an fd opened for another object already has one. Calling it on a shared
+descriptor aborted the server the first time a mapping of a real file took
+this path -- the earlier ones had no owner, so it only surfaced once the
+prefix was far enough along to map one.
 ---
 diff --git a/server/mapping.c b/server/mapping.c
-index 856980d591..6b89af3c1f 100644
+index 0b0f35e5e3..2a4eae175d 100644
 --- a/server/mapping.c
 +++ b/server/mapping.c
-@@ -1146,6 +1146,20 @@ static bool mapping_init( struct object *obj, const void *init_data )
+@@ -1146,7 +1146,26 @@ static bool mapping_init( struct object *obj, const void *init_data )
          if (!(mapping->fd = get_fd_object_for_mapping( data->fd, mapping_access, sharing )))
          {
              mapping->fd = dup_fd_object( data->fd, mapping_access, sharing, FILE_SYNCHRONOUS_IO_NONALERT );
@@ -36,8 +41,14 @@ index 856980d591..6b89af3c1f 100644
 +             * none matches exactly. A mapping never seeks -- it mmaps and
 +             * nothing else -- so the file offset a duplicate would have owned is
 +             * never used. Take the original rather than fail. */
-+            if (!mapping->fd) mapping->fd = (struct fd *)grab_object( data->fd );
 +#endif
              if (mapping->fd) set_fd_user( mapping->fd, &mapping_fd_ops, NULL );
++#ifdef __PROSPERO__
++            /* Take the original, and leave it to its owner exactly as the
++             * sharing path above does: set_fd_user asserts that an fd has no
++             * user yet, and this one belongs to the object it was opened for. */
++            else mapping->fd = (struct fd *)grab_object( data->fd );
++#endif
          }
          if (!mapping->fd) return false;
+ 
