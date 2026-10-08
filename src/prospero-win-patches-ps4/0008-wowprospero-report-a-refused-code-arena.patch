@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Date: Thu, 8 Oct 2026 09:20:00 +0000
+Subject: [PATCH] wowprospero: say why the code arena was refused.
+
+With emulated TLS in place the translator runs, and stops on its own memory:
+
+    err:wow:BTCpuSimulate DBT error -9 at eip 0x7bf33290
+
+-9 is PW_ERR_VM, "the memory backend refused a request". It reaches the caller
+from pw_x86_engine's first commit of the code arena, and carries no status, no
+size and no protection -- place_above_guest and commit_code both answer every
+refusal with NULL or -1.
+
+The arena is the one allocation on this console that has to end up executable,
+and a plain executable mapping is refused here: orbis_jit.c gets it by mapping
+direct memory read-write and protecting it afterwards. Which of the two calls
+fails, and with what, decides whether that recipe is what this needs.
+
+Diagnostic only; no behaviour change.
+diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
+index 01d21a5..5ae6369 100644
+--- a/wine/wowprospero/unix.c
++++ b/wine/wowprospero/unix.c
+@@ -357,11 +357,22 @@ static void *place_above_guest( size_t bytes, ULONG type, ULONG protect )
+     MEM_EXTENDED_PARAMETER parameter = { 0 };
+     SIZE_T size = bytes;
+     void *base = NULL;
++    NTSTATUS status;
+ 
+     parameter.Type = MemExtendedParameterAddressRequirements;
+     parameter.Pointer = &requirements;
+-    if (NtAllocateVirtualMemoryEx( NtCurrentProcess(), &base, &size, type, protect, &parameter, 1 ))
++    if ((status = NtAllocateVirtualMemoryEx( NtCurrentProcess(), &base, &size, type,
++                                             protect, &parameter, 1 )))
++    {
++        /* ⚠ DIAGNOSTIC. The translator's code arena is the one allocation on
++         * this console that has to end up executable, and every refusal here
++         * reached the caller as a bare PW_ERR_VM -- "the memory backend refused
++         * a request" -- with no status, no size and no protection:
++         *     err:wow:BTCpuSimulate DBT error -9 at eip 0x7bf33290 */
++        fprintf( stderr, "wowprospero: %zu bytes type %x protect %x refused: %08x\n",
++                 bytes, (unsigned int)type, (unsigned int)protect, (unsigned int)status );
+         return NULL;
++    }
+     return base;
+ }
+ 
+@@ -385,9 +396,18 @@ static void *reserve_code( size_t bytes )
+ static int commit_code( void *base, size_t bytes )
+ {
+     SIZE_T size = bytes;
++    void *at = base;
++    NTSTATUS status;
+ 
+-    return NtAllocateVirtualMemory( NtCurrentProcess(), &base, 0, &size, MEM_COMMIT,
+-                                    PAGE_EXECUTE_READWRITE ) ? -1 : 0;
++    if (!(status = NtAllocateVirtualMemory( NtCurrentProcess(), &base, 0, &size, MEM_COMMIT,
++                                            PAGE_EXECUTE_READWRITE )))
++        return 0;
++    /* ⚠ DIAGNOSTIC -- see place_above_guest. Executable memory is the whole
++     * question here: this console refuses a plain executable mapping and wants
++     * direct memory mapped read-write and then protected (orbis_jit.c). */
++    fprintf( stderr, "wowprospero: commit %p %zu bytes executable refused: %08x\n",
++             at, bytes, (unsigned int)status );
++    return -1;
+ }
+ 
+ static void release( void *base, size_t bytes )
