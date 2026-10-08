@@ -15,14 +15,22 @@ refusal with NULL or -1.
 The arena is the one allocation on this console that has to end up executable,
 and a plain executable mapping is refused here: orbis_jit.c gets it by mapping
 direct memory read-write and protecting it afterwards. Which of the two calls
-fails, and with what, decides whether that recipe is what this needs.
-
-Diagnostic only; no behaviour change.
 diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
-index 01d21a5..5ae6369 100644
+index 01d21a5..9a1bae2 100644
 --- a/wine/wowprospero/unix.c
 +++ b/wine/wowprospero/unix.c
-@@ -357,11 +357,22 @@ static void *place_above_guest( size_t bytes, ULONG type, ULONG protect )
+@@ -43,6 +43,10 @@
+ #include "call_top.h"
+ #include "host_memory.h"
+ 
++/* ⚠ This module's stderr goes nowhere: the sink ntdll installs is its own,
++ * and a PRX carries its own libc. Everything diagnostic here goes to klog. */
++extern int sceKernelDebugOutText( int channel, const char *text );
++
+ /* The guest range every translated access is checked against (load_state). */
+ enum { GUEST_LOW = 0x10000u, GUEST_HIGH = 0xfffff000u };
+ /* The guest GPRs held in host registers across linked blocks: seven fit, and
+@@ -357,11 +361,27 @@ static void *place_above_guest( size_t bytes, ULONG type, ULONG protect )
      MEM_EXTENDED_PARAMETER parameter = { 0 };
      SIZE_T size = bytes;
      void *base = NULL;
@@ -39,14 +47,19 @@ index 01d21a5..5ae6369 100644
 +         * reached the caller as a bare PW_ERR_VM -- "the memory backend refused
 +         * a request" -- with no status, no size and no protection:
 +         *     err:wow:BTCpuSimulate DBT error -9 at eip 0x7bf33290 */
-+        fprintf( stderr, "wowprospero: %zu bytes type %x protect %x refused: %08x\n",
-+                 bytes, (unsigned int)type, (unsigned int)protect, (unsigned int)status );
++        {
++            char line[160];
++            snprintf( line, sizeof(line),
++                      "wowprospero: %zu bytes type %x protect %x refused: %08x\n",
++                      bytes, (unsigned int)type, (unsigned int)protect, (unsigned int)status );
++            sceKernelDebugOutText( 0, line );
++        }
          return NULL;
 +    }
      return base;
  }
  
-@@ -385,9 +396,18 @@ static void *reserve_code( size_t bytes )
+@@ -385,9 +405,23 @@ static void *reserve_code( size_t bytes )
  static int commit_code( void *base, size_t bytes )
  {
      SIZE_T size = bytes;
@@ -61,8 +74,13 @@ index 01d21a5..5ae6369 100644
 +    /* ⚠ DIAGNOSTIC -- see place_above_guest. Executable memory is the whole
 +     * question here: this console refuses a plain executable mapping and wants
 +     * direct memory mapped read-write and then protected (orbis_jit.c). */
-+    fprintf( stderr, "wowprospero: commit %p %zu bytes executable refused: %08x\n",
-+             at, bytes, (unsigned int)status );
++    {
++        char line[160];
++        snprintf( line, sizeof(line),
++                  "wowprospero: commit %p %zu bytes executable refused: %08x\n",
++                  at, bytes, (unsigned int)status );
++        sceKernelDebugOutText( 0, line );
++    }
 +    return -1;
  }
  
