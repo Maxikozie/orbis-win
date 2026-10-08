@@ -92,6 +92,15 @@ done
 # linking both defines every __wrap_* and shim entry twice; the --wrap flags
 # come from scripts/prx-ps4.sh in that case too.
 if [ -n "${PW_PRX_LINK:-}" ]; then SHIMLIB=""; SHIMWRAPS=""; else SHIMLIB="$PWSHIM"; SHIMWRAPS="$CWDWRAPS"; fi
+# PW_PRX_STUBS: the sibling modules a PRX links against, appended LAST.
+# ⚠ Order is the whole point. Every PRX links the static libc whole-archive, so
+# ntdll.prx exports libc; with the stubs earlier on the line, every other module
+# bound its C runtime to ntdll (wineserver imported 123 symbols from it) and the
+# title died with PRX_NOT_RESOLVED_FUNCTION. They must come after orbis-compat
+# and -lc so each module resolves libc from its own copy, leaving only the
+# genuine Wine cross-references. Putting -lc earlier instead duplicates archive
+# members against orbis-compat (abort, __assert_fail, mbrtowc, ...).
+PRXSTUBS="${PW_PRX_STUBS:-}"
 for a in "$@"; do
   case "$a" in
     -shared)
@@ -110,7 +119,7 @@ for a in "$@"; do
       # link did not. Measured on hardware 2026-10-07 (GLDS10006).
       exec clang $CFLAGS -nostdlib -shared -Wl,-z,max-page-size=0x4000 -Wl,-z,separate-loadable-segments -Wl,-m,elf_x86_64 \
         -Wl,--eh-frame-hdr -Wl,--no-rosegment -T "$EHLD" -T "$MPLD" -T "$IALD" $SHIMWRAPS -L"$SDKLIB" "$@" \
-        -Wl,--whole-archive "$OCLIB" $SHIMLIB -Wl,--no-whole-archive -lc -lkernel -lc++ -lSceNet "$MPOBJ"
+        -Wl,--whole-archive "$OCLIB" $SHIMLIB -Wl,--no-whole-archive -lc -lkernel -lc++ -lSceNet $PRXSTUBS "$MPOBJ"
       ;;
   esac
 done
