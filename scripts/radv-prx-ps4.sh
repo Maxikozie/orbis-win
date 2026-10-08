@@ -16,6 +16,13 @@
 # arm opens video-out itself, so they belong to the archive rather than to any
 # title.
 set -eu
+# ⚠ Share the title's libc, as every other PRX here does (scripts/prx-ps4.sh).
+# Without this the toolchain links the static archive instead
+# (src/toolchain/prospero-clang:124), and the module arrives with a second libc
+# -- its own environ and its own TLS regime -- and no libSceLibcInternal in
+# NEEDED. Measured: libvulkan.prx built that way loads nowhere, and win32u
+# reports only "Failed to load libvulkan.so".
+: "${PW_SHARED_LIBC:=1}"; export PW_SHARED_LIBC
 root=/home/zpeirce/ps4-gladius
 bundle=$root/sdk/orbis-sdk-v1
 oo=$bundle/sdk
@@ -64,8 +71,12 @@ $CC -shared -Wl,-Bsymbolic -Wl,--eh-frame-hdr -Wl,-soname,libvulkan.prx \
     { echo "   X link"; grep -E "error|undefined" "$log" | head -8 | sed 's/^/      /'; exit 1; }
 
 echo "== 5. container =="
+# -library-path, as prx-ps4.sh passes for every other module: create-fself
+# resolves each imported symbol to a providing library, and without the path it
+# has nowhere to look.
 "$oo/bin/linux/create-fself" -in "$prx/libvulkan.shared.elf" \
     -out "$prx/libvulkan.oelf" -lib "$prx/sce_module/libvulkan.prx" \
-    -libname libvulkan.prx -ptype fake >> "$log" 2>&1 ||
+    -libname libvulkan.prx -ptype fake \
+    -library-path "$prx/stubs:$oo/lib" >> "$log" 2>&1 ||
     { echo "   X create-fself"; tail -4 "$log" | sed 's/^/      /'; exit 1; }
 printf '   ok libvulkan  %s\n' "$(du -h "$prx/sce_module/libvulkan.prx" | cut -f1)"
