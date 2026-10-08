@@ -2655,3 +2655,31 @@ status surfaced in ntdll, three call layers from where it was decided, and every
 theory formed on the client side was wrong. One line in the server's allocator
 answered it outright -- and the fix was a sentence in a header comment that had
 been there all along.
+
+### The heap fix landed, and the last import was never DXVK
+
+Linking `pw_wine_heap` into wineserver ended the `STATUS_NO_MEMORY` wall at a
+stroke: modules went 30 -> 40 and every one of GTA IV's imports resolved except
+one. `d3d9.dll`, reported as not found, with `d3d9=n` in the profile.
+
+The file was there -- 1,740,962 bytes in the prefix's `syswow64`, i386, base
+`0x10000000`, byte-identical on the console. Its imports say what it actually
+is:
+
+    kernel32.dll  ntdll.dll  ucrtbase.dll  wined3d.dll
+
+`wined3d.dll` is Wine's own d3d9. DXVK's imports `dxgi` and `vulkan-1` and
+never touches wined3d. The same is true of `d3d11.dll` and `dxgi.dll` beside
+it, and of the oblivion prefix they were copied from: **there is no DXVK
+anywhere on this host.** They were Wine's builtins all along, copied under
+DXVK's name.
+
+`n` means native only, so Wine found its own builtin, refused it for being a
+builtin, found nothing else, and reported the import missing -- with no trace
+between the loadorder lookup and the failure, because nothing was ever opened.
+
+Set to `b`. Wine's d3d9 on wined3d reaches the screen here through winevulkan
+and RADV, and `graphics =` turned out to be a catalog label only
+(`wine64_main.c:662`), not something that selects a backend. Real DXVK is the
+better answer for a game this heavy and is worth installing, but it is a
+download and a separate change.
