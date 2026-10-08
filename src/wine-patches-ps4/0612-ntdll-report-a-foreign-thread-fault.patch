@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Date: Thu, 8 Oct 2026 12:10:00 +0000
+Subject: [PATCH] ntdll: report a fault on a thread that is not Wine's.
+
+A request handler faults while serving GTA IV, and what gets reported is never
+that fault. Wine answers a SIGSEGV by raising it as an exception, which walks
+segv_handler -> setup_raise_exception -> send_debug_event ->
+NtTerminateProcess -> wine_server_call -> server_call_unlocked, and the last
+of those reads data->tid. The in-process server runs on a thread the server
+creates itself, which has no Wine thread data, so that read is of 0x1c and the
+process dies there instead of saying anything.
+
+Each fix so far has only moved where the messenger dies: 0x7c in the debug
+buffer, 0x1c in the thread id, 0x1c again in the server call. The fault being
+reported has still never been seen.
+
+Print it from the registers before any of that machinery runs. After 0610's
+hook, which rewrites these same lines -- placed before it the series stops
+applying.
+
+Diagnostic only; the process still dies as it did.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 3c4a3e300c..46afb457da 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2371,6 +2371,23 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+ 
+ #ifdef __PROSPERO__
+     if (segv_hook && segv_hook( siginfo, _sigcontext )) return;
++    /* ⚠ DIAGNOSTIC. Everything past this point belongs to a Wine thread: the
++     * fault is raised as an exception, which walks setup_raise_exception,
++     * send_debug_event, NtTerminateProcess and wine_server_call, and the last
++     * of those reads data->tid. The in-process server runs on a thread the
++     * server creates itself, which has no Wine data, so a fault in a request
++     * handler is answered by a second fault inside the machinery reporting the
++     * first -- and the first has never been seen. Say what it was, from the
++     * registers, before any of that runs. */
++    if (!get_thread_data())
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        char line[176];
++        snprintf( line, sizeof(line),
++                  "wineserver: FAULT on a thread without Wine data: sig %d addr %p rip %p\n",
++                  signal, siginfo ? siginfo->si_addr : NULL, (void *)RIP_sig(sigcontext) );
++        sceKernelDebugOutText( 0, line );
++    }
+ #endif
+     data = init_handler( sigcontext );
+     save_context( data, &context, sigcontext );
