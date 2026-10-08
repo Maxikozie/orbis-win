@@ -2159,3 +2159,51 @@ and does.
 Logging module segment bases at load costs three lines and is the only reason
 an uncatchable crash is diagnosable at all. Combined with the dump's own module
 list, any address in any module can be named after the fact.
+
+## wineserver: st_dev is not stable (2026-10-07, where it stands)
+
+With `fatal_error` routed to klog (patch 0113), the message that had been
+discarded all evening appeared on the first run:
+
+    wineserver: chdir did not end up in
+      /data/prospero-win/prefixes/oblivion/.wineserver/server-290bff49-7e78bd
+
+`create_server_dir` creates the directory, `chdir`s in, `open(".")`s it and
+compares `st_dev`/`st_ino` against the directory it just made.
+
+Fixed one cause: `pw_cwd_join` turned a relative `"."` into `"<cwd>/."`, which
+this console does not resolve back to the same inode. `"."` now collapses to
+the base (`src/prospero-win-patches-ps4/0006-*`).
+
+**Still failing, and the reason is sharper.** The server directory is named
+`server-<st_dev>-<st_ino>` of the prefix, and that name changes between runs:
+
+    run 1   server-290bff49-7e78bd
+    run 2   server-290bff65-7e78bd
+
+`st_ino` is stable; **`st_dev` drifts**. So `stat` and `fstat` disagree about
+the same directory, and the comparison can never hold.
+
+Not an interposition failure: `stat` and `fstat` in wineserver are
+orbis-compat's corrected versions (it documents that the SDK's `struct stat`
+does not match the layout the PS4 kernel fills, with the shear measured on
+`st_size` and `st_mode`), and `__real_stat` from the cwd layer's `--wrap`
+reaches them.
+
+### Next
+
+- Measure `stat` vs `fstat` on one directory directly, in a probe: both
+  structures, field by field. That settles whether `st_dev` is volatile from
+  the kernel or mistranslated on one of the two paths.
+- orbis-compat's note covers `st_size` and `st_mode` only. If `st_dev` is
+  junk on this file system, the fix is to drop it from the comparison and the
+  directory name, which is a small Wine patch and arguably correct anyway --
+  a prefix cannot span devices here.
+
+### The lesson that keeps repeating
+
+Four of today's blockers were invisible until the instrument was fixed:
+`module=`/`module_offset=` on faults, module bases logged at load, reading a
+format string out of the binary, and now `fatal_error` reaching klog. On this
+console every default diagnostic channel is broken in a way that looks exactly
+like the program failing silently.
