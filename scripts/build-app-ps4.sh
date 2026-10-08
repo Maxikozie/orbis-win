@@ -66,7 +66,7 @@ say "compile: this port's platform layer"
 # carry the translator's diagnostics, so it needs the same logger the PRX has.
 for f in "$ROOT"/src/native/pw_videoout_ps4.c "$ROOT"/src/native/pw_pad_ps4.c \
          "$ROOT"/src/native/pw_audio_ps4.c "$ROOT"/src/native/pw_platform_bind_ps4.c \
-         "$ROOT"/src/native/pw_wow_log_ps4.c; do
+         "$ROOT"/src/native/pw_wow_log_ps4.c "$ROOT"/src/native/pw_dso_handle_ps4.c; do
   $CC $CFL -c "$f" -o "$OBJ/ps4_$(basename "$f" .c).o"
 done
 
@@ -83,7 +83,21 @@ say "link"
 #     _Unwind_*) to ntdll.prx instead of to the SDK's own runtime.
 #
 # Measured on hardware 2026-10-07. The title must depend on Sony libraries only.
-$CC -o "$OBJ/../wine_app.elf" "$OBJ"/*.o \
+# ⚠ --image-base. The kernel loads this title at 0x400000, which is exactly
+# where a 32-bit Windows executable is based -- and one whose relocations are
+# stripped, as Oblivion.exe's are, cannot go anywhere else:
+#
+#   wine: failed to create main module for "C:\Games\Oblivion\Oblivion.exe",
+#         status c0000018          (STATUS_CONFLICTING_ADDRESSES)
+#
+# Nor is the low 2 GiB enough to clear: the executable is LARGE_ADDRESS_AWARE,
+# so under WoW64 it may use the whole 4 GiB, and a game that wants any
+# particular address there is a game that cannot run. Link above it instead, out
+# of 32-bit reach altogether, which costs the guest nothing and frees the lot.
+#
+# 0x200000000 is clear of the guest's 4 GiB and of the PRX region at
+# 0x800000000. pw_dso_handle_ps4.c is what makes any of this link.
+$CC -o "$OBJ/../wine_app.elf" "$OBJ"/*.o -Wl,--image-base=0x200000000 \
     -lSceNet -lSceAudioOut -lSceSystemService -lSceVideoOut -lScePad -lSceUserService
 printf '   elf %s\n' "$(du -h "$OBJ/../wine_app.elf" | cut -f1)"
 
