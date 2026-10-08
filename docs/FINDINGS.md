@@ -2683,3 +2683,41 @@ and RADV, and `graphics =` turned out to be a catalog label only
 (`wine64_main.c:662`), not something that selects a backend. Real DXVK is the
 better answer for a game this heavy and is worth installing, but it is a
 download and a separate change.
+
+### d3d9=b got the loader all the way through (2026-10-08)
+
+With Wine's own d3d9 allowed, **every import resolved**: zero load failures, 52
+modules, and the run reached t=10.4 s instead of 5.9. The loader is no longer
+the problem -- GTA IV's own code runs.
+
+What it ends on now is a fault inside a syscall, not a missing DLL:
+
+    trace:seh:handle_syscall_fault code=c0000005 addr=8000e1eca ip=8000e1eca
+      rax=0000002000000002 rcx=0000000058585858
+    err:seh:handle_syscall_fault syscall fault 0xc0000005 at 8000e1eca
+    trace:seh:handle_syscall_fault returning to user mode ip=00006fffffe448a4
+    ...
+    err:wow:log_reset syscall 0x43 came back replaced (2): status 0,
+      eax 0x43 -> 0, eip 0x7bf2d6a0 -> 0x7bf2e5f6
+
+`rcx` holding `0x58585858` is a poison pattern, and the address is in a PRX
+below ntdll's `0x800830000`, so it is unix-side code reached from the 32-bit
+side. Wine caught it, handed `STATUS_ACCESS_VIOLATION` back to the game, and the
+game unwound through its own handlers. Resolving it needs the module base:
+offset `0xe1eca` lands plausibly in win32u, winevulkan or opengl32 and guessing
+between them is not worth a launch -- `pw_wine_dl_addr` is exported from ntdll
+and `handle_syscall_fault` can name the module itself.
+
+### DXVK, actually installed this time
+
+DXVK 3.1.1 from the upstream release tarball (sha256 `40565b4a...e608`), x32 ->
+`syswow64`, x64 -> `system32`, for d3d9, d3d11, d3d10core and dxgi. Verified as
+genuine by their imports: no `wined3d.dll`, and the UCRT apisets instead.
+Wine's originals are kept at `.wine-d3d-backup/` inside the prefix.
+
+Two things made it safe to go straight to `d3d9=n`:
+
+* the console reports `api 1.3.359`, so DXVK 3.x's Vulkan 1.3 floor is met;
+* the `api-ms-win-crt-*` imports need no files -- Wine resolves them through its
+  own API set map (`loader.c:get_apiset_entry`) -- and `setupapi.dll` and
+  `vulkan-1.dll` are both already in the prefix.
