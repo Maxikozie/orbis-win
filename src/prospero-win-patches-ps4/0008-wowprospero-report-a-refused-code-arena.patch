@@ -15,6 +15,54 @@ refusal with NULL or -1.
 The arena is the one allocation on this console that has to end up executable,
 and a plain executable mapping is refused here: orbis_jit.c gets it by mapping
 direct memory read-write and protecting it afterwards. Which of the two calls
+diff --git a/native/pw_diagnostics.c b/native/pw_diagnostics.c
+index 3987663..6497390 100644
+--- a/native/pw_diagnostics.c
++++ b/native/pw_diagnostics.c
+@@ -49,7 +49,7 @@ static void flush(void)
+     if (bytes + used > PW_DIAGNOSTICS_CHUNK - 128u) {
+         close(fd); fd = -1;
+         if (rename(current, previous) != 0) { disk_error = errno; used = 0; return; }
+-        fd = open(current, O_WRONLY | O_CREAT | O_TRUNC, 0600);
++        fd = open(current, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+         bytes = strlen(identity);
+         if (fd < 0 || put_all(fd, identity, bytes) != 0) goto failed;
+     }
+@@ -111,8 +111,14 @@ int pw_diagnostics_open(const char *root, const char *build, const char *profile
+     if (!root || snprintf(directory, sizeof(directory), "%s/logs", root) >= (int)sizeof(directory)) {
+         disk_error = ENAMETOOLONG; goto out;
+     }
+-    if (mkdir(root, 0700) != 0 && errno != EEXIST) { disk_error = errno; goto out; }
+-    if (mkdir(directory, 0700) != 0 && errno != EEXIST) { disk_error = errno; goto out; }
++    /* ⚠ 0777, and chmod what already exists. These logs are read off the
++     * console over FTP, and GoldHEN's server does not run as the title: a
++     * directory the title made 0700 is one nobody can list, which is how the
++     * session logs sat here unreadable. Same for the files below. */
++    if (mkdir(root, 0777) != 0 && errno != EEXIST) { disk_error = errno; goto out; }
++    if (mkdir(directory, 0777) != 0 && errno != EEXIST) { disk_error = errno; goto out; }
++    (void)chmod(root, 0777);
++    (void)chmod(directory, 0777);
+     snprintf(index, sizeof(index), "%s/next.txt", directory);
+     counter = open(index, O_RDONLY);
+     if (counter >= 0) {
+@@ -123,7 +129,7 @@ int pw_diagnostics_open(const char *root, const char *build, const char *profile
+     snprintf(current, sizeof(current), "%s/session-%u.log", directory, next);
+     snprintf(previous, sizeof(previous), "%s/session-%u.previous.log", directory, next);
+     (void)unlink(previous);
+-    fd = open(current, O_WRONLY | O_CREAT | O_TRUNC, 0600);
++    fd = open(current, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+     if (fd < 0) { disk_error = errno; goto out; }
+     /* Identity repeats on rotation so a retained tail can be identified. */
+     snprintf(identity, sizeof(identity), "PW_REPORT/1 build=%s profile=%s cycle=%u pid=%ld time=%lld\n",
+@@ -131,7 +137,7 @@ int pw_diagnostics_open(const char *root, const char *build, const char *profile
+              (long)getpid(), (long long)time(NULL));
+     bytes = strlen(identity);
+     if (put_all(fd, identity, bytes) != 0) { disk_error = errno; close(fd); fd = -1; goto out; }
+-    counter = open(index, O_WRONLY | O_CREAT | O_TRUNC, 0600);
++    counter = open(index, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+     if (counter < 0) { disk_error = errno; close(fd); fd = -1; goto out; }
+     int n = snprintf(number, sizeof(number), "%u\n", (next + 1) % PW_DIAGNOSTICS_SESSIONS);
+     int saved = put_all(counter, number, (size_t)n);
 diff --git a/src/pw_x86_block.c b/src/pw_x86_block.c
 index 13f732e..c8bb369 100644
 --- a/src/pw_x86_block.c
