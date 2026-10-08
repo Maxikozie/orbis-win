@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] cwd: stat() must fill st_dev and st_ino on PS4.
+
+Measured on hardware (src/stat-probe), stat() and fstat() of the same
+directory:
+
+    stat   dev=0x0        ino=0x0       mode=040700 nlink=0 uid=0 size=512
+    fstat  dev=0x290bff81 ino=0x7e793e  mode=040700 nlink=2 uid=1 size=512
+
+orbis-compat's stat() goes through sceKernelStat, which leaves st_dev, st_ino,
+st_nlink and st_uid zero; its fstat() goes through _fstat and fills them. Same
+translate(), different kernel call. st_mode and st_size agree, which is why
+this went unnoticed -- orbis-compat's own notes cover the shear on those two
+fields only.
+
+Wine identifies files by (st_dev, st_ino), so zeros are not cosmetic.
+wineserver creates its server directory, chdir()s in, open(".")s it and
+compares a stat() against an fstat(); the comparison could never hold and it
+died with "chdir did not end up in <dir>" on every launch.
+
+Fill them in the cwd wrapper, which every path already passes through, by
+opening the path and fstat-ing it -- and only when they came back zero.
+---
+diff --git a/wine/ps5/pw_wine_cwd_libc.c b/wine/ps5/pw_wine_cwd_libc.c
+index 03c6407..c38c151 100644
+--- a/wine/ps5/pw_wine_cwd_libc.c
++++ b/wine/ps5/pw_wine_cwd_libc.c
+@@ -222,11 +222,43 @@ static int lstat_resolved(struct resolved *r, struct stat *st)
+     return result;
+ }
+ 
++/* ⚠ stat() DOES NOT REPORT st_dev OR st_ino ON THIS CONSOLE. Measured
++ * 2026-10-07 (src/stat-probe): orbis-compat's stat() goes through
++ * sceKernelStat, which leaves st_dev, st_ino, st_nlink and st_uid zero, while
++ * its fstat() goes through _fstat and fills them. Same translate(), different
++ * kernel call. st_mode and st_size agree.
++ *
++ * Wine identifies files by (st_dev, st_ino), so zeros are not a cosmetic gap:
++ * wineserver creates its server directory, chdir()s in, open(".")s it and
++ * compares a stat() against an fstat() -- which can never match, and it died
++ * with "chdir did not end up in <dir>" every time.
++ *
++ * Fill them the only way that works here: open the path and fstat it. Only
++ * when they came back zero, so a file system that does report them pays
++ * nothing. A failure to open leaves the stat as-is rather than failing the
++ * call -- the mode and size are still good. */
++static void fill_identity(const char *path, struct stat *st)
++{
++    struct stat from_fd;
++    int fd;
++
++    if (st->st_dev || st->st_ino) return;
++    if ((fd = __real_open(path, O_RDONLY)) < 0) return;
++    if (!fstat(fd, &from_fd)) {
++        st->st_dev = from_fd.st_dev;
++        st->st_ino = from_fd.st_ino;
++        if (!st->st_nlink) st->st_nlink = from_fd.st_nlink;
++        if (!st->st_uid) st->st_uid = from_fd.st_uid;
++    }
++    __real_close(fd);
++}
++
+ static int stat_resolved(struct resolved *r, struct stat *st)
+ {
+     int result;
+ 
+     while ((result = __real_stat(r->full, st)) && reload(r)) {}
++    if (!result) fill_identity(r->full, st);
+     return result;
+ }
+ 

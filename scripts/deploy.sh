@@ -20,6 +20,7 @@ case "$TARGET" in
   fault)    TITLE_ID=GLDS10004 ;;
   wine-app) TITLE_ID=GLDS10005 ;;
   modprobe) TITLE_ID=GLDS10006 ;;
+  statprobe) TITLE_ID=GLDS10007 ;;
   *) die "usage: deploy.sh {hello|triangle|probe|present|fault|wine-app|modprobe}" ;;
 esac
 
