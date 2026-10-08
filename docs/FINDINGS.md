@@ -2921,3 +2921,37 @@ all on the console. 18 entries across `user.reg` and `system.reg`, rewritten to
 ⚠ Worth remembering for any prefix built on the host: **`wineboot` records
 absolute host paths**, and they survive the push. Fonts are the instance found;
 anything else registered by path has the same problem waiting.
+
+### ⚠ The font repoint hangs the 64-bit loader (2026-10-08, unresolved)
+
+Repointing the font registry from host `Z:` paths to `C:\windows\Fonts` made
+Wine open the TTFs for the first time -- and hangs it. Two runs in a row stop
+at the same place:
+
+    [247 t=1.339] WINE 0024:trace:module:LdrGetDllHandleEx L"ntdll.dll" -> ...
+
+right after `wow64win`'s PROCESS_ATTACH, before the 32-bit exe loads, then
+100+ seconds of nothing but native alive ticks and 160 s of CPU burnt.
+
+The server trace says what it is doing: `REQ_select`, over and over.
+
+    run -5:     1    run -4:     5    run -3:     1
+    run -2:     6    run -1:  2728   <- the repointed registry
+
+and the fourteen requests before the storm are two
+`create_file`/`get_handle_fd`/`close_handle` triples -- font files being opened,
+which had never happened before.
+
+**But it is not the font loading.** `+font` was enabled and produces **not one
+line**, so `font_init` is never reached; the hang is earlier, in the 64-bit
+loader. The registry edit itself is clean -- diffing both hives against their
+backups shows exactly the 18 intended value lines and nothing else -- so this is
+not a malformed file.
+
+What that leaves is the registry being *read*: the server loads `system.reg`
+(3.2 MB) at startup, and a changed file may be normalised and written back
+(patch 0150 exists because saving needs chunking). A save loop would look
+exactly like this -- selects, CPU, no Wine output.
+
+Both hives restored to their backups to isolate it; the attempt is kept as
+`*.fontpaths-attempt`. ⚠ Not a fix, and fonts remain absent.
