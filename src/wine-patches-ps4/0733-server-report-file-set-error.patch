@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Date: Tue, 7 Oct 2026 19:55:00 +0000
+Subject: [PATCH] server: report the errno behind each NTSTATUS.
+
+file_set_error() is where every failed system call in the server becomes an
+NTSTATUS. By the time the caller sees the status the errno is gone, and a
+status like 0xc0000022 (STATUS_ACCESS_DENIED) names a dozen possible sites --
+create_user_data_mapping reaches it through several.
+
+Log the errno and the caller's return address, which together identify the
+failing call exactly.
+---
+diff --git a/server/file.c b/server/file.c
+index 20680ef5b3..b2fc02db42 100644
+--- a/server/file.c
++++ b/server/file.c
+@@ -572,6 +572,19 @@ static void file_destroy( struct object *obj )
+ /* set the last error depending on errno */
+ void file_set_error(void)
+ {
++#ifdef __PROSPERO__
++    /* ⚠ DIAGNOSTIC. This is where every failed syscall in the server becomes an
++     * NTSTATUS, and the errno it came from is the only thing that says which
++     * call failed. Without it a status such as 0xc0000022 (ACCESS_DENIED) names
++     * a dozen possible sites. */
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        char line[128];
++        snprintf( line, sizeof(line), "wineserver: file_set_error errno=%d from %p\n",
++                  errno, __builtin_return_address(0) );
++        sceKernelDebugOutText( 0, line );
++    }
++#endif
+     switch (errno)
+     {
+     case ETXTBSY:

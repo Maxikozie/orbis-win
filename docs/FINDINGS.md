@@ -2207,3 +2207,65 @@ Four of today's blockers were invisible until the instrument was fixed:
 format string out of the binary, and now `fatal_error` reaching klog. On this
 console every default diagnostic channel is broken in a way that looks exactly
 like the program failing silently.
+
+## Two findings from auditing against orbis-compat (2026-10-07)
+
+Zak asked whether orbis-compat's notes cover anything else we are getting
+wrong. They cover two things, one already solved our way and one a live bug.
+
+### ⚠ The 32-bit wide-character functions were WRONG for this target
+
+`orbis_wchar32.o` replaces the SDK's `wmemchr`/`wcslen`/`wmemcmp` with 32-bit
+`wchar_t` versions. That is correct for the target orbis-compat measured --
+`x86_64-pc-freebsd12-elf`, where clang says `wchar_t` is 32-bit while the SDK's
+C headers say 16, so C and C++ disagree.
+
+**This port targets `x86_64-scei-ps4`, where clang says 16-bit and the headers
+agree.** Linking those definitions gave Wine, whose `WCHAR` is 16-bit, a
+`wcslen` that steps four bytes at a time. Verified in the binary before the
+fix:
+
+    wcslen   cmpl $0x0, 0x4(%rdi,%rax)      <- 4-byte stride
+    wmemchr  cmpl %esi, (%rax)              <- 32-bit compare
+
+and ntdll calls `wcslen`, `wmemchr` and `wmemcmp`. Nothing had failed loudly
+yet; this is the silent-corruption shape the nx-on-orbis developer warned about,
+arriving from the opposite direction.
+
+Fixed by linking a copy of `liborbis-compat.a` with `orbis_wchar32.o` removed
+(`build/ps4-wine-sdk/liborbis-compat-16bit-wchar.a`), so the SDK's own 16-bit
+routines are used. ⚠ Anything else built for this target against orbis-compat
+has the same problem.
+
+### The environment finding was already ours, independently
+
+`orbis_env.cpp` documents exactly what cost an hour tonight -- "setenv() in one
+image is invisible to another", same cause, the SDK's real static musl giving
+every image its own `environ`. Their fix answers operator knobs from env files;
+ours hands the module the values, which their own note calls "the honest
+mechanism". No change needed.
+
+## ⚠ Descriptor duplication is refused outright
+
+`dup_fd_object` (server/fd.c:1885) cannot duplicate a descriptor by any means
+this console offers:
+
+    dup()                 EPERM
+    fcntl(F_DUPFD)        EINVAL
+    dup2() onto a free fd fails for every candidate 64..255
+    sceKernelRdup()       EPERM
+
+orbis-compat records `dup2` onto fd 1 or 2 as EPERM -- "the descriptor table is
+not ours to rearrange". This is broader: it is the whole table, and
+`sceKernelRdup`, the libkernel primitive that exists precisely for this, is
+refused as well.
+
+That is structural rather than another small mismatch. wineserver duplicates
+descriptors routinely, so the options are:
+
+1. Find out whether the refusal is specific to the descriptor being duplicated
+   (this one comes from `shm_open(SHM_ANON)`) or applies to every fd. A probe
+   that dups a regular file, a directory and an shm fd settles it in one run.
+2. If it is universal, patch the server to share the descriptor instead of
+   duplicating it where ownership allows -- a real design change, not a
+   one-liner.

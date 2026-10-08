@@ -54,7 +54,14 @@ EHLD="/home/zpeirce/ps4-gladius/prospero-win/wine/ps5/prx_eh_frame.ld"
 # audio belong to the title; cwd, dl, dmem, heap and threads belong to Wine.
 PWSHIM="/home/zpeirce/ps4-gladius/build/ps4-wine-sdk/libwineshim.a"
 STUBS="/home/zpeirce/ps4-gladius/build/ps4-wine-sdk/libps4stubs.a"
-OCLIB="/home/zpeirce/ps4-gladius/mesa-build/orbis-compat/build/liborbis-compat.a"
+# ⚠ orbis-compat WITHOUT orbis_wchar32.o. That object replaces the SDK's wide
+# functions with 32-bit-wchar_t versions, which is correct for the target
+# orbis-compat measured (x86_64-pc-freebsd12-elf, where clang says wchar_t is
+# 32-bit and the SDK's C headers say 16). THIS port targets x86_64-scei-ps4,
+# where clang says 16-bit and the headers agree -- so linking those definitions
+# gives Wine a wcslen that steps 4 bytes over 16-bit WCHAR data. Verified in the
+# binary: cmpl $0x0, 0x4(%rdi,%rax). Wine calls wcslen, wmemchr and wmemcmp.
+OCLIB="/home/zpeirce/ps4-gladius/build/ps4-wine-sdk/liborbis-compat-16bit-wchar.a"
 
 CFLAGS='--target=x86_64-scei-ps4 -fPIC -funwind-tables
   -D__PS4__ -DPS4 -DORBIS -D__ORBIS__ -D__PROSPERO__ -D_BSD_SOURCE=1 -fno-visibility-from-dllstorageclass
