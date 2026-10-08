@@ -3,26 +3,20 @@ From: ps4-gladius <ps4-gladius@invalid>
 Date: Tue, 7 Oct 2026 20:30:00 +0000
 Subject: [PATCH] server: reopen a file by name where dup is refused.
 
-This console will not duplicate a descriptor by any means. Measured with four
-mechanisms against five descriptor kinds (src/dup-probe): dup, dup2,
-fcntl(F_DUPFD) and sceKernelRdup all fail for regular files, directories, shm
-objects, sockets and pipes alike. orbis-compat's note that "the descriptor
-table is not ours to rearrange" is literal and complete.
-
-dup_fd_object therefore failed, which surfaced four frames away as
-release_object(NULL) inside init_directories -- the NLS file mapping, whose fd
-it was trying to duplicate.
+This console will not duplicate a descriptor by any means: dup, dup2,
+fcntl(F_DUPFD) and sceKernelRdup all fail, for regular files, directories, shm
+objects, sockets and pipes alike (src/dup-probe).
 
 A file-backed fd does not need duplicating: reopening orig->unix_name gives
-exactly what dup would have, an independent descriptor with its own offset and
-its own close, and shares nothing. Sockets and pipes have no name and remain
-undupable; they have not been reached yet.
+what dup would have, an independent descriptor with its own offset and close.
+Report the failure with the name it had, so a run says whether there was a path
+to reopen at all.
 ---
 diff --git a/server/fd.c b/server/fd.c
-index bce9a84f5e..145ad8c51e 100644
+index bce9a84f5e..3fefdf4f03 100644
 --- a/server/fd.c
 +++ b/server/fd.c
-@@ -1879,7 +1879,28 @@ struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sha
+@@ -1879,8 +1879,37 @@ struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sha
      {
          struct closed_fd *closed = mem_alloc( sizeof(*closed) );
          if (!closed) goto failed;
@@ -32,14 +26,12 @@ index bce9a84f5e..145ad8c51e 100644
 +        /* ⚠ THIS CONSOLE REFUSES TO DUPLICATE A DESCRIPTOR, BY ANY MEANS.
 +         * Measured with src/dup-probe: dup, dup2, fcntl(F_DUPFD) and
 +         * sceKernelRdup all fail, for regular files, directories, shm objects,
-+         * sockets and pipes alike. orbis-compat's "the descriptor table is not
-+         * ours to rearrange" is literal and complete.
++         * sockets and pipes alike.
 +         *
-+         * A file-backed fd does not need duplicating though: reopening its name
-+         * yields what dup would have given -- an independent descriptor with
-+         * its own offset and its own close -- without sharing anything. That
-+         * covers the callers that matter here, create_file_obj and the mapping
-+         * path. A socket or pipe has no name and still cannot be duplicated. */
++         * A file-backed fd does not need duplicating: reopening its name gives
++         * what dup would have -- an independent descriptor with its own offset
++         * and its own close -- and shares nothing. A socket or pipe has no name
++         * and still cannot be duplicated. */
 +        if (fd->unix_fd == -1 && orig->unix_name)
 +        {
 +            int flags = (orig->access & FILE_WRITE_DATA) ? O_RDWR : O_RDONLY;
@@ -50,5 +42,16 @@ index bce9a84f5e..145ad8c51e 100644
 +#endif
 +        if (fd->unix_fd == -1)
          {
++#ifdef __PROSPERO__
++            {
++                extern int sceKernelDebugOutText( int channel, const char *text );
++                char note[320];
++                snprintf( note, sizeof(note),
++                          "wineserver: dup_fd_object failed, errno %d, unix_name %s\n",
++                          errno, orig->unix_name ? orig->unix_name : "(none -- cannot reopen)" );
++                sceKernelDebugOutText( 0, note );
++            }
++#endif
              file_set_error();
              free( closed );
+             goto failed;
