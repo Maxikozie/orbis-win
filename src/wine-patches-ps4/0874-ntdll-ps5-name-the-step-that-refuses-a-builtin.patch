@@ -4,22 +4,24 @@ Subject: [PATCH] ntdll: Name the step that refuses a builtin on ps5.
 
 GTA IV loads 29 modules and then every further builtin is refused with
 STATUS_NO_MEMORY -- wmvcore, powrprof, oleaut32, dinput8, wintrust,
-shell32 -- out of open_dll_file, before any placement happens. That rules
-out the address space: 0873 never fired because the image never reached
-map_image_view at all.
+shell32 -- out of open_dll_file, before anything is placed. 0873 never
+fired because the image never reaches map_image_view at all, so the
+address space is not the constraint.
 
-Size is not it either. powrprof is 25 KiB and fails where user32 at
-1.8 MiB had just succeeded, and the set moves between runs, so it is a
-count of something consumed per load, not a property of the module.
+Size is not it either: powrprof is 25 KiB and fails where user32 at
+1.8 MiB had just succeeded, and the failing set moves between runs. It is
+a count of something spent per load.
 
-open_dll_file is two calls reporting one status, so split it: the file
-not opening and the file not becoming a section consume quite different
-things. Print the heap counters alongside, because everything the loader
-allocates comes from pw_wine_heap -- the title's libc stops near 13 MiB --
-and the directory listings this port now keeps are a new tenant of it:
-nothing was ever cached while read_names could not list /data, so the
-getdents fix gave this heap a consumer it did not have before. live,
-mapped, peak and the failure count say whether that is where it went.
+open_dll_file is two calls reporting one status, and they consume quite
+different things: the open allocates the object attributes and asks the
+server for a handle, the section asks it to read the image. Report both
+halves -- instrumenting only the section left both silent -- with
+pw_wine_heap's counters, since everything the loader allocates comes from
+that heap (the title's libc stops near 13 MiB). The directory listings
+this port now keeps are a new tenant of it: nothing was ever cached while
+read_names could not list /data, so the getdents fix gave the heap a
+consumer it never had. live, mapped, peak and failures say whether that
+is where the memory went.
 
 Also report a refusal from server_get_unix_fd, which runs before any
 mapping trace and so looks identical from outside, and the status at the
@@ -27,45 +29,82 @@ map_image_view call site, independently of 0873.
 
 Diagnostic only; no behaviour changes.
 diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
-index e90f83c79e..9e6c326208 100644
+index e90f83c79e..2cea2de4be 100644
 --- a/dlls/ntdll/unix/loader.c
 +++ b/dlls/ntdll/unix/loader.c
-@@ -1096,6 +1096,40 @@ static NTSTATUS open_dll_file( const char *name, OBJECT_ATTRIBUTES *attr, HANDLE
+@@ -1071,6 +1071,37 @@ static inline char *prepend_build_dir_path( char *ptr, const char *ext, const ch
+  *
+  * Open a file for a new dll. Helper for open_builtin_pe_file.
+  */
++#ifdef __PROSPERO__
++/* ⚠ DIAGNOSTIC. open_dll_file is two calls reporting one status, and the two
++ * halves consume quite different things: the open allocates the object
++ * attributes and asks the server for a handle, the section asks it to read the
++ * image. GTA IV's 30th builtin onwards is refused with STATUS_NO_MEMORY
++ * whatever its size -- powrprof is 25 KiB and fails where user32 at 1.8 MiB had
++ * just succeeded -- so it is a count of something spent per load.
++ *
++ * Everything the loader allocates comes from pw_wine_heap: the title's libc
++ * stops near 13 MiB, so Wine's Unix side carries its own. The directory
++ * listings this port now keeps are a new tenant of that heap -- nothing was
++ * ever cached while read_names could not list /data -- so the getdents fix gave
++ * it a consumer it never had. live, mapped, peak and failures say whether that
++ * is where the memory went. */
++static void pw_report_heap( const char *half, const char *name, unsigned int status )
++{
++    struct pw_heap_stats {
++        unsigned long long live, peak_live, mapped, peak_mapped;
++        unsigned long long allocs, frees, failures, foreign, large;
++    } heap = { 0 };
++    extern void pw_wine_heap_stats( struct pw_heap_stats *stats );
++
++    pw_wine_heap_stats( &heap );
++    ERR( "ps5 %s refused %s: %x, heap live %llu KiB mapped %llu KiB peak %llu KiB "
++         "allocs %llu frees %llu failures %llu large %llu\n",
++         half, debugstr_a(name), status,
++         heap.live / 1024, heap.mapped / 1024, heap.peak_mapped / 1024,
++         heap.allocs, heap.frees, heap.failures, heap.large );
++}
++#endif
++
+ static NTSTATUS open_dll_file( const char *name, OBJECT_ATTRIBUTES *attr, HANDLE *mapping )
+ {
+     LARGE_INTEGER size;
+@@ -1085,7 +1116,25 @@ static NTSTATUS open_dll_file( const char *name, OBJECT_ATTRIBUTES *attr, HANDLE
+         {
+             /* if the file exists but failed to open, report the error */
+             struct stat st;
++#ifdef __PROSPERO__
++            /* ⚠ DIAGNOSTIC. This half, not the section below: naming only the
++             * section call left both halves silent and cost a launch. The
++             * file is there and the open itself is refused, and the first
++             * thing it does is allocate the object attributes, so print the
++             * heap with it. */
++            if (!stat( name, &st ))
++            {
++                static int reported;
++                if (reported < 12)
++                {
++                    reported++;
++                    pw_report_heap( "open", name, status );
++                }
++                return status;
++            }
++#else
+             if (!stat( name, &st )) return status;
++#endif
+         }
+         /* otherwise continue searching */
+         return STATUS_DLL_NOT_FOUND;
+@@ -1096,6 +1145,13 @@ static NTSTATUS open_dll_file( const char *name, OBJECT_ATTRIBUTES *attr, HANDLE
                                SECTION_MAP_READ | SECTION_MAP_EXECUTE,
                                NULL, &size, PAGE_EXECUTE_READ, SEC_IMAGE, handle );
      NtClose( handle );
 +#ifdef __PROSPERO__
-+    /* ⚠ DIAGNOSTIC. open_dll_file is two calls and reports one status, so
-+     * "open failed c0000017" does not say whether the file could not be opened
-+     * or could not be turned into a section. GTA IV's 30th module onwards all
-+     * end here, whatever their size -- powrprof is 25 KiB and fails where
-+     * user32 at 1.8 MiB did not -- so it is a count, not a size, and the two
-+     * halves consume quite different things.
-+     *
-+     * The heap counters come with it. Everything the loader allocates comes
-+     * from pw_wine_heap (the title's libc stops near 13 MiB), and the
-+     * directory listings this port now keeps are a new tenant of it: nothing
-+     * was ever cached while read_names could not list /data. live, mapped and
-+     * the failure count say whether that is where the memory went. */
 +    if (status)
 +    {
-+        struct pw_heap_stats {
-+            unsigned long long live, peak_live, mapped, peak_mapped;
-+            unsigned long long allocs, frees, failures, foreign, large;
-+        } heap = { 0 };
-+        extern void pw_wine_heap_stats( struct pw_heap_stats *stats );
 +        static int reported;
-+
-+        if (reported < 12)
-+        {
-+            reported++;
-+            pw_wine_heap_stats( &heap );
-+            ERR( "ps5 section refused %s: %x, heap live %llu KiB mapped %llu KiB "
-+                 "peak %llu KiB allocs %llu frees %llu failures %llu large %llu\n",
-+                 debugstr_a(name), (unsigned int)status,
-+                 heap.live / 1024, heap.mapped / 1024, heap.peak_mapped / 1024,
-+                 heap.allocs, heap.frees, heap.failures, heap.large );
-+        }
++        if (reported < 12) { reported++; pw_report_heap( "section", name, status ); }
 +    }
 +#endif
      return status;
