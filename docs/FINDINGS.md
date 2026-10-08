@@ -2069,3 +2069,50 @@ The first is the principled fix and the one to try next.
 all; a bare `rip` named nothing once faults moved outside ntdll. Any address in
 a loaded module can now be symbolised against the unstripped `.shared.elf` kept
 in `.deps/wine-ps5/prx/`.
+
+## The shared libc fixes dynamic TLS (2026-10-07)
+
+`PW_SHARED_LIBC=1` resolves libc from `libSceLibcInternal` instead of the static
+archive, so the title and every PRX share one libc -- one `environ`, one TLS
+regime. `ntdll.prx` no longer defines `__tls_get_addr` at all.
+
+**It works.** Wine now gets *through* `server_init_process` without faulting,
+and the whole class of four static-libc failures goes with it. The earlier
+attempt failed for reasons since fixed: the link order that had modules binding
+their C runtime to ntdll, `LDLIBS` being single-quoted so the switch never
+expanded, and the missing late archive pass `__inet_aton` needs.
+
+### What stops it now: Wine exits silently
+
+    WINE wine startup: server_init_process
+    PW_WINE64 exit sink_calls=7
+    PW_WINE64 restart to=launcher cycle=1 reason=wine-exit
+
+`reason=wine-exit` is `__wine_main` returning, not a fault. `sink_calls=7`
+accounts for exactly the seven startup lines above it, so Wine shut down
+deliberately and said nothing.
+
+### ⚠ Wine's debug channels are not usable yet
+
+Setting `WINEDEBUG=+server,+seh,+process,+module` changes the outcome from a
+clean exit to:
+
+    signal: 12 (SIGSYS)   rip: 0x8000028bc
+
+the same address and signal the fault probe hit at exit this afternoon. SIGSYS
+here is the kernel killing a title for executing a `syscall` instruction
+outside libkernel -- patch 0690's subject. So the tracing path reaches code
+that issues a raw syscall, and turning the channels on destabilises rather than
+illuminates. Reverted.
+
+That it changed the outcome at all confirms the environment now reaches Wine,
+which is itself the shared-libc fix working.
+
+### Next
+
+1. Find why `__wine_main` returns. The silent exit is the blocker; Wine's own
+   tracing is currently unavailable, so the next lever is either the raw-syscall
+   problem (so channels become usable) or instrumenting the return path
+   directly.
+2. The raw-syscall/SIGSYS issue is worth solving on its own: it is the same
+   fault that kills a title returning from `main`, and it will keep appearing.
