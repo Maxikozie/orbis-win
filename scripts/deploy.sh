@@ -29,6 +29,17 @@ pkg=$(readlink -f "$ROOT/pkgout/$TARGET/$TITLE_ID.pkg" 2>/dev/null) ||
   die "no package for $TARGET — run: ./scripts/build.sh $TARGET --pkg"
 [[ -f $pkg ]] || die "no package for $TARGET — run: ./scripts/build.sh $TARGET --pkg"
 
+# ⚠ Refuse to upload a package older than what it is built from. deploy.sh
+# only sends an existing .pkg, so forgetting to repackage sends a stale build
+# and the console reports a failure that was already fixed. That cost two
+# launches on 2026-10-07, chasing a segment-alignment bug that was corrected
+# in the modules but never packaged.
+if [[ $TARGET == wine-app ]]; then
+  newest=$(find "$ROOT/prospero-win/.deps/wine-ps5/prx/sce_module" "$ROOT/src/native" \
+                -type f -newer "$pkg" -print -quit 2>/dev/null || true)
+  [[ -z $newest ]] || die "package is older than $newest — run ./scripts/build-app-ps4.sh --pkg --neo first"
+fi
+
 say "uploading $TARGET to $ORBIS_CONSOLE:$ORBIS_FTP_PORT"
 exec python3 "$ROOT/scripts/ftp-put.py" \
   "$ORBIS_CONSOLE" "$ORBIS_FTP_PORT" "$pkg" \
