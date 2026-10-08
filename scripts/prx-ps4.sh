@@ -68,6 +68,8 @@ gen "$prx/obj/ntdll_desc.c" \
     __wine_main pw_wine_dl_adopt dlopen dlsym dlerror \
     pw_wine_heap_stats pw_wine_heap_malloc pw_wine_heap_free \
     pw_wine_heap_calloc pw_wine_heap_realloc pw_wine_heap_memalign \
+    pw_wine_dl_open pw_wine_dl_sym pw_wine_dl_close pw_wine_dl_error \
+    pw_wine_dl_configure \
     pw_wine_set_present_sink pw_wine_post_input pw_wine_sink_stats \
     pw_wine_present pw_wine_next_input pw_wine_input_fd \
     pw_wine_set_pad pw_wine_rumble pw_wine_pad pw_wine_set_rumble \
@@ -166,9 +168,21 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
     # locally gets it instead, and keeps one heap rather than one per module:
     # the libc names resolve here, the pw_wine_heap_* entry points they call
     # resolve to ntdll.
+    #
+    # ⚠ And pw_wine_dl_libc.o with it, for the same reason in a different
+    # symbol. win32u reaches Vulkan by dlopen(SONAME_LIBVULKAN), and it was
+    # binding a WEAK dlopen of its own (nm: "W dlopen") rather than ntdll's
+    # real one, which -Bsymbolic prefers. That stub answers NULL and says
+    # nothing, so libvulkan.prx was reported missing while pw_wine_dl never saw
+    # the call -- its failure text names every path it tried, and the only
+    # entries in the log were ntdll's own.
+    #
+    # The forwarding half makes each module's dlopen strong and sends it to
+    # pw_wine_dl_open in ntdll, so there is one module registry rather than one
+    # per PRX, exactly as with the heap.
     case $name in
     ntdll|wineserver) ;;
-    *) shim_objs="$prx/heap/pw_wine_heap_libc.o" ;;
+    *) shim_objs="$prx/heap/pw_wine_heap_libc.o $prx/obj/pw_wine_dl_libc.o" ;;
     esac
     for s in $shims; do shim_objs="$shim_objs $prx/obj/$s.o"; done
     # stubs go through the shim so they land after orbis-compat and -lc
