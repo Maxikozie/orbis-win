@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Date: Thu, 8 Oct 2026 08:40:00 +0000
+Subject: [PATCH] server: say why a thread failed to get its reply pipe.
+
+0739 named the killer: call_req_handler, on the first request a thread makes,
+because the thread has no reply pipe -- "no way to continue without reply fd".
+A thread gets that pipe in init_thread, and four separate failures leave it
+without one, all of them silent and all of them ending in the same uncatchable
+SIGSYS.
+
+Name which one, and print the descriptors in flight with it. The client sends
+the reply and wait pipes on the process socket and then asks for them here by
+number, so an empty table means the server had not read that message yet rather
+than anything being wrong with the descriptors themselves -- the two have the
+same symptom and need different fixes.
+
+A successful init_thread says so too, to tell "never got there" apart from
+"got there and failed".
+
+Diagnostic only; no behaviour change.
+---
+diff --git a/server/thread.c b/server/thread.c
+index 7395019835..6a870dea47 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -1815,29 +1815,89 @@ done:
+     release_object( process );
+ }
+ 
++#ifdef __PROSPERO__
++/* ⚠ DIAGNOSTIC. A thread that leaves init_thread without a reply pipe is
++ * killed by the next request it makes (call_req_handler, "no way to continue
++ * without reply fd"), and the client turns that into abort_thread and an
++ * uncatchable SIGSYS. Four different failures land in the same place, so name
++ * which one, and print the descriptors in flight: the client sends them on the
++ * process socket and asks for them here by number, and if the server has not
++ * read that message yet the table is simply empty. */
++static void pw_init_thread_note( struct thread *thread, const char *what,
++                                 int reply_fd, int wait_fd )
++{
++    extern int sceKernelDebugOutText( int channel, const char *text );
++    char line[400];
++    int n, i, err = errno;
++
++    n = snprintf( line, sizeof(line),
++                  "wineserver: init_thread %04x %s (reply_fd=%d wait_fd=%d errno=%d) in flight:",
++                  thread->id, what, reply_fd, wait_fd, err );
++    if (n < 0) return;
++    for (i = 0; i < MAX_INFLIGHT_FDS && n < (int)sizeof(line) - 1; i++)
++    {
++        int written;
++        if (thread->inflight[i].client == -1) continue;
++        written = snprintf( line + n, sizeof(line) - n, " %d->%d",
++                            thread->inflight[i].client, thread->inflight[i].server );
++        if (written < 0) break;
++        n += written;
++    }
++    if (n > (int)sizeof(line) - 2) n = (int)sizeof(line) - 2;
++    line[n] = '\n';
++    line[n + 1] = 0;
++    sceKernelDebugOutText( 0, line );
++}
++#endif
++
+ static int init_thread( struct thread *thread, int reply_fd, int wait_fd )
+ {
++#ifdef __PROSPERO__
++    int want_reply = reply_fd, want_wait = wait_fd;
++#endif
++
+     if ((reply_fd = thread_get_inflight_fd( thread, reply_fd )) == -1)
+     {
++#ifdef __PROSPERO__
++        pw_init_thread_note( thread, "FAILED: the reply pipe is not in flight", want_reply, want_wait );
++#endif
+         set_error( STATUS_TOO_MANY_OPENED_FILES );
+         return 0;
+     }
+     if ((wait_fd = thread_get_inflight_fd( thread, wait_fd )) == -1)
+     {
++#ifdef __PROSPERO__
++        pw_init_thread_note( thread, "FAILED: the wait pipe is not in flight", want_reply, want_wait );
++#endif
+         set_error( STATUS_TOO_MANY_OPENED_FILES );
+         goto error;
+     }
+ 
+     if (thread->reply_fd)  /* already initialised */
+     {
++#ifdef __PROSPERO__
++        pw_init_thread_note( thread, "FAILED: already initialised", want_reply, want_wait );
++#endif
+         set_error( STATUS_INVALID_PARAMETER );
+         goto error;
+     }
+ 
+-    if (fcntl( reply_fd, F_SETFL, O_NONBLOCK ) == -1) goto error;
++    if (fcntl( reply_fd, F_SETFL, O_NONBLOCK ) == -1)
++    {
++#ifdef __PROSPERO__
++        pw_init_thread_note( thread, "FAILED: O_NONBLOCK on the reply pipe refused", want_reply, want_wait );
++#endif
++        goto error;
++    }
+ 
+     thread->reply_fd = create_anonymous_fd( &thread_fd_ops, reply_fd, &thread->obj, 0 );
+     thread->wait_fd  = create_anonymous_fd( &thread_fd_ops, wait_fd, &thread->obj, 0 );
++#ifdef __PROSPERO__
++    if (!thread->reply_fd || !thread->wait_fd)
++        pw_init_thread_note( thread, "FAILED: no server fd object for the pipes", want_reply, want_wait );
++    else
++        pw_init_thread_note( thread, "ok", want_reply, want_wait );
++#endif
+     return thread->reply_fd && thread->wait_fd;
+ 
+  error:
