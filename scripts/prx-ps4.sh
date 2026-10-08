@@ -188,7 +188,7 @@ $CC -shared -Wl,-Bsymbolic -Wl,-soname,wowprospero.prx \
     -D__WINESRC__ -DWINE_UNIX_LIB -D_REENTRANT \
     -I"$root/wine/wowprospero" -I"$build/include" -I"$work/source/include" \
     -I"$root/src" -I"$root/include" \
-    "$root/wine/wowprospero/unix.c" $WOW_DBT "$gladius/src/native/pw_emutls_ps4.c" "$prx/obj/wowprospero_desc.o" \
+    "$root/wine/wowprospero/unix.c" $WOW_DBT "$gladius/src/native/pw_emutls_ps4.c" "$gladius/src/native/pw_wow_log_ps4.c" "$prx/obj/wowprospero_desc.o" \
     -o "$prx/wowprospero.shared.elf" \
     > "$prx/wowprospero.link.log" 2>&1 || { echo "  ✗ wowprospero: link"; grep -E "error" "$prx/wowprospero.link.log" | head -3; }
 

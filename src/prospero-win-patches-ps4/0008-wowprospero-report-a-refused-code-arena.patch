@@ -15,11 +15,151 @@ refusal with NULL or -1.
 The arena is the one allocation on this console that has to end up executable,
 and a plain executable mapping is refused here: orbis_jit.c gets it by mapping
 direct memory read-write and protecting it afterwards. Which of the two calls
+diff --git a/src/pw_x86_block.c b/src/pw_x86_block.c
+index 13f732e..c8bb369 100644
+--- a/src/pw_x86_block.c
++++ b/src/pw_x86_block.c
+@@ -4,6 +4,23 @@
+ #include "pw_x87.h"
+ #include <string.h>
+ 
++/* ⚠ DIAGNOSTIC. PW_ERR_VM is returned from twenty places in the translator --
++ * a refused host allocation, guest memory it cannot read, a span that leaves
++ * the 32-bit address space, a block that would not execute -- and they all
++ * arrive at the caller as the same number:
++ *     err:wow:BTCpuSimulate DBT error -9 at eip 0x7bf33290, fault address 0
++ * Name the one that fired. Bounded, and only on the console: this file also
++ * builds for the host, which has no klog. */
++#ifdef __PROSPERO__
++extern void pw_wow_log( const char *format, ... );
++#define PW_VM_NOTE(tag) do { \
++        static int pw_vm_left = 4; \
++        if (pw_vm_left > 0) { pw_vm_left--; pw_wow_log( "wowprospero: PW_ERR_VM at %s\n", tag ); } \
++    } while (0)
++#else
++#define PW_VM_NOTE(tag) ((void)0)
++#endif
++
+ /* Context accesses below use signed disp8 encodings. Fail at build time if
+  * future state-layout changes would silently address the wrong field. */
+ _Static_assert(offsetof(PwX86State,eflags)<=127,"context exceeds disp8 layout");
+@@ -1113,25 +1130,25 @@ static int string_dispatch(PwX86State *state,unsigned opcode,unsigned width,unsi
+     uint32_t count=repeat?state->gpr[1]:1;
+     if(!count)return PW_OK;
+     uint64_t span=(uint64_t)count*width;
+-    if(span>0x100000000ull)return PW_ERR_VM;
++    if(span>0x100000000ull){ PW_VM_NOTE("pw_x86_block.c:1139"); return PW_ERR_VM; }
+     unsigned backwards=!!(state->eflags&0x400);uint32_t destination=state->gpr[7],source=state->gpr[6];
+     uint32_t dst_low=destination;
+     if(backwards) {
+         uint64_t retreat=(uint64_t)(count-1)*width;
+-        if(retreat>destination)return PW_ERR_VM;
++        if(retreat>destination){ PW_VM_NOTE("pw_x86_block.c:1144"); return PW_ERR_VM; }
+         dst_low=destination-(uint32_t)retreat;
+-    } else if((uint64_t)destination+span>0x100000000ull)return PW_ERR_VM;
++    } else if((uint64_t)destination+span>0x100000000ull){ PW_VM_NOTE("pw_x86_block.c:1146"); return PW_ERR_VM; }
+     unsigned moving=opcode==0xa4 || opcode==0xa5;
+     unsigned comparing=opcode==0xa6 || opcode==0xa7;
+-    if(!memory_range_pointer(state,dst_low,comparing?0:1,span))return PW_ERR_VM;
++    if(!memory_range_pointer(state,dst_low,comparing?0:1,span)){ PW_VM_NOTE("pw_x86_block.c:1149"); return PW_ERR_VM; }
+     uint32_t src_low=source;
+     if(moving || comparing) {
+         if(backwards) {
+             uint64_t retreat=(uint64_t)(count-1)*width;
+-            if(retreat>source)return PW_ERR_VM;
++            if(retreat>source){ PW_VM_NOTE("pw_x86_block.c:1154"); return PW_ERR_VM; }
+             src_low=source-(uint32_t)retreat;
+-        } else if((uint64_t)source+span>0x100000000ull)return PW_ERR_VM;
+-        if(!memory_range_pointer(state,src_low,0,span))return PW_ERR_VM;
++        } else if((uint64_t)source+span>0x100000000ull){ PW_VM_NOTE("pw_x86_block.c:1156"); return PW_ERR_VM; }
++        if(!memory_range_pointer(state,src_low,0,span)){ PW_VM_NOTE("pw_x86_block.c:1157"); return PW_ERR_VM; }
+     }
+     for(uint32_t i=0;i<count;i++) {
+         uint32_t offset=i*width;
+@@ -1285,19 +1302,19 @@ static int muldiv_dispatch(PwX86State *state,unsigned action,uint32_t operand)
+         result_eax=(uint32_t)product;result_edx=(uint32_t)((uint64_t)product>>32);
+         overflow=product<(int64_t)INT32_MIN || product>(int64_t)INT32_MAX;
+     } else if(action==6) {
+-        if(!operand)return PW_ERR_VM;
++        if(!operand){ PW_VM_NOTE("pw_x86_block.c:1311"); return PW_ERR_VM; }
+         uint64_t dividend=((uint64_t)edx<<32)|eax;
+         uint64_t quotient=dividend/operand;
+-        if(quotient>UINT32_MAX)return PW_ERR_VM;
++        if(quotient>UINT32_MAX){ PW_VM_NOTE("pw_x86_block.c:1314"); return PW_ERR_VM; }
+         result_eax=(uint32_t)quotient;result_edx=(uint32_t)(dividend%operand);
+     } else {
+         int32_t divisor=(int32_t)operand;
+-        if(!divisor)return PW_ERR_VM;
++        if(!divisor){ PW_VM_NOTE("pw_x86_block.c:1318"); return PW_ERR_VM; }
+         uint64_t bits=((uint64_t)edx<<32)|eax;int64_t dividend;
+         memcpy(&dividend,&bits,sizeof(dividend));
+-        if(dividend==INT64_MIN && divisor==-1)return PW_ERR_VM;
++        if(dividend==INT64_MIN && divisor==-1){ PW_VM_NOTE("pw_x86_block.c:1321"); return PW_ERR_VM; }
+         int64_t quotient=dividend/divisor;
+-        if(quotient<INT32_MIN || quotient>INT32_MAX)return PW_ERR_VM;
++        if(quotient<INT32_MIN || quotient>INT32_MAX){ PW_VM_NOTE("pw_x86_block.c:1323"); return PW_ERR_VM; }
+         result_eax=(uint32_t)(int32_t)quotient;
+         result_edx=(uint32_t)(int32_t)(dividend%divisor);
+     }
 diff --git a/src/pw_x86_engine.c b/src/pw_x86_engine.c
-index 92c877a..3ca3bbc 100644
+index 92c877a..e396d6e 100644
 --- a/src/pw_x86_engine.c
 +++ b/src/pw_x86_engine.c
-@@ -953,7 +953,27 @@ dispatch:;
+@@ -5,6 +5,23 @@
+ #include <stdint.h>
+ #include <string.h>
+ 
++/* ⚠ DIAGNOSTIC. PW_ERR_VM is returned from twenty places in the translator --
++ * a refused host allocation, guest memory it cannot read, a span that leaves
++ * the 32-bit address space, a block that would not execute -- and they all
++ * arrive at the caller as the same number:
++ *     err:wow:BTCpuSimulate DBT error -9 at eip 0x7bf33290, fault address 0
++ * Name the one that fired. Bounded, and only on the console: this file also
++ * builds for the host, which has no klog. */
++#ifdef __PROSPERO__
++extern void pw_wow_log( const char *format, ... );
++#define PW_VM_NOTE(tag) do { \
++        static int pw_vm_left = 4; \
++        if (pw_vm_left > 0) { pw_vm_left--; pw_wow_log( "wowprospero: PW_ERR_VM at %s\n", tag ); } \
++    } while (0)
++#else
++#define PW_VM_NOTE(tag) ((void)0)
++#endif
++
+ /* A zero tag would match guest PC zero and jump through an empty pointer.
+  * PC one hashes to slot one, so it cannot match any lookup in empty slot
+  * zero in either bank. A published PC zero replaces this sentinel normally.
+@@ -276,9 +293,9 @@ static int emit_return_stub(PwX86Engine *engine)
+     options.native_fp = engine->native_fp;
+     if(!(bytes = pw_x86_reencode_return_stub(stub, sizeof(stub), &options))) return PW_ERR_UNSUPPORTED;
+     const size_t page = engine->backend->page_bytes, end = ((bytes + page - 1) / page) * page;
+-    if(protection(engine, 0, end, PW_PROT_READ|PW_PROT_WRITE) != PW_OK) return PW_ERR_VM;
++    if(protection(engine, 0, end, PW_PROT_READ|PW_PROT_WRITE) != PW_OK) { PW_VM_NOTE("pw_x86_engine.c:302"); return PW_ERR_VM; }
+     memcpy(engine->code.write_base, stub, bytes);
+-    if(protection(engine, 0, end, PW_PROT_READ|PW_PROT_EXEC) != PW_OK) return PW_ERR_VM;
++    if(protection(engine, 0, end, PW_PROT_READ|PW_PROT_EXEC) != PW_OK) { PW_VM_NOTE("pw_x86_engine.c:304"); return PW_ERR_VM; }
+     engine->return_stub_bytes = (bytes + 63) & ~(size_t)63;
+     engine->cache.cursor = engine->return_stub_bytes;
+     return PW_OK;
+@@ -621,7 +638,7 @@ static int compile_block(PwX86Engine *engine,uint32_t pc,const PwX86CacheEntry *
+     size_t end=((tail+page-1)/page)*page;
+     if(end>engine->code.bytes)end=engine->code.bytes;
+     if(protection(engine,first,end-first,PW_PROT_READ|PW_PROT_WRITE)!=PW_OK)
+-        return PW_ERR_VM;
++        { PW_VM_NOTE("pw_x86_engine.c:647"); return PW_ERR_VM; }
+     memcpy((uint8_t *)engine->code.write_base+engine->cache.cursor,scratch,best.code_bytes);
+     status=pw_x86_cache_publish(&engine->cache,pc,&best,engine->cache.cursor,entry);
+     if(status!=PW_OK) {
+@@ -630,7 +647,7 @@ static int compile_block(PwX86Engine *engine,uint32_t pc,const PwX86CacheEntry *
+         return status;
+     }
+     if(protection(engine,first,end-first,PW_PROT_READ|PW_PROT_EXEC)!=PW_OK) {
+-        engine->failed=1;return PW_ERR_VM;
++        engine->failed=1;{ PW_VM_NOTE("pw_x86_engine.c:656"); return PW_ERR_VM; }
+     }
+ 
+     /* Initialize link slot stubs */
+@@ -953,7 +970,21 @@ dispatch:;
      }
      engine->retired_instructions+=report->retired;
      if(invoked==PW_X86_REENCODE_HOST_STEP)return PW_ERR_UNSUPPORTED;
@@ -30,24 +170,40 @@ index 92c877a..3ca3bbc 100644
 +         * way out -- the same code the translator uses for a refused host
 +         * allocation and for guest memory it cannot read. Keep the value. */
 +#ifdef __PROSPERO__
-+        extern int sceKernelDebugOutText(int channel,const char *text);
-+        extern int snprintf(char *,size_t,const char *,...);
-+        static int left=8;
-+        if(left>0) {
-+            char line[160];
-+            left--;
-+            snprintf(line,sizeof(line),
-+                     "wowprospero: invoke returned %d at guest eip %08x\n",
-+                     invoked,(unsigned)state->eip);
-+            sceKernelDebugOutText(0,line);
++        {
++            static int left = 8;
++            if (left > 0) { left--; pw_wow_log( "wowprospero: invoke returned %d at guest eip %08x\n",
++                                                invoked, (unsigned)state->eip ); }
 +        }
 +#endif
-+        return PW_ERR_VM;
++        { PW_VM_NOTE("pw_x86_engine.c:997"); return PW_ERR_VM; }
 +    }
 +    return invoked==PW_ERR_X87_TRAP?PW_ERR_X87_TRAP:PW_OK;
  }
  
  int pw_x86_execution_clock_batch(PwX86ExecutionClock clock, void *opaque, uint64_t *mean_ns)
+@@ -963,10 +994,10 @@ int pw_x86_execution_clock_batch(PwX86ExecutionClock clock, void *opaque, uint64
+     uint64_t means[8];
+     for(unsigned i=0;i<8;i++) {
+         uint64_t begin=clock(opaque),last=begin;
+-        if(!begin)return PW_ERR_VM;
++        if(!begin){ PW_VM_NOTE("pw_x86_engine.c:1009"); return PW_ERR_VM; }
+         for(unsigned read=0;read<1024;read++) {
+             uint64_t now=clock(opaque);
+-            if(!now || now<last)return PW_ERR_VM;
++            if(!now || now<last){ PW_VM_NOTE("pw_x86_engine.c:1012"); return PW_ERR_VM; }
+             last=now;
+         }
+         uint64_t elapsed=last-begin;
+@@ -1007,7 +1038,7 @@ int pw_x86_engine_reset(PwX86Engine *engine,uint32_t generation)
+      * about to be poisoned need RW; unused reservations must stay uncommitted. */
+     if(writable_bytes && (engine->sealed || engine->failed) &&
+        protection(engine,0,writable_bytes,PW_PROT_READ|PW_PROT_WRITE)!=PW_OK)
+-        return PW_ERR_VM;
++        { PW_VM_NOTE("pw_x86_engine.c:1053"); return PW_ERR_VM; }
+ 
+     /* Count unlinks before cache entries are zeroed */
+     for(uint32_t i=0; i<engine->cache.capacity; i++) {
 diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
 index 549dbd4..a64d382 100644
 --- a/wine/wowprospero/cpu.c
@@ -68,10 +224,10 @@ index 549dbd4..a64d382 100644
               * first, which marks the process as exiting, so the call for
               * itself leaves through exit() and the host's exit handlers run
 diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
-index 01d21a5..13e8c84 100644
+index 01d21a5..560805c 100644
 --- a/wine/wowprospero/unix.c
 +++ b/wine/wowprospero/unix.c
-@@ -43,6 +43,20 @@
+@@ -43,6 +43,16 @@
  #include "call_top.h"
  #include "host_memory.h"
  
@@ -79,12 +235,8 @@ index 01d21a5..13e8c84 100644
 + * is ntdll's own, and a PRX carries its own libc. Diagnostics go to klog
 + * instead. Off the console there is no klog and stderr is fine. */
 +#ifdef __PROSPERO__
-+extern int sceKernelDebugOutText( int channel, const char *text );
-+#define PW_WOW_NOTE( ... ) do { \
-+        char pw_wow_line[160]; \
-+        snprintf( pw_wow_line, sizeof(pw_wow_line), __VA_ARGS__ ); \
-+        sceKernelDebugOutText( 0, pw_wow_line ); \
-+    } while (0)
++extern void pw_wow_log( const char *format, ... );
++#define PW_WOW_NOTE( ... ) pw_wow_log( __VA_ARGS__ )
 +#else
 +#define PW_WOW_NOTE( ... ) fprintf( stderr, __VA_ARGS__ )
 +#endif
@@ -92,7 +244,7 @@ index 01d21a5..13e8c84 100644
  /* The guest range every translated access is checked against (load_state). */
  enum { GUEST_LOW = 0x10000u, GUEST_HIGH = 0xfffff000u };
  /* The guest GPRs held in host registers across linked blocks: seven fit, and
-@@ -357,11 +371,22 @@ static void *place_above_guest( size_t bytes, ULONG type, ULONG protect )
+@@ -357,11 +367,22 @@ static void *place_above_guest( size_t bytes, ULONG type, ULONG protect )
      MEM_EXTENDED_PARAMETER parameter = { 0 };
      SIZE_T size = bytes;
      void *base = NULL;
@@ -116,7 +268,7 @@ index 01d21a5..13e8c84 100644
      return base;
  }
  
-@@ -385,9 +410,18 @@ static void *reserve_code( size_t bytes )
+@@ -385,9 +406,18 @@ static void *reserve_code( size_t bytes )
  static int commit_code( void *base, size_t bytes )
  {
      SIZE_T size = bytes;

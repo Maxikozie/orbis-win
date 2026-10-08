@@ -62,8 +62,11 @@ say "compile: the PRX loader"
 $CC $CFL -I"$PW/wine/ps5" -c "$PW/wine/ps5/pw_wine_prx.c" -o "$OBJ/pw_wine_prx.o"
 
 say "compile: this port's platform layer"
+# pw_wow_log_ps4.c: the title links prospero-win's DBT sources too, and they
+# carry the translator's diagnostics, so it needs the same logger the PRX has.
 for f in "$ROOT"/src/native/pw_videoout_ps4.c "$ROOT"/src/native/pw_pad_ps4.c \
-         "$ROOT"/src/native/pw_audio_ps4.c "$ROOT"/src/native/pw_platform_bind_ps4.c; do
+         "$ROOT"/src/native/pw_audio_ps4.c "$ROOT"/src/native/pw_platform_bind_ps4.c \
+         "$ROOT"/src/native/pw_wow_log_ps4.c; do
   $CC $CFL -c "$f" -o "$OBJ/ps4_$(basename "$f" .c).o"
 done
 
