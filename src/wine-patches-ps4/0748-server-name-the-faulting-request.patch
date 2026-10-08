@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Date: Thu, 8 Oct 2026 11:40:00 +0000
+Subject: [PATCH] server: name the request a faulting handler was given.
+
+GTA IV gets its executable mapped and Windows' own DLLs loading, and then the
+server dies serving it:
+
+    inprocess_server_thread -> main_loop -> thread_poll_event
+      -> call_req_handler -> SIGSEGV, fault address 0x7c
+
+The backtrace stops at call_req_handler, which dispatches through
+req_handlers[req], so the request number is the only thing that says which
+handler faulted.
+
+WINEDEBUG=+server cannot answer it. trace_request writes to stderr, and the
+server is a PRX of its own whose stderr reaches nothing -- the same silence
+that hid wowprospero's diagnostics until they were written to a file. klog does
+carry from here, as every other wineserver: line today shows.
+
+At the top of the function, clear of where 0810 adds its mutex call. Bounded at
+3000: a startup makes thousands of requests and the last one is the point.
+
+Diagnostic only; no behaviour change.
+---
+diff --git a/server/request.c b/server/request.c
+index 693836a120..1b71aae2d5 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -321,6 +321,27 @@ static void call_req_handler( struct thread *thread )
+     union generic_reply reply;
+     enum request req = thread->req.request_header.req;
+ 
++#ifdef __PROSPERO__
++    /* ⚠ DIAGNOSTIC. A handler that faults takes the server thread with it, and
++     * the backtrace names only call_req_handler -- the request it was given is
++     * the one thing that identifies the handler. WINEDEBUG=+server cannot
++     * answer it: trace_request writes to stderr, and this is a PRX of its own
++     * whose stderr reaches nothing, the same silence that hid wowprospero's
++     * diagnostics. klog does carry from here. Bounded: a game's startup makes
++     * thousands of these and the last one is the point. */
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        static int left = 3000;
++        if (left > 0)
++        {
++            char line[64];
++            left--;
++            snprintf( line, sizeof(line), "wineserver: req %u\n", (unsigned int)req );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
++#endif
++
+     current = thread;
+     current->ps5_last_req = req;
+     current->ps5_last_req_time = monotonic_time;
