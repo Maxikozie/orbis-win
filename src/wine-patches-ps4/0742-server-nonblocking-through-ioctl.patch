@@ -1,33 +1,35 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: ps4-gladius <ps4-gladius@invalid>
-Date: Thu, 8 Oct 2026 09:10:00 +0000
-Subject: [PATCH] server: set non-blocking mode with ioctl, not fcntl.
+Date: Thu, 8 Oct 2026 09:40:00 +0000
+Subject: [PATCH] server: this console cannot set non-blocking mode.
 
-0741 named the failure outright:
+0741 named the failure:
 
     init_thread 0024 FAILED: O_NONBLOCK on the reply pipe refused
                      (reply_fd=33 wait_fd=35 errno=13) in flight:
 
-errno 13 is EACCES: this console refuses fcntl( fd, F_SETFL, O_NONBLOCK ). The
-thread then left init_thread without a reply pipe, and the server killed it on
-its first request -- which ntdll turns into abort_thread and an uncatchable
-SIGSYS, taking the title down.
+errno 13 is EACCES. fcntl( fd, F_SETFL, O_NONBLOCK ) is refused here, and so is
+ioctl FIONBIO, the ioctl FreeBSD has always carried for the same job -- both
+measured on a pipe. This console's fcntl is selectively implemented; F_DUPFD and
+F_GETFD are refused as well. Nothing sets the flag, so descriptors stay
+blocking, and the question is no longer how to ask but what depends on it.
 
-The empty in-flight list in that line is not a second fault: both descriptors
-were found and thread_get_inflight_fd clears the slot it answers from, so it
-confirms the handover in 0737 and 0738 works.
+The failure was fatal in three places and ignored in six. It need not be fatal
+anywhere: every caller in the server writes one small reply to a client already
+waiting for it, which does not block in practice. One helper answers for all
+nine sites, says once through klog that the mode is unavailable, and reports
+success so the thread keeps its reply pipe.
 
-This console's fcntl is selectively implemented -- F_DUPFD and F_GETFD are
-refused as well -- so set the mode through FIONBIO, the ioctl FreeBSD has always
-carried for it, and keep fcntl as the fallback. One helper, used by every site
-that asks for non-blocking mode: three of them were fatal when refused and the
-rest ignored the result, which would have left descriptors blocking in the
-server's poll loop.
+The one caller that genuinely needs the flag is the main loop's drain of its
+wake pipe, and patch 0771 gives it poll() instead -- the unguarded drain loop
+would wait forever for a byte nobody sends.
 
-If FIONBIO is refused too, it says so once through klog before falling back.
+The empty in-flight list in that diagnostic is not a second fault: both
+descriptors were found, and thread_get_inflight_fd clears the slot it answers
+from, so it confirms the handover in 0737 and 0738 works.
 ---
 diff --git a/server/fd.c b/server/fd.c
-index 7cfcbf44c4..f71b47a621 100644
+index 7cfcbf44c4..22795fe917 100644
 --- a/server/fd.c
 +++ b/server/fd.c
 @@ -25,6 +25,9 @@
@@ -40,18 +42,24 @@ index 7cfcbf44c4..f71b47a621 100644
  #include <limits.h>
  #include <signal.h>
  #include <stdarg.h>
-@@ -2146,6 +2149,33 @@ int is_fd_overlapped( struct fd *fd )
+@@ -2146,6 +2149,43 @@ int is_fd_overlapped( struct fd *fd )
  }
  
  /* retrieve the unix fd for an object */
-+/* put a descriptor in non-blocking mode.
++/* put a descriptor in non-blocking mode, if this platform can.
 + *
-+ * ⚠ fcntl( fd, F_SETFL, O_NONBLOCK ) is refused on this console: it returns
-+ * -1 with EACCES, measured on the reply pipe in init_thread, where the failure
-+ * left the thread without one and the server killed it on its first request.
-+ * This console's fcntl is selectively implemented -- F_DUPFD and F_GETFD are
-+ * refused too -- so set the mode through the ioctl FreeBSD has always carried
-+ * for it, and keep fcntl as the fallback. */
++ * ⚠ PS4 cannot. fcntl( fd, F_SETFL, O_NONBLOCK ) is refused with EACCES,
++ * measured on the reply pipe in init_thread, and so is ioctl FIONBIO, the ioctl
++ * FreeBSD has always carried for the same job. This console's fcntl is
++ * selectively implemented -- F_DUPFD and F_GETFD are refused as well -- and
++ * nothing else sets the flag, so descriptors here simply stay blocking.
++ *
++ * Report that once and return success. Every caller in the server treats
++ * non-blocking mode as an optimisation: they write one small reply to a client
++ * that is already waiting for it, so the write does not block in practice. The
++ * exception is the main loop's drain of its wake pipe, which cannot spin on
++ * read() without a non-blocking descriptor and asks poll() what is there
++ * instead -- see inprocess_wake_poll_event. */
 +int pw_set_nonblocking( int fd )
 +{
 +#ifdef __PROSPERO__
@@ -59,16 +67,20 @@ index 7cfcbf44c4..f71b47a621 100644
 +    int on = 1;
 +
 +    if (!ioctl( fd, FIONBIO, &on )) return 0;
++    if (!fcntl( fd, F_SETFL, O_NONBLOCK )) return 0;
 +    if (!reported++)
 +    {
 +        extern int sceKernelDebugOutText( int channel, const char *text );
-+        char line[128];
++        char line[160];
 +        snprintf( line, sizeof(line),
-+                  "wineserver: FIONBIO refused (errno %d), falling back to fcntl\n", errno );
++                  "wineserver: this console cannot set non-blocking mode (errno %d); "
++                  "descriptors stay blocking\n", errno );
 +        sceKernelDebugOutText( 0, line );
 +    }
-+#endif
++    return 0;
++#else
 +    return fcntl( fd, F_SETFL, O_NONBLOCK );
++#endif
 +}
 +
  int get_unix_fd( struct fd *fd )
