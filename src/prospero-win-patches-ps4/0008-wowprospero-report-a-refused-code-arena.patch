@@ -15,22 +15,51 @@ refusal with NULL or -1.
 The arena is the one allocation on this console that has to end up executable,
 and a plain executable mapping is refused here: orbis_jit.c gets it by mapping
 direct memory read-write and protecting it afterwards. Which of the two calls
+diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
+index 549dbd4..a64d382 100644
+--- a/wine/wowprospero/cpu.c
++++ b/wine/wowprospero/cpu.c
+@@ -527,7 +527,13 @@ void WINAPI BTCpuSimulate(void)
+             raise_guest_exception( ctx, EXCEPTION_FLT_INVALID_OPERATION, 0, 0 );
+             break;
+         default:
+-            ERR( "DBT error %d at eip %#lx\n", params.status, ctx->Eip );
++            /* ⚠ The address matters as much as the status: PW_ERR_VM is how
++             * the translator reports both a refused host allocation and guest
++             * memory it cannot read, and only the fault address tells them
++             * apart. */
++            ERR( "DBT error %d at eip %#lx, fault address %#lx%s\n", params.status,
++                 ctx->Eip, (unsigned long)params.fault_address,
++                 params.fault_write ? " (write)" : "" );
+             /* End the process the way ExitProcess does: the other threads
+              * first, which marks the process as exiting, so the call for
+              * itself leaves through exit() and the host's exit handlers run
 diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
-index 01d21a5..9a1bae2 100644
+index 01d21a5..13e8c84 100644
 --- a/wine/wowprospero/unix.c
 +++ b/wine/wowprospero/unix.c
-@@ -43,6 +43,10 @@
+@@ -43,6 +43,20 @@
  #include "call_top.h"
  #include "host_memory.h"
  
-+/* ⚠ This module's stderr goes nowhere: the sink ntdll installs is its own,
-+ * and a PRX carries its own libc. Everything diagnostic here goes to klog. */
++/* ⚠ On the console this module's stderr goes nowhere: the sink ntdll installs
++ * is ntdll's own, and a PRX carries its own libc. Diagnostics go to klog
++ * instead. Off the console there is no klog and stderr is fine. */
++#ifdef __PROSPERO__
 +extern int sceKernelDebugOutText( int channel, const char *text );
++#define PW_WOW_NOTE( ... ) do { \
++        char pw_wow_line[160]; \
++        snprintf( pw_wow_line, sizeof(pw_wow_line), __VA_ARGS__ ); \
++        sceKernelDebugOutText( 0, pw_wow_line ); \
++    } while (0)
++#else
++#define PW_WOW_NOTE( ... ) fprintf( stderr, __VA_ARGS__ )
++#endif
 +
  /* The guest range every translated access is checked against (load_state). */
  enum { GUEST_LOW = 0x10000u, GUEST_HIGH = 0xfffff000u };
  /* The guest GPRs held in host registers across linked blocks: seven fit, and
-@@ -357,11 +361,27 @@ static void *place_above_guest( size_t bytes, ULONG type, ULONG protect )
+@@ -357,11 +371,22 @@ static void *place_above_guest( size_t bytes, ULONG type, ULONG protect )
      MEM_EXTENDED_PARAMETER parameter = { 0 };
      SIZE_T size = bytes;
      void *base = NULL;
@@ -47,19 +76,14 @@ index 01d21a5..9a1bae2 100644
 +         * reached the caller as a bare PW_ERR_VM -- "the memory backend refused
 +         * a request" -- with no status, no size and no protection:
 +         *     err:wow:BTCpuSimulate DBT error -9 at eip 0x7bf33290 */
-+        {
-+            char line[160];
-+            snprintf( line, sizeof(line),
-+                      "wowprospero: %zu bytes type %x protect %x refused: %08x\n",
-+                      bytes, (unsigned int)type, (unsigned int)protect, (unsigned int)status );
-+            sceKernelDebugOutText( 0, line );
-+        }
++        PW_WOW_NOTE( "wowprospero: %zu bytes type %x protect %x refused: %08x\n",
++                     bytes, (unsigned int)type, (unsigned int)protect, (unsigned int)status );
          return NULL;
 +    }
      return base;
  }
  
-@@ -385,9 +405,23 @@ static void *reserve_code( size_t bytes )
+@@ -385,9 +410,18 @@ static void *reserve_code( size_t bytes )
  static int commit_code( void *base, size_t bytes )
  {
      SIZE_T size = bytes;
@@ -74,13 +98,8 @@ index 01d21a5..9a1bae2 100644
 +    /* ⚠ DIAGNOSTIC -- see place_above_guest. Executable memory is the whole
 +     * question here: this console refuses a plain executable mapping and wants
 +     * direct memory mapped read-write and then protected (orbis_jit.c). */
-+    {
-+        char line[160];
-+        snprintf( line, sizeof(line),
-+                  "wowprospero: commit %p %zu bytes executable refused: %08x\n",
-+                  at, bytes, (unsigned int)status );
-+        sceKernelDebugOutText( 0, line );
-+    }
++    PW_WOW_NOTE( "wowprospero: commit %p %zu bytes executable refused: %08x\n",
++                 at, bytes, (unsigned int)status );
 +    return -1;
  }
  
