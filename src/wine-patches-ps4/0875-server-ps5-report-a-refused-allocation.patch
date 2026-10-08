@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] server: Report a refused allocation on ps5.
+
+GTA IV's 30th builtin onwards is refused with STATUS_NO_MEMORY out of
+open_unix_file, while ntdll's own heap reports 181 KiB live, 1184 KiB
+mapped and not one failure. The status is not the client's: open_unix_file
+allocates the object attributes and then calls the server, and the server
+sets this error here.
+
+The server is the one part of this port still on the console's own
+allocator. ntdll carries pw_wine_heap because the title's libc malloc
+stops near 13 MiB and refuses sizeable blocks outright -- calloc of
+145 KiB answers EINVAL -- but scripts/prx-ps4.sh links that heap into
+ntdll alone, and wineserver.shared.elf imports malloc, calloc, realloc
+and free from the shared libc.
+
+Report the refused size, errno, and how many calls and bytes the server
+had asked for by then. That decides the fix rather than guessing it: a
+single large block being refused is a different problem from a heap that
+is simply full, and only one of them is answered by giving the server the
+same heap ntdll has.
+
+Diagnostic only; no behaviour changes.
+diff --git a/server/object.c b/server/object.c
+index 0c5b58972a..ede1b14a4e 100644
+--- a/server/object.c
++++ b/server/object.c
+@@ -23,6 +23,7 @@
+ #include <assert.h>
+ #include <limits.h>
+ #include <stdlib.h>
++#include <errno.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <unistd.h>
+@@ -189,21 +190,76 @@ void mark_block_uninitialized( void *ptr, size_t size )
+ #endif
+ }
+ 
++#ifdef __PROSPERO__
++/* ⚠ DIAGNOSTIC. The server is the one part of this port still on the console's
++ * own allocator. ntdll carries pw_wine_heap because the title's libc malloc
++ * stops near 13 MiB and refuses sizeable blocks outright -- calloc of 145 KiB
++ * answers EINVAL -- but scripts/prx-ps4.sh links that heap into ntdll alone,
++ * and wineserver imports malloc, calloc, realloc and free from the shared libc.
++ *
++ * It shows as a client-side puzzle: GTA IV's 30th builtin onwards is refused
++ * with STATUS_NO_MEMORY out of open_unix_file, while ntdll's own heap reports
++ * 181 KiB live and not one failure. The status is the server's, set here.
++ *
++ * Which allocation, and how much the server had asked for by then, decides the
++ * fix: a single large block being refused is a different problem from a heap
++ * that is simply full. */
++static unsigned long long pw_alloc_calls, pw_alloc_bytes;
++
++static void pw_report_alloc_failure( const char *what, size_t size )
++{
++    extern int sceKernelDebugOutText( int channel, const char *text );
++    static int reported;
++    char line[200];
++
++    if (reported >= 12) return;
++    reported++;
++    snprintf( line, sizeof(line),
++              "wineserver: %s refused %llu bytes (errno %d) after %llu calls, %llu KiB asked\n",
++              what, (unsigned long long)size, errno, pw_alloc_calls, pw_alloc_bytes / 1024 );
++    sceKernelDebugOutText( 0, line );
++}
++#endif
++
+ /* malloc replacement */
+ void *mem_alloc( size_t size )
+ {
+-    void *ptr = malloc( size );
++    void *ptr;
++#ifdef __PROSPERO__
++    errno = 0;
++    pw_alloc_calls++;
++    pw_alloc_bytes += size;
++#endif
++    ptr = malloc( size );
+     if (ptr) mark_block_uninitialized( ptr, size );
+-    else set_error( STATUS_NO_MEMORY );
++    else
++    {
++#ifdef __PROSPERO__
++        pw_report_alloc_failure( "mem_alloc", size );
++#endif
++        set_error( STATUS_NO_MEMORY );
++    }
+     return ptr;
+ }
+ 
+ /* duplicate a block of memory */
+ void *memdup( const void *data, size_t len )
+ {
+-    void *ptr = malloc( len );
++    void *ptr;
++#ifdef __PROSPERO__
++    errno = 0;
++    pw_alloc_calls++;
++    pw_alloc_bytes += len;
++#endif
++    ptr = malloc( len );
+     if (ptr) memcpy( ptr, data, len );
+-    else set_error( STATUS_NO_MEMORY );
++    else
++    {
++#ifdef __PROSPERO__
++        pw_report_alloc_failure( "memdup", len );
++#endif
++        set_error( STATUS_NO_MEMORY );
++    }
+     return ptr;
+ }
+ 
