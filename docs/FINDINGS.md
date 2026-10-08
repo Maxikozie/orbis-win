@@ -2955,3 +2955,39 @@ exactly like this -- selects, CPU, no Wine output.
 
 Both hives restored to their backups to isolate it; the attempt is kept as
 `*.fontpaths-attempt`. ⚠ Not a fix, and fonts remain absent.
+
+### ⚠ Never push the host's system.reg to the console (2026-10-08)
+
+Nine runs were spent on a hang that one of my own pushes caused.
+`tools/pw_prefix.py` rewrites the WoW64 CPU backend **as it pushes**:
+
+    PC_CPU, CONSOLE_CPU = b'@="wow64cpu.dll"', b'@="wowprospero.dll"'
+
+so the host's `system.reg` keeps the PC form and only the console's copy names
+the DBT. Pushing the host copy -- for any reason, including restoring a backup
+taken from it -- silently reverts `[Software\Microsoft\Wow64\x86]` to
+`wow64cpu.dll`, which cannot work here. The process then hangs where the 32-bit
+backend is entered, immediately after `wow64win`'s PROCESS_ATTACH.
+
+The tell was in the loaded-module list the whole time:
+
+    working:  wow64.dll  wowprospero.dll  win32u.dll  wow64win.dll
+    hanging:  wow64.dll  wow64cpu.dll     win32u.dll  wow64win.dll
+
+**Why it took nine runs.** The hang arrived with two changes at once -- the font
+repoint and `libfreetype.prx` entering the package -- and I checked neither
+against the last working log properly. Reverting the registry could not help,
+because the backup was taken from the host and carried the same `wow64cpu.dll`.
+Everything after that was chasing a self-inflicted fault: the console was
+rebooted, `.wineserver` was moved aside, `libfreetype.prx` was removed, and a
+real `st_dev` bug was fixed (patch 0877, correct on its own terms and worth
+keeping) -- none of which could have mattered.
+
+**The rule.** The host prefix and the console prefix are not the same artifact.
+Anything pushed into `/data/prospero-win/prefixes/` has to carry the console
+form of every value `pw_prefix.py` rewrites, or go through that tool. For a
+single value the substitution is one line; what is never safe is copying a hive
+across wholesale.
+
+The last working log would have said so in one grep. `loaddll` names the CPU
+backend on every run.
