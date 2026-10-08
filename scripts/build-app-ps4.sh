@@ -140,6 +140,41 @@ if (( PKG )); then
     done
     printf '   nls: %s files\n' "$(ls "$NLS"/*.nls 2>/dev/null | wc -l)"
   fi
+  # Wine's PE side: the shared runtime, beside the Unix modules.
+  #
+  # The Unix side loads some of these by path, before any Windows search path
+  # exists. load_ntdll and load_apiset_dll read dll_dir, which ntdll derives by
+  # stripping /x86_64-unix off its own directory, so without them Wine stops at
+  #
+  #   wine: failed to load .../x86_64-unix/ntdll.dll error c0000135
+  #
+  # Ship the whole set for both architectures, as upstream does, rather than
+  # the handful this game happens to reach: Wine needs both these copies and
+  # the ones in the prefix's system32, syswow64 and winsxs, and without either
+  # kernel32.dll or start.exe fails to load (prospero-win
+  # docs/WINE_PS5_BUILD.md). A per-game subset would break the next game.
+  #
+  # They come debug-stripped from the host build's install tree, which is what
+  # keeps this near upstream's 515 MiB rather than the 1.3 GB it builds as.
+  PELIB=$PW/.deps/wine-host/install/usr/lib/wine
+  for arch in i386-windows x86_64-windows; do
+    if [ ! -d "$PELIB/$arch" ]; then
+      echo "   ✗ no PE runtime at $PELIB/$arch" >&2
+      echo "     run: make -C .deps/wine-host/build install DESTDIR=.deps/wine-host/install" >&2
+      exit 1
+    fi
+    # Everything but the import libraries. Wine's install leaves lib*.a here
+    # for building against -- 509 archives, 1.3 GB, four times the modules
+    # themselves -- and nothing on the console links against them.
+    n=0
+    for f in "$PELIB/$arch"/*; do
+      [ -f "$f" ] || continue
+      case $f in *.a) continue ;; esac
+      EXTRA+=(--extra "$f:win/wine/lib/wine/$arch/$(basename "$f")")
+      n=$((n+1))
+    done
+    printf '   pe %s: %s modules\n' "$arch" "$n"
+  done
   printf '   modules: %s\n' "$(ls "$PRX"/sce_module/ | tr '\n' ' ')"
   "$BUNDLE/orbis-compat/scripts/ps4/make-pkg.sh" --eboot "$OBJ/../eboot.bin" --out-dir "$OUT" \
       --title-id "$TITLE_ID" --title "$TITLE" "${EXTRA[@]}"
