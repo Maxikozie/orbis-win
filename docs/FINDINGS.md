@@ -2313,3 +2313,54 @@ Wine's server duplicates descriptors as a matter of course. The options are
 
 Option 1 is the honest fix and is a design change, not a patch. This is the
 right place to stop and think rather than keep adding fallbacks.
+
+## Where tomorrow starts (end of 2026-10-07)
+
+Built and packaged, **not yet run** -- the console went off before this could
+be tested. `pkgout/wine-app/` is current with its inputs; `scripts/deploy.sh`
+will refuse it if that ever stops being true.
+
+### The pending change
+
+`0735-server-share-the-fd-for-a-mapping.patch`. The chain that led to it:
+
+    release_object(NULL) in init_directories      (directory.c:479)
+      <- create_fd_mapping, the NLS file mapping
+        <- dup_fd_object failed                    (fd.c)
+          <- dup/dup2/fcntl(F_DUPFD)/sceKernelRdup all refused
+          <- and the fd has NO unix_name, so reopening was impossible
+
+`get_fd_object_for_mapping` already shares an fd when one matches on access and
+sharing; it only falls through to `dup_fd_object` when none matches exactly.
+A mapping never seeks, so the offset a duplicate would own is never used.
+The patch takes the original fd in that case.
+
+**First thing tomorrow: install and launch.** If the NLS mapping succeeds,
+`init_directories` finishes and the server reaches the point of accepting
+ntdll's connection.
+
+### What to expect after that
+
+`dup_fd_object` has two other callers that will fail the same way, and neither
+is fixed:
+
+- `file.c:162` create_file_obj -- a real file open. It HAS a unix_name, so the
+  reopen path in 0734 should cover it. Unproven.
+- `sock.c:2149` accepting a deferred connection -- a socket has no name and
+  cannot be duplicated. Nothing covers this yet; sharing is wrong there because
+  the accepted socket must be independently closable.
+
+### Diagnostics now in place (all permanent)
+
+| what | gives |
+|---|---|
+| `module=`/`module_offset=` on faults | which module an address is in |
+| module segment bases logged at load | mapping klog backtraces |
+| `fatal_error` -> klog (0113) | wineserver's own error messages |
+| `file_set_error` errno + caller (0733) | the failing syscall behind an NTSTATUS |
+| `release_object(NULL)` + status (0732) | which create_* failed and why |
+| **anchor addresses** in both reports | the module base, even on a clean exit |
+
+The anchor is the one to remember: module bases move between runs, and a clean
+exit leaves no crash dump to derive them from. `base = anchor - <symbol offset
+in the unstripped .shared.elf>`; both anchors agreed on 0x800b3c000 tonight.

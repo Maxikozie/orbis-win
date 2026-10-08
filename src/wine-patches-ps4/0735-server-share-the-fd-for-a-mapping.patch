@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Date: Tue, 7 Oct 2026 20:50:00 +0000
+Subject: [PATCH] server: share the descriptor for a mapping when dup is refused.
+
+No descriptor can be duplicated on this console -- dup, dup2, fcntl(F_DUPFD)
+and sceKernelRdup all fail, for regular files, directories, shm objects,
+sockets and pipes alike (src/dup-probe) -- and the fd that fails here, the NLS
+file opened by the server itself, has no unix_name to reopen instead.
+
+Sharing is already how this path prefers to work: get_fd_object_for_mapping
+returns grab_object() whenever an fd with matching access and sharing exists,
+and only falls through to dup_fd_object when none matches exactly. A mapping
+never seeks -- it mmaps and nothing else -- so the file offset a duplicate
+would have owned is never used.
+
+Take the original when duplication is refused.
+---
+diff --git a/server/mapping.c b/server/mapping.c
+index 856980d591..6b89af3c1f 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -1146,6 +1146,20 @@ static bool mapping_init( struct object *obj, const void *init_data )
+         if (!(mapping->fd = get_fd_object_for_mapping( data->fd, mapping_access, sharing )))
+         {
+             mapping->fd = dup_fd_object( data->fd, mapping_access, sharing, FILE_SYNCHRONOUS_IO_NONALERT );
++#ifdef __PROSPERO__
++            /* ⚠ No descriptor can be duplicated on this console (src/dup-probe:
++             * dup, dup2, fcntl(F_DUPFD) and sceKernelRdup all refused, for every
++             * kind of descriptor), and the fd that fails here -- the NLS file,
++             * opened by the server itself -- has no unix_name to reopen.
++             *
++             * Sharing is already how this path prefers to work:
++             * get_fd_object_for_mapping returns grab_object() whenever it finds
++             * an fd with matching access and sharing, and only falls here when
++             * none matches exactly. A mapping never seeks -- it mmaps and
++             * nothing else -- so the file offset a duplicate would have owned is
++             * never used. Take the original rather than fail. */
++            if (!mapping->fd) mapping->fd = (struct fd *)grab_object( data->fd );
++#endif
+             if (mapping->fd) set_fd_user( mapping->fd, &mapping_fd_ops, NULL );
+         }
+         if (!mapping->fd) return false;
