@@ -9,7 +9,10 @@
 #
 # ⚠ Run scripts/prx-ps4.sh first: the title links against prx/stubs/ntdll.so and
 # the package carries the eight modules in sce_module/.
-set -euo pipefail
+set -eu
+# Resolve libc from the shared module so the title and every PRX share one
+# environ and one TLS regime (docs/FINDINGS.md). Unset to go back to static.
+: "${PW_SHARED_LIBC:=1}"; export PW_SHARED_LIBCo pipefail
 ROOT=/home/zpeirce/ps4-gladius
 PW=$ROOT/prospero-win
 BUNDLE=$ROOT/sdk/orbis-sdk-v1

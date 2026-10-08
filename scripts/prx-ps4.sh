@@ -13,6 +13,9 @@
 # .so directly produces a module that exports libc and nothing prospero-win
 # looks up.
 set -eu
+# Resolve libc from the shared module so the title and every PRX share one
+# environ and one TLS regime (docs/FINDINGS.md). Unset to go back to static.
+: "${PW_SHARED_LIBC:=1}"; export PW_SHARED_LIBC
 root=${PW_ROOT:-/home/zpeirce/ps4-gladius/prospero-win}
 gladius=/home/zpeirce/ps4-gladius
 sdk=$gladius/build/ps4-wine-sdk

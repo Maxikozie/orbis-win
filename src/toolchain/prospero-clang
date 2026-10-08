@@ -101,6 +101,13 @@ if [ -n "${PW_PRX_LINK:-}" ]; then SHIMLIB=""; SHIMWRAPS=""; else SHIMLIB="$PWSH
 # genuine Wine cross-references. Putting -lc earlier instead duplicates archive
 # members against orbis-compat (abort, __assert_fail, mbrtowc, ...).
 PRXSTUBS="${PW_PRX_STUBS:-}"
+# PW_SHARED_LIBC=1 resolves libc from libSceLibcInternal (the stub for a Sony
+# libc module) instead of the static archive, so the title and every PRX share
+# one libc -- and therefore one environ and one TLS regime. That is almost
+# certainly how PS5 avoids the whole class, but on PS4 the stub has no SONAME
+# and the console had no such module loaded when this was last tried: the title
+# died with PRX_NOT_RESOLVED_FUNCTION. Off by default; set to retest.
+if [ -n "${PW_SHARED_LIBC:-}" ]; then SHAREDLIBC="-lSceLibcInternal"; SHAREDTAIL="-lc"; else SHAREDLIBC=""; SHAREDTAIL=""; fi
 for a in "$@"; do
   case "$a" in
     -shared)
@@ -119,8 +126,8 @@ for a in "$@"; do
       # link did not. Measured on hardware 2026-10-07 (GLDS10006).
       exec clang $CFLAGS -nostdlib -shared -Wl,-z,max-page-size=0x4000 -Wl,-z,separate-loadable-segments -Wl,-m,elf_x86_64 \
         -Wl,--eh-frame-hdr -Wl,--no-rosegment -T "$EHLD" -T "$MPLD" -T "$IALD" $SHIMWRAPS -L"$SDKLIB" "$@" \
-        -Wl,--whole-archive "$OCLIB" $SHIMLIB -Wl,--no-whole-archive -lc -lkernel -lc++ -lSceNet $PRXSTUBS "$MPOBJ"
+        -Wl,--whole-archive "$OCLIB" $SHIMLIB -Wl,--no-whole-archive $SHAREDLIBC -lc -lkernel -lc++ -lSceNet $SHAREDTAIL $PRXSTUBS "$MPOBJ"
       ;;
   esac
 done
-exec clang $CFLAGS $LDFLAGS "$@" $LDLIBS
+exec clang $CFLAGS $LDFLAGS "$@" $SHAREDLIBC $LDLIBS $SHAREDTAIL
