@@ -15,6 +15,39 @@ refusal with NULL or -1.
 The arena is the one allocation on this console that has to end up executable,
 and a plain executable mapping is refused here: orbis_jit.c gets it by mapping
 direct memory read-write and protecting it afterwards. Which of the two calls
+diff --git a/src/pw_x86_engine.c b/src/pw_x86_engine.c
+index 92c877a..3ca3bbc 100644
+--- a/src/pw_x86_engine.c
++++ b/src/pw_x86_engine.c
+@@ -953,7 +953,27 @@ dispatch:;
+     }
+     engine->retired_instructions+=report->retired;
+     if(invoked==PW_X86_REENCODE_HOST_STEP)return PW_ERR_UNSUPPORTED;
+-    return invoked==PW_ERR_X87_TRAP?PW_ERR_X87_TRAP:invoked?PW_ERR_VM:PW_OK;
++    if(invoked && invoked!=PW_ERR_X87_TRAP) {
++        /* ⚠ DIAGNOSTIC. Running a translated block answers with its own
++         * status, and every value but these two collapses into PW_ERR_VM on the
++         * way out -- the same code the translator uses for a refused host
++         * allocation and for guest memory it cannot read. Keep the value. */
++#ifdef __PROSPERO__
++        extern int sceKernelDebugOutText(int channel,const char *text);
++        extern int snprintf(char *,size_t,const char *,...);
++        static int left=8;
++        if(left>0) {
++            char line[160];
++            left--;
++            snprintf(line,sizeof(line),
++                     "wowprospero: invoke returned %d at guest eip %08x\n",
++                     invoked,(unsigned)state->eip);
++            sceKernelDebugOutText(0,line);
++        }
++#endif
++        return PW_ERR_VM;
++    }
++    return invoked==PW_ERR_X87_TRAP?PW_ERR_X87_TRAP:PW_OK;
+ }
+ 
+ int pw_x86_execution_clock_batch(PwX86ExecutionClock clock, void *opaque, uint64_t *mean_ns)
 diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
 index 549dbd4..a64d382 100644
 --- a/wine/wowprospero/cpu.c
