@@ -2269,3 +2269,47 @@ descriptors routinely, so the options are:
 2. If it is universal, patch the server to share the descriptor instead of
    duplicating it where ownership allows -- a real design change, not a
    one-liner.
+
+## MEASURED: descriptors cannot be duplicated on this console at all
+
+`src/dup-probe` (GLDS10008), four mechanisms against five descriptor kinds:
+
+| descriptor | dup | fcntl(F_DUPFD) | dup2 | sceKernelRdup |
+|---|---|---|---|---|
+| regular file | fail | fail | fail | EPERM |
+| directory | fail | fail | fail | EPERM |
+| shm SHM_ANON | fail | fail | fail | EPERM |
+| unix socket | fail | fail | fail | EPERM |
+| pipe | fail | fail | fail | EPERM |
+
+Identical for every kind, so this is **not** specific to anonymous mappings.
+orbis-compat's "the descriptor table is not ours to rearrange" is literal and
+complete: not dup, not dup2, not F_DUPFD, and not `sceKernelRdup` -- the
+libkernel primitive that exists for exactly this.
+
+Also measured: **`fcntl(F_GETFD)` on fd 0 returns -1**, so fcntl is broadly
+unsupported. Any logic that probes for a free descriptor number this way is
+meaningless, including the dup2 fallback tried earlier tonight.
+
+⚠ Probe reporting bug, to fix if it is rerun: the SCE-error decoder treats any
+value >= 0x80000000 as `0x8002_0000 | errno`, so a plain POSIX -1 prints as
+"SCE 0xffffffff (errno 65535)" and the real errno is lost. Only
+`sceKernelRdup`'s 0x80020001 is a genuine SCE code. The conclusion is unchanged
+-- everything fails -- but the errnos for the first three columns are not known.
+
+### What this means for wineserver
+
+`dup_fd_object` (server/fd.c:1885) cannot work here, and it is not a corner:
+Wine's server duplicates descriptors as a matter of course. The options are
+
+1. **Share instead of duplicate.** On PROSPERO, have `dup_fd_object` take a
+   reference to the same unix fd rather than a new one, with the owner
+   responsible for the single close. Correct only where no caller depends on
+   independent file offsets or close semantics -- which has to be checked per
+   call site, not assumed.
+2. **Avoid the path for the mapping case only.** `create_user_data_mapping` is
+   the first caller to fail; a mapping could hold its fd directly. Smaller, but
+   leaves every other caller waiting to fail.
+
+Option 1 is the honest fix and is a design change, not a patch. This is the
+right place to stop and think rather than keep adding fallbacks.

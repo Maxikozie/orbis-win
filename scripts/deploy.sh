@@ -21,6 +21,7 @@ case "$TARGET" in
   wine-app) TITLE_ID=GLDS10005 ;;
   modprobe) TITLE_ID=GLDS10006 ;;
   statprobe) TITLE_ID=GLDS10007 ;;
+  dupprobe) TITLE_ID=GLDS10008 ;;
   *) die "usage: deploy.sh {hello|triangle|probe|present|fault|wine-app|modprobe}" ;;
 esac
 
