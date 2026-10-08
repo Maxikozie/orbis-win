@@ -2403,9 +2403,27 @@ elsewhere and patch 0130's `STATUS_IMAGE_NOT_AT_BASE` arm already forgives the
 move. The limit is specific to stripped-relocation images based inside
 `0x400000-0x55c000`.
 
-**The remaining idea, untried:** move every line of the title's own code into a
-PRX, which loads high, and leave the eboot a stub that does nothing but load it
-and call in. Then unmap `0x400000` from inside the PRX once control has
-transferred. Whether the loader tolerates the main image being unmapped is
-unknown, and the libc parameter block lives in the eboot's data, so Sony's libc
-may follow a pointer into it later.
+**Upstream has the same conflict and solves it by moving the title.** PS5 is not
+exempt: patch 0130 exists because "the title's image may hold 0x400000", and
+`prospero-win/docs/DEVELOPMENT.md` says what they do about it --
+
+> The runtime title uses the pinned foundation's high-address native layout:
+> its executable segments begin at 4 GiB, leaving `0x00400000` available for
+> Windows games that cannot be relocated.
+
+-- which is the same 4 GiB this port tried to reach. They get it from
+`ps5-native-tool`, the native converter in ps5-native-app-boilerplate, which
+emits those segment addresses. That tool has no PS4 build, which is why
+`scripts/prx-ps4.sh` substitutes `create-fself`, and `create-fself` plus this
+kernel gives a PIE at 0x400000 with a bias added to any base asked for.
+
+So the target is right and only the mechanism is missing.
+
+**The remaining idea, untried:** this console does place code high -- our own
+PRXs load at 0x800000000 -- just not the main executable. So move every line of
+the title's code into a PRX, leave the eboot a stub that does nothing but load
+it and call in, and unmap 0x400000 from inside the PRX once control has
+transferred. That is the PS4 analogue of what ps5-native-tool does natively.
+Whether the loader tolerates the main image being unmapped is unknown, and the
+libc parameter block lives in the eboot's data, so Sony's libc may follow a
+pointer into it later.
