@@ -113,7 +113,25 @@ if (( PKG )); then
   # require there.
   for m in "$PRX"/sce_module/*.prx; do
     EXTRA+=(--extra "$m:win/wine/lib/wine/x86_64-unix/$(basename "$m")")
+    # ⚠ AND in sce_module. The title loads ntdll by explicit path, but once Wine
+    # is running its own dlopen goes through wine/ps5/pw_wine_dl_libc.c, which
+    # searches WINE_PRX_DIR and falls back to "/app0/sce_module". Nothing sets
+    # that variable, so server_init_process could not find wineserver.prx and
+    # Wine stopped there. Shipping both copies costs ~8 MB and needs no patch.
+    EXTRA+=(--extra "$m:sce_module/$(basename "$m")")
   done
+
+  # Wine's NLS data. It resolves the directory relative to the module path --
+  #   /app0/win/wine/lib/wine/../../share/wine/nls -> /app0/win/share/wine/nls
+  # and without it init_environment reports
+  #   err:environ:read_nls_file failed to load .../locale.nls
+  NLS=$PW/.deps/wine-runtime/nls
+  if [ -d "$NLS" ]; then
+    for f in "$NLS"/*.nls; do
+      EXTRA+=(--extra "$f:win/share/wine/nls/$(basename "$f")")
+    done
+    printf '   nls: %s files\n' "$(ls "$NLS"/*.nls 2>/dev/null | wc -l)"
+  fi
   printf '   modules: %s\n' "$(ls "$PRX"/sce_module/ | tr '\n' ' ')"
   "$BUNDLE/orbis-compat/scripts/ps4/make-pkg.sh" --eboot "$OBJ/../eboot.bin" --out-dir "$OUT" \
       --title-id "$TITLE_ID" --title "$TITLE" "${EXTRA[@]}"

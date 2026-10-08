@@ -37,6 +37,11 @@ CWDWRAPS="-Wl,--wrap=access -Wl,--wrap=chdir -Wl,--wrap=chmod -Wl,--wrap=close -
 # MODULE's entry point, which is why orbis-compat keeps it off the executable
 # link line and why a .so built like an executable can never convert.
 IALD="/home/zpeirce/ps4-gladius/src/freebsd-compat/prx_init_array.ld"
+# ⚠ -lc APPEARS TWICE. Archives are searched once, in order: putting
+# libSceLibcInternal first changed which libc.a members get pulled, and one
+# pulled late (lookup_ipliteral.lo) needs __inet_aton as a HIDDEN reference,
+# which cannot bind to a shared library however many define it. The trailing
+# -lc lets the linker go back into the archive for it.
 # ⚠ -lSceLibcInternal BEFORE -lc. The SDK ships libc only as a STATIC archive,
 # so every module linking it gets a private copy of __environ: the title set
 # WINE_PS5_NTDLL_DIR through its own setenv and ntdll.prx's getenv read a
@@ -76,7 +81,7 @@ LDFLAGS='-nostdlib -pie -Wl,-m,elf_x86_64
   -Wl,--script=/home/zpeirce/ps4-gladius/mesa-build/orbis-porting-kit/cmake/orbis-tls.ld -Wl,--eh-frame-hdr -Wl,--no-rosegment
   -L/home/zpeirce/ps4-gladius/sdk/orbis-sdk-v1/sdk/lib'
 LDLIBS='-Wl,--whole-archive /home/zpeirce/ps4-gladius/mesa-build/orbis-compat/build/liborbis-compat.a -Wl,--no-whole-archive
-  -lSceLibcInternal -lc -lkernel -lc++ /home/zpeirce/ps4-gladius/sdk/orbis-sdk-v1/sdk/lib/crt1.o'
+  -lSceLibcInternal -lc -lkernel -lc++ -lc /home/zpeirce/ps4-gladius/sdk/orbis-sdk-v1/sdk/lib/crt1.o'
 
 # Add the link half only when actually linking: -c/-S/-E produce no executable
 # and clang warns about unused link arguments, which configure reads as failure.
@@ -111,7 +116,7 @@ for a in "$@"; do
       # link did not. Measured on hardware 2026-10-07 (GLDS10006).
       exec clang $CFLAGS -nostdlib -shared -Wl,-z,max-page-size=0x4000 -Wl,-z,separate-loadable-segments -Wl,-m,elf_x86_64 \
         -Wl,--eh-frame-hdr -Wl,--no-rosegment -T "$EHLD" -T "$MPLD" -T "$IALD" $SHIMWRAPS -L"$SDKLIB" "$@" \
-        -Wl,--whole-archive "$OCLIB" $SHIMLIB -Wl,--no-whole-archive -lSceLibcInternal -lc -lkernel -lc++ -lSceNet "$MPOBJ"
+        -Wl,--whole-archive "$OCLIB" $SHIMLIB -Wl,--no-whole-archive -lSceLibcInternal -lc -lkernel -lc++ -lSceNet -lc "$MPOBJ"
       ;;
   esac
 done
