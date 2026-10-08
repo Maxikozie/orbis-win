@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] dl: send a failed dlopen to klog, not only stderr.
+
+pw_wine_dl builds the exact text -- the paths tried, and whether the
+module was not found or loaded without an export descriptor -- and hands
+it to a callback that writes stderr. That sink is ntdll's alone, win32u
+calls dlopen too (it is how Vulkan is reached), and a PRX other than
+ntdll has no usable stderr here, so the text was written and dropped on
+every failure. All win32u reports is the name it asked for.
+diff --git a/wine/ps5/pw_wine_dl_libc.c b/wine/ps5/pw_wine_dl_libc.c
+index 3b098cb..ed987c4 100644
+--- a/wine/ps5/pw_wine_dl_libc.c
++++ b/wine/ps5/pw_wine_dl_libc.c
+@@ -22,8 +22,24 @@ static int self;
+ /* WINE_PRX_DIR names the fallback directory for modules that are not staged
+  * beside the path Wine asks for; the title's sce_module is the default. */
+ /* A failed dlopen names what it tried on stderr, which reaches ps5log
+- * through ntdll's output sink (patch 0560). */
+-static void report(const char *line){fprintf(stderr,"%s\n",line);}
++ * through ntdll's output sink (patch 0560).
++ *
++ * ⚠ AND klog, because that sink is ntdll's alone. win32u calls dlopen too --
++ * it is how Vulkan is reached, dlopen(SONAME_LIBVULKAN) -- and a PRX other
++ * than ntdll has no usable stderr here (docs/FINDINGS.md), so this text was
++ * written and dropped on every failure. All win32u itself then reports is
++ * ERR("Failed to load %s", SONAME_LIBVULKAN): the name it asked for, never the
++ * paths tried or the reason. libvulkan.prx was refused four times before
++ * anyone could read the one line that says which. */
++static void report(const char *line)
++{
++    extern int sceKernelDebugOutText(int channel,const char *text);
++    char klog[512];
++
++    fprintf(stderr,"%s\n",line);
++    snprintf(klog,sizeof(klog),"%s\n",line);
++    sceKernelDebugOutText(0,klog);
++}
+ static void configure(void)
+ {
+     const PwWineDlOps ops={sceKernelLoadStartModule,sceKernelGetModuleInfo,

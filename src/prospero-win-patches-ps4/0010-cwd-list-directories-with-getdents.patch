@@ -1,0 +1,296 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] cwd: list directories with getdents, not readdir.
+
+readdir does not list /data on this console: libc reads a directory with
+a buffer of its own choosing, a page, and /data's directories use 64 KiB
+blocks, so the call is refused for anything smaller.
+native/pw_wine_library.c measured this and answered it with getdents over
+a whole block; the cwd layer never got the same treatment, so read_names
+failed for every directory it was asked about.
+
+Its only caller is find_file_in_dir's case-insensitive search, so a
+32-bit game asking for its imports as its import table spells them lost
+all of them: GTA IV went from 21 failures to none.
+
+One buffer, not one per call -- this libc refuses a 64 KiB allocation
+once the heap is busy, and it arrives as STATUS_NO_MEMORY out of a DLL
+load. Keeps every entry including directories, where the launcher's
+parser drops all but DT_UNKNOWN and DT_REG, since these names resolve
+the components of a path.
+diff --git a/wine/ps5/pw_wine_cwd_libc.c b/wine/ps5/pw_wine_cwd_libc.c
+index 259196b..c594c52 100644
+--- a/wine/ps5/pw_wine_cwd_libc.c
++++ b/wine/ps5/pw_wine_cwd_libc.c
+@@ -26,6 +26,7 @@
+ #include <fcntl.h>
+ #include <pthread.h>
+ #include <stdarg.h>
++#include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -40,6 +41,47 @@
+ 
+ int __real_open(const char *path, int flags, ...);
+ int __real_close(int fd);
++int __real_dup(int fd);
++extern int sceKernelRdup(int fd);
++
++/* ⚠ dup() RETURNS EPERM ON THIS KERNEL. Measured 2026-10-07: wineserver's
++ * dup_fd_object (server/fd.c) failed with errno 1, which file_set_error turned
++ * into STATUS_ACCESS_DENIED, which create_user_data_mapping returned as NULL,
++ * which init_directories handed to release_object -- a null dereference four
++ * steps from the cause. orbis-compat records the same refusal for dup2 onto fd
++ * 1 or 2 ("the descriptor table is not ours to rearrange"); this is the plain
++ * dup of an arbitrary descriptor.
++ *
++ * fcntl(F_DUPFD) is the POSIX equivalent and is not refused, so fall back to
++ * it. Wine's server duplicates descriptors routinely, so this is not a
++ * one-site fix. */
++int __wrap_dup(int fd)
++{
++    int result, candidate;
++
++    if ((result = __real_dup(fd)) != -1) return result;        /* EPERM here */
++    if ((result = fcntl(fd, F_DUPFD, 0)) != -1) return result; /* EINVAL here */
++
++    /* The POSIX calls are all refused on this kernel -- dup is EPERM,
++     * fcntl(F_DUPFD) is EINVAL, and dup2 onto a free high number fails too, so
++     * the descriptor table really is not ours to rearrange (orbis-compat says
++     * the same of dup2 onto fd 1 or 2). libkernel has its own primitive for
++     * it, which is what a title is evidently meant to use. */
++    (void)candidate;
++    result = sceKernelRdup(fd);
++    /* ⚠ AN SCE CALL BEHIND A POSIX NAME. orbis-compat records the same of
++     * sceKernelStat: failure is 0x8002_0000 | errno, not -1 with errno set.
++     * Returned as-is it is a large POSITIVE integer, so the caller takes it for
++     * a descriptor and the first fstat of it fails EBADF -- four frames from
++     * here, in mapping_init. The low 16 bits are the FreeBSD errno. */
++    if ((unsigned)result >= 0x80000000u)
++    {
++        errno = ((unsigned)result >> 16) == 0x8002 ? (result & 0xFFFF) : EBADF;
++        return -1;
++    }
++    return result;
++}
++
+ int __real_stat(const char *path, struct stat *st);
+ int __real_lstat(const char *path, struct stat *st);
+ 
+@@ -74,18 +116,58 @@ static void fill_identity(const char *path, struct stat *st)
+     __real_close(fd);
+ }
+ 
++/* ⚠ A path this layer hands to libc must end within PW_CWD_PATH_MAX. Sony's
++ * libc reads it with no bound, so an unterminated buffer walks off the end of
++ * the mapping and faults inside libSceLibcInternal, where it reads as a crash
++ * in a syscall rather than as a bad argument here:
++ *
++ *     syscall fault 0xc0000005 at libSceLibcInternal.sprx+0x51eca,
++ *                   address 2202daf860
++ *     syscall fault in syscall 0x147a (win32u #1146)
++ *     syscall fault called from win32u.prx+0x242393  (NtUserCreateWindowStation)
++ *     syscall fault called from ntdll.prx+0xb58b2    (stat_resolved)
++ *
++ * Every buffer here is a char[PW_CWD_PATH_MAX] inside struct resolved, so
++ * reading that many bytes is always in bounds; what is not guaranteed is that
++ * something wrote a terminator. Say so and refuse, rather than letting libc
++ * find out. If this never fires, the stack walk above pointed at a stale slot
++ * and the fault is somewhere else -- which is worth knowing too. */
++static int pw_path_is_terminated(const char *path, const char *who)
++{
++    extern int sceKernelDebugOutText(int channel, const char *text);
++    static int reported;
++    char line[160];
++
++    if (path && strnlen(path, PW_CWD_PATH_MAX) < PW_CWD_PATH_MAX) return 1;
++    if (reported < 8) {
++        reported++;
++        snprintf(line, sizeof(line),
++                 "pw_cwd: %s given a path with no terminator in %d bytes (%p)\n",
++                 who, (int)PW_CWD_PATH_MAX, (const void *)path);
++        sceKernelDebugOutText(0, line);
++    }
++    errno = EINVAL;
++    return 0;
++}
++
+ /* Every raw stat in this file goes through these, so any identity comparison
+  * anywhere sees real st_dev/st_ino rather than zeros. */
+ static int real_stat_full(const char *path, struct stat *st)
+ {
+-    int result = __real_stat(path, st);
++    int result;
++
++    if (!pw_path_is_terminated(path, "stat")) return -1;
++    result = __real_stat(path, st);
+     if (!result) fill_identity(path, st);
+     return result;
+ }
+ 
+ static int real_lstat_full(const char *path, struct stat *st)
+ {
+-    int result = __real_lstat(path, st);
++    int result;
++
++    if (!pw_path_is_terminated(path, "lstat")) return -1;
++    result = __real_lstat(path, st);
+     if (!result) fill_identity(path, st);
+     return result;
+ }
+@@ -682,6 +764,87 @@ DIR *__wrap_opendir(const char *path)
+ 
+ /* The names of the directory r names, read whole: NUL-terminated in a
+  * buffer the caller frees. 0, or -1 with errno. */
++/* Append one name to the growing buffer; 0, or -1 with errno. */
++static int append_name(const char *name, size_t length, char **names, size_t *bytes,
++                       size_t *count, size_t *size)
++{
++    if (*bytes + length + 1 > *size) {
++        char *bigger;
++
++        while (*bytes + length + 1 > *size) *size *= 2;
++        if (!(bigger = realloc(*names, *size))) { errno = ENOMEM; return -1; }
++        *names = bigger;
++    }
++    memcpy(*names + *bytes, name, length);
++    (*names)[*bytes + length] = 0;
++    *bytes += length + 1;
++    ++*count;
++    return 0;
++}
++
++/* ⚠ readdir does not list /data on this console. libc reads a directory with
++ * a buffer of its own choosing -- a page, 16 KiB here -- and /data's
++ * directories use 64 KiB blocks, so the call is refused for a buffer smaller
++ * than one block: EINVAL, or EPERM, depending on where it is tried. The
++ * launcher met this first and answered it with getdents over a whole block
++ * (native/pw_wine_library.c), and that is the method used here.
++ *
++ * Unlike the launcher's parser this one keeps every entry, directories
++ * included: these names are what resolves the components of a path, and
++ * dropping them loses \windows and \syswow64 along with the files.
++ *
++ * Nothing had noticed because the only caller is the case-insensitive search,
++ * which a prefix written in lower case reaches only when a name is spelled
++ * some other way -- and then every lookup fails at once. A 32-bit game asks
++ * for its imports exactly as its import table spells them, so GTA IV lost all
++ * twenty-one of them and the loader ended the process with c0000135. */
++/* ⚠ One buffer, not one per call. A whole directory block is 64 KiB here, and
++ * this console's libc refuses an allocation that size -- the same allocator
++ * that turns calloc of 145 KiB into EINVAL (docs/FINDINGS.md) -- so asking for
++ * one on every lookup fails as soon as the heap is busy, which arrives as
++ * STATUS_NO_MEMORY out of a DLL load and looks nothing like a directory
++ * problem. The launcher has always kept this buffer static; so does this. */
++static pthread_mutex_t dirents_lock = PTHREAD_MUTEX_INITIALIZER;
++static uint8_t dirents_buffer[64 * 1024];
++
++static int read_names_getdents(int fd, char **names, size_t *bytes, size_t *count, size_t *size)
++{
++    static const size_t block = sizeof(dirents_buffer);
++    uint8_t *buffer = dirents_buffer;
++    int got, saved;
++
++    pthread_mutex_lock(&dirents_lock);
++    while ((got = (int)getdents(fd, (struct dirent *)buffer, block)) > 0) {
++        size_t offset = 0;
++
++        while (offset < (size_t)got) {
++            uint16_t reclen;
++            uint8_t namlen;
++
++            if ((size_t)got - offset < 8) { saved = EINVAL; goto failed; }
++            memcpy(&reclen, buffer + offset + 4, 2);
++            namlen = buffer[offset + 7];
++            if (reclen < 8 || reclen > (size_t)got - offset || (size_t)namlen + 8 > reclen) {
++                saved = EINVAL; goto failed;
++            }
++            if (namlen && append_name((const char *)buffer + offset + 8, namlen,
++                                      names, bytes, count, size)) {
++                saved = errno; goto failed;
++            }
++            offset += reclen;
++        }
++    }
++    saved = errno;
++    pthread_mutex_unlock(&dirents_lock);
++    if (got < 0) { errno = saved; return -1; }
++    return 0;
++
++failed:
++    pthread_mutex_unlock(&dirents_lock);
++    errno = saved;
++    return -1;
++}
++
+ static int read_names(const struct resolved *r, char **names, size_t *bytes, size_t *count)
+ {
+     struct dirent *entry;
+@@ -690,39 +853,42 @@ static int read_names(const struct resolved *r, char **names, size_t *bytes, siz
+     int fd, saved;
+ 
+     *bytes = *count = 0;
+-    if ((fd = __real_open(r->full, O_RDONLY)) < 0) return -1;
++    if (!(*names = malloc(size))) { errno = ENOMEM; return -1; }
++    if ((fd = __real_open(r->full, O_RDONLY)) < 0) { saved = errno; goto failed; }
++
++    /* The console's method first; see read_names_getdents. */
++    if (!read_names_getdents(fd, names, bytes, count, &size) && *count) {
++        __real_close(fd);
++        return 0;
++    }
++    *bytes = *count = 0;
++
++    /* Then libc's, for a file system where it does work. fdopendir owns the
++     * descriptor once it succeeds, so it must not be closed here as well. */
+     if (!(dir = fdopendir(fd))) {
+         saved = errno;
+         __real_close(fd);
+-        errno = saved;
+-        return -1;
+-    }
+-    if (!(*names = malloc(size))) {
+-        closedir(dir);
+-        errno = ENOMEM;
+-        return -1;
++        goto failed;
+     }
++    errno = 0;   /* readdir ends by returning NULL; only errno tells which end */
+     while ((entry = readdir(dir))) {
+-        size_t length = strlen(entry->d_name) + 1;
+-
+-        if (*bytes + length > size) {
+-            char *bigger;
+-
+-            while (*bytes + length > size) size *= 2;
+-            if (!(bigger = realloc(*names, size))) {
+-                free(*names);
+-                closedir(dir);
+-                errno = ENOMEM;
+-                return -1;
+-            }
+-            *names = bigger;
++        if (append_name(entry->d_name, strlen(entry->d_name), names, bytes, count, &size)) {
++            saved = errno;
++            closedir(dir);
++            goto failed;
+         }
+-        memcpy(*names + *bytes, entry->d_name, length);
+-        *bytes += length;
+-        ++*count;
++        errno = 0;
+     }
++    if ((saved = errno)) { closedir(dir); goto failed; }
+     closedir(dir);
+     return 0;
++
++failed:
++    free(*names);
++    *names = NULL;
++    *bytes = *count = 0;
++    errno = saved;
++    return -1;
+ }
+ 
+ int pw_cwd_scan_directory(int dirfd, const char *path, pw_cwd_visit visit, void *context,
