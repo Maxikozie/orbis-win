@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] ntdll: Name any module in a syscall fault on ps5.
+
+With the loader finished, GTA IV runs its own code and ends on a fault
+inside a syscall: c0000005 at 8000e1eca, with rcx holding 0x58585858 and
+the same registers on every run. The existing report fell through to its
+bare-address branch, because dladdr here is pw_wine_dl, which knows only
+the modules it opened or adopted -- ours. The address is below ntdll's
+base, so the module is one the system loader brought in, and with
+PW_SHARED_LIBC that is most likely the shared libc.
+
+Guessing is not an option: offset 0xe1eca lands on a plausible symbol in
+win32u, winevulkan and opengl32 alike, so the address alone settles
+nothing.
+
+Fall back to the kernel, which knows every module: walk
+sceKernelGetModuleList and sceKernelGetModuleInfo for the one whose
+segments contain the address. For a module we have no symbols for, its
+name is worth more than a symbol would be. Every future fault report
+gains this, not just this one.
+
+Diagnostic only; no behaviour changes.
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 2956c64e1c..0460c310ed 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2151,6 +2151,56 @@ static BOOL check_atl_thunk( struct thread_data *data, ucontext_t *sigcontext,
+ }
+ 
+ 
++#ifdef __PROSPERO__
++/* ⚠ dladdr only knows the modules pw_wine_dl opened or adopted, which is ours
++ * and nothing else, so a syscall faulting inside the shared libc -- or any
++ * module the system loader brought in -- printed a bare address. GTA IV's did,
++ * at 8000e1eca, identically on every run, and three of our own PRXs have a
++ * plausible symbol at that offset, so the address alone settles nothing.
++ *
++ * The kernel knows them all. Ask it which module's segments contain the
++ * address; for a module we have no symbols for, the name is worth more than a
++ * symbol would be anyway. */
++static int pw_module_at( const void *address, char *name, size_t size, unsigned long *offset )
++{
++    /* ⚠ sceKernelGetModuleInfo is already declared above as (int32_t, void *),
++     * and the SDK's own types are not in scope here, so take the buffer the way
++     * pw_native_resolve_kernel does: 0x160 opaque bytes with its size written
++     * at the front. native_libkernel_resolver.c settles the layout -- name at
++     * 8, four 16-byte segments {address, size, prot} at 0x108, their count at
++     * 0x148. That is OrbisKernelModuleInfo exactly: 8 + 256 + 64 + 4 + 20. */
++    extern int sceKernelGetModuleList( int32_t *array, size_t count, size_t *available );
++    unsigned char info[0x160];
++    int32_t handles[192];
++    size_t available = 0, i;
++    unsigned int seg, count;
++    uint64_t want = sizeof(info), base;
++    uint32_t span;
++
++    if (sceKernelGetModuleList( handles, ARRAY_SIZE(handles), &available )) return 0;
++    if (available > ARRAY_SIZE(handles)) available = ARRAY_SIZE(handles);
++    for (i = 0; i < available; i++)
++    {
++        memset( info, 0, sizeof(info) );
++        memcpy( info, &want, sizeof(want) );
++        if (sceKernelGetModuleInfo( handles[i], info )) continue;
++        memcpy( &count, info + 0x148, sizeof(count) );
++        for (seg = 0; seg < count && seg < 4; seg++)
++        {
++            memcpy( &base, info + 0x108 + seg * 16, sizeof(base) );
++            memcpy( &span, info + 0x108 + seg * 16 + 8, sizeof(span) );
++            if ((uintptr_t)address < base) continue;
++            if ((uintptr_t)address >= base + span) continue;
++            info[8 + 255] = 0;
++            snprintf( name, size, "%s", (const char *)info + 8 );
++            *offset = (unsigned long)((uintptr_t)address - base);
++            return 1;
++        }
++    }
++    return 0;
++}
++#endif
++
+ /***********************************************************************
+  *           handle_syscall_fault
+  *
+@@ -2183,12 +2233,18 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *sigconte
+          * success: user32 took STATUS_ACCESS_VIOLATION for a class atom. */
+         void *where = context->Rip ? (void *)context->Rip : context->Rsp ? *(void **)context->Rsp : NULL;
+         Dl_info info;
++        char pw_modname[256];
++        unsigned long pw_modoff = 0;
+ 
+         if (where && dladdr( where, &info ) && info.dli_fname)
+             ERR_(seh)( "syscall fault %#x %s %s+%#lx, address %p\n", (int)rec->ExceptionCode,
+                        context->Rip ? "at" : "calling NULL from", info.dli_fname,
+                        (unsigned long)((char *)where - (char *)info.dli_fbase),
+                        rec->NumberParameters > 1 ? (void *)rec->ExceptionInformation[1] : NULL );
++        else if (where && pw_module_at( where, pw_modname, sizeof(pw_modname), &pw_modoff ))
++            ERR_(seh)( "syscall fault %#x %s %s+%#lx, address %p\n", (int)rec->ExceptionCode,
++                       context->Rip ? "at" : "calling NULL from", pw_modname, pw_modoff,
++                       rec->NumberParameters > 1 ? (void *)rec->ExceptionInformation[1] : NULL );
+         else
+             ERR_(seh)( "syscall fault %#x %s %p\n", (int)rec->ExceptionCode,
+                        context->Rip ? "at" : "calling NULL from", where );
