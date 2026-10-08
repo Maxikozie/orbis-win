@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Date: Tue, 7 Oct 2026 19:30:00 +0000
+Subject: [PATCH] server: report anonymous-mapping failures through klog.
+
+create_anonymous_mapping_fd notes which backing it uses, and why shared memory
+was refused, with fprintf(stderr). stderr goes nowhere on this console, so a
+mapping that cannot be backed fails in silence -- and the caller,
+create_user_data_mapping, returns NULL, which init_directories passes straight
+to release_object(). The result is a null dereference in release_object with
+nothing to say why.
+
+Send the notes to sceKernelDebugOutText, and add one for create_temp_file
+failing, which was not reported at all.
+---
+diff --git a/server/mapping.c b/server/mapping.c
+index 67a6c18212..856980d591 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -357,6 +357,21 @@ static int create_temp_file( file_pos_t size )
+     return fd;
+ }
+ 
++#ifdef __PROSPERO__
++/* ⚠ These notes used to go to stderr, which goes nowhere on this console, so a
++ * mapping that could not be backed failed in complete silence -- and the
++ * caller, create_user_data_mapping, returns NULL, which init_directories hands
++ * straight to release_object(). The crash that follows is a null dereference
++ * with no hint of the cause. klog always works. */
++extern int sceKernelDebugOutText( int channel, const char *text );
++static void pw_server_note( const char *what )
++{
++    char line[256];
++    snprintf( line, sizeof(line), "wineserver: %s (errno %d)\n", what, errno );
++    sceKernelDebugOutText( 0, line );
++}
++#endif
++
+ /* create the unix fd behind an anonymous mapping */
+ static int create_anonymous_mapping_fd( file_pos_t size )
+ {
+@@ -380,14 +395,18 @@ static int create_anonymous_mapping_fd( file_pos_t size )
+     {
+         if (!ftruncate( fd, length ))
+         {
+-            if (!logged++) fprintf( stderr, "wine-ps5: anonymous mappings in shared memory\n" );
++            if (!logged++) pw_server_note( "anonymous mappings in shared memory" );
+             return fd;
+         }
+         close( fd );
+     }
+-    if (!logged++) fprintf( stderr, "wine-ps5: anonymous mappings in temp files: shared memory errno %d\n", errno );
++    if (!logged++) pw_server_note( "anonymous mappings in temp files: shared memory failed" );
+ #endif
+-    return create_temp_file( size );
++    {
++        int fd = create_temp_file( size );
++        if (fd == -1) pw_server_note( "create_temp_file FAILED: no backing for the mapping" );
++        return fd;
++    }
+ }
+ 
+ /* find a memory view from its base address */

@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Date: Tue, 7 Oct 2026 19:35:00 +0000
+Subject: [PATCH] server: report release_object(NULL) rather than faulting.
+
+init_directories() passes the result of every create_*() straight to
+release_object(), on the assumption that none of them can fail. On this console
+some do, and the first anyone hears of it is a null dereference inside
+release_object -- which names neither the creation that failed nor any of the
+ones after it, because the server is dead.
+
+Report it and return. The startup then continues and every failure is named,
+instead of the first being fatal and anonymous.
+---
+diff --git a/server/object.c b/server/object.c
+index e977b89480..ecec88cd0f 100644
+--- a/server/object.c
++++ b/server/object.c
+@@ -562,6 +562,20 @@ struct object *grab_object( void *ptr )
+ /* release an object (i.e. decrement its refcount) */
+ void release_object( void *ptr )
+ {
++#ifdef __PROSPERO__
++    /* ⚠ DIAGNOSTIC. init_directories() passes the result of each create_*()
++     * straight to release_object(), assuming none can fail. On this console
++     * some do, and the null dereference here is the first anyone hears of it --
++     * with no way to tell which creation it was. Name it and carry on, so the
++     * rest of the startup runs and every failure is reported instead of the
++     * first one being fatal and anonymous. */
++    if (!ptr)
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        sceKernelDebugOutText( 0, "wineserver: release_object(NULL) -- a create_* call failed\n" );
++        return;
++    }
++#endif
+     struct object *obj = (struct object *)ptr;
+     assert( obj->refcount );
+     if (!--obj->refcount)
