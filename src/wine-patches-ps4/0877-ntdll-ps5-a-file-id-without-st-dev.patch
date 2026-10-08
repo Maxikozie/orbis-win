@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] ntdll: A file id without st_dev on ps5.
+
+st_dev is not stable on this console. docs/FINDINGS.md measured it on
+wineserver's own prefix directory -- server-290bff49-7e78bd one run,
+server-290bff65-7e78bd the next, st_ino identical both times -- and said
+what to do about it: drop st_dev from the comparison, since a prefix
+cannot span devices here anyway.
+
+FSCTL_GET_OBJECT_ID is where it does damage. The loader asks for a file's
+object id and hands it to find_fileid_module() to decide whether the file
+is already loaded; built from a drifting st_dev, the answer is always no.
+
+GTA IV stops at the same point every run -- t=1.34, after wow64win's
+PROCESS_ATTACH and before its own image is loaded -- with the server
+serving 2728 REQ_select against six in every run that worked, and the
+file trace ending on FSCTL_GET_OBJECT_ID over C:\windows and
+C:\windows\system32.
+
+st_ino alone identifies a file here.
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 46bf0d69bc..076ec48e91 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -6938,8 +6938,28 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
+             fstat( fd, &st );
+             if (needs_close) close( fd );
+             memset( info, 0, sizeof(*info) );
++#ifdef __PROSPERO__
++            /* ⚠ st_ino only. st_dev is not stable on this console: the same
++             * directory answers with a different one from call to call.
++             * docs/FINDINGS.md measured it on wineserver's own prefix
++             * directory -- server-290bff49-7e78bd one run,
++             * server-290bff65-7e78bd the next, st_ino identical both times --
++             * and said what to do: drop it from the comparison, a prefix
++             * cannot span devices here anyway.
++             *
++             * This is the comparison it breaks. The loader asks for a file's
++             * object id and hands it to find_fileid_module() to decide whether
++             * that file is already loaded; built from a drifting st_dev the
++             * answer is always no. GTA IV stops at the same point every run --
++             * t=1.34, after wow64win's PROCESS_ATTACH and before its own image
++             * loads -- with the server serving 2728 REQ_select where every
++             * working run served six, and the file trace ending on
++             * FSCTL_GET_OBJECT_ID over C:\windows and C:\windows\system32. */
++            memcpy( info->ObjectId + 8, &st.st_ino, sizeof(st.st_ino) );
++#else
+             memcpy( info->ObjectId, &st.st_dev, sizeof(st.st_dev) );
+             memcpy( info->ObjectId + 8, &st.st_ino, sizeof(st.st_ino) );
++#endif
+             size = sizeof(*info);
+         }
+         else status = STATUS_BUFFER_TOO_SMALL;
