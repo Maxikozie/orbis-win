@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] ntdll: Name the step that refuses a builtin on ps5.
+
+GTA IV loads 29 modules and then loses SHELL32, OLEAUT32, DINPUT8,
+WINTRUST and WMVCore to STATUS_NO_MEMORY, with nothing printed between
+find_builtin_dll and the failure. Reading the traces narrows it badly:
+map_image_into_view prints on entry and never does, so it was not
+reached; map_image_view can only fail through its last map_view, which
+0873 wraps and which stayed silent. Both cannot be true, so one of the
+readings is wrong and the chain has to say for itself.
+
+Three points, all bounded:
+
+ * open_builtin_pe_file separates its two halves -- the file never became
+   a section (the open, or NtCreateSection on the server), or the section
+   could not be placed -- and prints the name and status of either. A
+   plain not-found stays quiet; the loader tries many directories.
+ * virtual_map_image reports a refusal from server_get_unix_fd, which
+   runs before anything is placed and before any mapping trace, so it
+   looks exactly like a placement failure from the outside.
+ * the map_image_view call site reports its own status, independently of
+   0873, so a silent 0873 can be told from a 0873 that never ran.
+
+Diagnostic only; no behaviour changes.
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index e90f83c79e..498c18712a 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1113,6 +1113,38 @@ static NTSTATUS open_builtin_pe_file( const char *name, OBJECT_ATTRIBUTES *attr,
+ 
+     *module = NULL;
+     status = open_dll_file( name, attr, &mapping );
++#ifdef __PROSPERO__
++    /* ⚠ DIAGNOSTIC. A builtin that cannot be loaded comes back as one status
++     * with two very different stories behind it, and the traces around it show
++     * neither: GTA IV's SHELL32 and OLEAUT32 end in STATUS_NO_MEMORY with
++     * nothing printed between find_builtin_dll and the failure. Either the file
++     * never became a section (open_dll_file: the open, or NtCreateSection on the
++     * server) or the section could not be placed (virtual_map_builtin_module).
++     * Say which, and the status, for the first few. */
++    {
++        static int reported;
++        NTSTATUS open_status = status;
++
++        if (!status)
++        {
++            status = virtual_map_builtin_module( mapping, module, size, image_info,
++                                                 limit_low, limit_high, machine, prefer_native, offset );
++            NtClose( mapping );
++            if (status && status != STATUS_IMAGE_ALREADY_LOADED && reported < 12)
++            {
++                reported++;
++                ERR( "ps5 builtin %s: mapped failed %x\n", debugstr_a(name), (unsigned int)status );
++            }
++        }
++        else if (open_status != STATUS_DLL_NOT_FOUND && open_status != STATUS_OBJECT_NAME_NOT_FOUND &&
++                 open_status != STATUS_OBJECT_PATH_NOT_FOUND && reported < 12)
++        {
++            reported++;
++            ERR( "ps5 builtin %s: open failed %x\n", debugstr_a(name), (unsigned int)open_status );
++        }
++        return status;
++    }
++#else
+     if (!status)
+     {
+         status = virtual_map_builtin_module( mapping, module, size, image_info,
+@@ -1120,6 +1152,7 @@ static NTSTATUS open_builtin_pe_file( const char *name, OBJECT_ATTRIBUTES *attr,
+         NtClose( mapping );
+     }
+     return status;
++#endif
+ }
+ 
+ 
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 1091901bad..6f42b42933 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -3795,7 +3795,16 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
+         return STATUS_INVALID_PARAMETER;
+ 
+     if ((status = server_get_unix_fd( mapping, 0, &unix_fd, &needs_close, NULL, NULL )))
++    {
++#ifdef __PROSPERO__
++        /* ⚠ DIAGNOSTIC. This runs before anything is placed and before any of
++         * the mapping traces, so a failure here looks exactly like one from the
++         * placement further down. */
++        static int reported;
++        if (reported < 8) { reported++; ERR( "ps5 image fd refused: %x\n", (unsigned int)status ); }
++#endif
+         return status;
++    }
+ 
+     if (pe_mapping->shared_file &&
+         ((status = server_get_unix_fd( pe_mapping->shared_file, FILE_READ_DATA|FILE_WRITE_DATA,
+@@ -3820,6 +3829,17 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+ 
+     status = map_image_view( &view, &pe_mapping->image, size, limit_low, limit_high, alloc_type );
++#ifdef __PROSPERO__
++    {
++        static int reported;
++        if (status && reported < 8)
++        {
++            reported++;
++            ERR( "ps5 image view refused: %u KiB -> %x\n",
++                 (unsigned int)(size / 1024), (unsigned int)status );
++        }
++    }
++#endif
+     if (status) goto done;
+ 
+     status = map_image_into_view( view, &pe_mapping->nt_name, unix_fd, &pe_mapping->image,
