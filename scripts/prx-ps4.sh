@@ -71,7 +71,7 @@ gen "$prx/obj/ntdll_desc.c" \
     __wine_virtual_stats __wine_virtual_fault_top __wine_ps5_set_output_sink \
     __wine_ps5_memory_stats pw_cwd_set \
     __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook \
-    pw_wine_set_display_release pw_wine_release_display \
+    pw_wine_set_display_release pw_wine_release_display pw_ps4_setenv \
     --optional-from "$build/dlls/ntdll/ntdll.so" --nm llvm-nm \
     --optional-export __wine_prospero_native_wow64_caps
 gen "$prx/obj/win32u_desc.c" __wine_unix_lib_init
@@ -98,6 +98,8 @@ echo "== 3. link + 4. container =="
 # ntdll: loader, compat, sink, cwd. The thread registry belongs to the server.
 ntdll_shims="pw_wine_prx pw_wine_dl pw_wine_dl_libc pw_wine_compat pw_wine_compat_libc \
              pw_wine_sink pw_wine_cwd pw_wine_cwd_libc"
+# This port's own: lets the title write into ntdll's environment (see the file).
+$CC -std=gnu11 -O2 -fPIC -c "$gladius/src/native/pw_prx_env_ps4.c" -o "$prx/obj/pw_prx_env_ps4.o"
 srv_shims="pw_wine_compat pw_wine_compat_libc pw_wine_threads pw_wine_threads_libc \
            pw_wine_cwd pw_wine_cwd_libc"
 # A title cannot chdir: ntdll and wineserver each keep their own working
@@ -128,7 +130,7 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
     objs=$(link_objects "$target")
     [ -n "$objs" ] || { echo "  ✗ $name: no ELF link in make.log"; status=1; continue; }
     shim_objs=""
-    [ "$name" = ntdll ] && shim_objs="$heap $dmem"
+    [ "$name" = ntdll ] && shim_objs="$heap $dmem $prx/obj/pw_prx_env_ps4.o"
     for s in $shims; do shim_objs="$shim_objs $prx/obj/$s.o"; done
     log=$prx/$name.link.log
     # shellcheck disable=SC2086

@@ -122,13 +122,13 @@ if (( PKG )); then
   done
 
   # Wine's NLS data. It resolves the directory relative to the module path --
-  #   /app0/win/wine/lib/wine/../../share/wine/nls -> /app0/win/share/wine/nls
+  #   /app0/win/wine/lib/wine/../../share/wine/nls -> /app0/win/wine/share/wine/nls
   # and without it init_environment reports
   #   err:environ:read_nls_file failed to load .../locale.nls
   NLS=$PW/.deps/wine-runtime/nls
   if [ -d "$NLS" ]; then
     for f in "$NLS"/*.nls; do
-      EXTRA+=(--extra "$f:win/share/wine/nls/$(basename "$f")")
+      EXTRA+=(--extra "$f:win/wine/share/wine/nls/$(basename "$f")")
     done
     printf '   nls: %s files\n' "$(ls "$NLS"/*.nls 2>/dev/null | wc -l)"
   fi

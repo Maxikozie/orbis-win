@@ -37,20 +37,14 @@ CWDWRAPS="-Wl,--wrap=access -Wl,--wrap=chdir -Wl,--wrap=chmod -Wl,--wrap=close -
 # MODULE's entry point, which is why orbis-compat keeps it off the executable
 # link line and why a .so built like an executable can never convert.
 IALD="/home/zpeirce/ps4-gladius/src/freebsd-compat/prx_init_array.ld"
-# ⚠ -lc APPEARS TWICE. Archives are searched once, in order: putting
-# libSceLibcInternal first changed which libc.a members get pulled, and one
-# pulled late (lookup_ipliteral.lo) needs __inet_aton as a HIDDEN reference,
-# which cannot bind to a shared library however many define it. The trailing
-# -lc lets the linker go back into the archive for it.
-# ⚠ -lSceLibcInternal BEFORE -lc. The SDK ships libc only as a STATIC archive,
-# so every module linking it gets a private copy of __environ: the title set
-# WINE_PS5_NTDLL_DIR through its own setenv and ntdll.prx's getenv read a
-# different, empty environment --
-#     WINE wine: cannot get path to ntdll.so (set WINE_PS5_NTDLL_DIR)
-# even though the title reported environment status=0. libSceLibcInternal is the
-# stub for the libc.prx the process already loads, and exports getenv/setenv/
-# putenv, so resolving them there gives the title and every module ONE
-# environment. Measured on hardware 2026-10-07.
+# ⚠ DO NOT link libSceLibcInternal to share the environment. Tried
+# 2026-10-07: the SDK ships libc only as a static archive, so each module has a
+# private __environ and the title's setenv never reaches Wine's getenv. Putting
+# the shared libc first does fix that -- and drags 88 symbols with it, malloc,
+# exit and the whole __cxa_* family included, moving the entire C runtime onto
+# libc.prx. The title then died with PRX_NOT_RESOLVED_FUNCTION. The environment
+# is shared through pw_ps4_setenv instead (src/native/pw_prx_env_ps4.c), which
+# writes into the module's own environ and touches nothing else.
 MPOBJ="/home/zpeirce/ps4-gladius/build/ps4-wine-sdk/module_param.o"
 MPLD="/home/zpeirce/ps4-gladius/src/freebsd-compat/prx_module_param.ld"
 EHLD="/home/zpeirce/ps4-gladius/prospero-win/wine/ps5/prx_eh_frame.ld"
@@ -81,7 +75,7 @@ LDFLAGS='-nostdlib -pie -Wl,-m,elf_x86_64
   -Wl,--script=/home/zpeirce/ps4-gladius/mesa-build/orbis-porting-kit/cmake/orbis-tls.ld -Wl,--eh-frame-hdr -Wl,--no-rosegment
   -L/home/zpeirce/ps4-gladius/sdk/orbis-sdk-v1/sdk/lib'
 LDLIBS='-Wl,--whole-archive /home/zpeirce/ps4-gladius/mesa-build/orbis-compat/build/liborbis-compat.a -Wl,--no-whole-archive
-  -lSceLibcInternal -lc -lkernel -lc++ -lc /home/zpeirce/ps4-gladius/sdk/orbis-sdk-v1/sdk/lib/crt1.o'
+  -lc -lkernel -lc++ /home/zpeirce/ps4-gladius/sdk/orbis-sdk-v1/sdk/lib/crt1.o'
 
 # Add the link half only when actually linking: -c/-S/-E produce no executable
 # and clang warns about unused link arguments, which configure reads as failure.
@@ -116,7 +110,7 @@ for a in "$@"; do
       # link did not. Measured on hardware 2026-10-07 (GLDS10006).
       exec clang $CFLAGS -nostdlib -shared -Wl,-z,max-page-size=0x4000 -Wl,-z,separate-loadable-segments -Wl,-m,elf_x86_64 \
         -Wl,--eh-frame-hdr -Wl,--no-rosegment -T "$EHLD" -T "$MPLD" -T "$IALD" $SHIMWRAPS -L"$SDKLIB" "$@" \
-        -Wl,--whole-archive "$OCLIB" $SHIMLIB -Wl,--no-whole-archive -lSceLibcInternal -lc -lkernel -lc++ -lSceNet -lc "$MPOBJ"
+        -Wl,--whole-archive "$OCLIB" $SHIMLIB -Wl,--no-whole-archive -lc -lkernel -lc++ -lSceNet "$MPOBJ"
       ;;
   esac
 done
