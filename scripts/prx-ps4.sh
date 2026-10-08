@@ -175,11 +175,20 @@ WOW_DBT="$root/src/pw_x86_engine.c $root/src/pw_x86_block.c $root/src/pw_x86_cac
          $root/src/pw_x86_hostexec.c $root/src/pw_x86_reencode.c $root/src/pw_x87.c
          $root/src/pw_guest_fp.c $root/src/pw_vm.c $root/src/pw_vm_posix.c"
 # shellcheck disable=SC2086
+# ⚠ -femulated-tls. unix.c keeps the translator's per-thread state in a
+# "static __thread", which in a shared object compiles to general-dynamic TLS
+# and calls the static libc's __tls_get_addr. That one returns NULL here, so
+# get_thread() read self as NULL and the DBT faulted on it the instant it began
+# translating guest code -- sixty thousand faults a second, each retried, which
+# is why the title span rather than crashed. Upstream's equivalent module links
+# emutls.o out of the PS5 SDK's libc; this SDK has none, so src/native supplies
+# the same entry point.
 $CC -shared -Wl,-Bsymbolic -Wl,-soname,wowprospero.prx \
+    -femulated-tls \
     -D__WINESRC__ -DWINE_UNIX_LIB -D_REENTRANT \
     -I"$root/wine/wowprospero" -I"$build/include" -I"$work/source/include" \
     -I"$root/src" -I"$root/include" \
-    "$root/wine/wowprospero/unix.c" $WOW_DBT "$prx/obj/wowprospero_desc.o" \
+    "$root/wine/wowprospero/unix.c" $WOW_DBT "$gladius/src/native/pw_emutls_ps4.c" "$prx/obj/wowprospero_desc.o" \
     -o "$prx/wowprospero.shared.elf" \
     > "$prx/wowprospero.link.log" 2>&1 || { echo "  ✗ wowprospero: link"; grep -E "error" "$prx/wowprospero.link.log" | head -3; }
 
