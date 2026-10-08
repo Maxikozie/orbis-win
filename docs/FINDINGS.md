@@ -2011,3 +2011,61 @@ view of it, and each cause was silent by design:
 library, no configuration and no network, so it still reports when the
 configured channel is itself the broken thing. The `_init` breadcrumb is
 permanent for that reason: four launches were spent blind for want of it.
+
+## Where it stands: dynamic TLS across modules (2026-10-07, end of day)
+
+Wine runs on the PS4. It completes `init_paths`, `virtual_init`,
+`init_environment`, `start_main_thread`, `virtual_alloc_first_teb` and
+`dbg_init`, and stops inside `server_init_process`:
+
+    PW_WINE64 fault signal=0xb addr=0x0 rip=0x800c99c4d
+      module=/app0/win/wine/lib/wine/x86_64-unix/wineserver.so
+      module_offset=0xf5c4d
+
+Symbolised, that is `strerror+0x13`, and the instruction is:
+
+    callq  __tls_get_addr
+    cmpq   $0x0, (%rax)        <-- rax is NULL
+
+**`__tls_get_addr` returns NULL in a PRX.** `strerror` only happens to be the
+victim: it reads musl's thread-local locale pointer. Anything touching dynamic
+TLS inside a module will fault the same way.
+
+### Why, and why it keeps coming back
+
+The SDK ships libc **only as a static archive**. Every PRX therefore carries a
+private libc with its own thread-local bookkeeping, and the thread running Wine
+was created by the *title's* libc. The module's `__tls_get_addr` consults a DTV
+its own copy never initialised for that thread.
+
+This is the fourth distinct failure from that one fact, and each looked
+unrelated:
+
+1. modules exported libc, so the eboot bound its C runtime to `ntdll.prx`
+2. the title's `setenv` and Wine's `getenv` used different environments
+3. `wineserver.prx` imported 123 libc symbols from `ntdll.prx`
+4. dynamic TLS has no valid DTV in a module
+
+### The options, none free
+
+- **Link the shared libc** (`libSceLibcInternal`, the stub for the `libc.prx`
+  the process already loads). This is almost certainly how PS5 avoids all four:
+  one libc, one TLS regime. Tried once and reverted -- it pulled 88 symbols
+  including `malloc`, `exit` and the `__cxa_*` family, and the title died with
+  `PRX_NOT_RESOLVED_FUNCTION`. Worth retrying now that the link order is fixed,
+  since that earlier attempt also had problem (3) in play.
+- **Force initial-exec TLS** (`-ftls-model=initial-exec`) so accesses skip
+  `__tls_get_addr`. Does not help here: `strerror` comes from the prebuilt
+  `libc.a`, which we cannot recompile.
+- **Supply our own `__tls_get_addr`** in each module, backed by that module's
+  own TLS segment. Self-contained, but it is a runtime-internals
+  reimplementation and would need care around thread creation and teardown.
+
+The first is the principled fix and the one to try next.
+
+### Worth keeping regardless
+
+`module=`/`module_offset=` in the emergency line is what made this findable at
+all; a bare `rip` named nothing once faults moved outside ntdll. Any address in
+a loaded module can now be symbolised against the unstripped `.shared.elf` kept
+in `.deps/wine-ps5/prx/`.
