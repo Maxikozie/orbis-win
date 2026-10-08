@@ -57,7 +57,7 @@ void pw_wow_log(const char *format, ...)
         (void)chmod(PW_WOW_LOG_DIR, 0777);
         if ((fd = open(PW_WOW_LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0666)) < 0) return;
     }
+    (void)fchmod(fd, 0666);   /* the title's umask masks the mode above */
     (void)!write(fd, line, (size_t)length);
     close(fd);
-    (void)chmod(PW_WOW_LOG_PATH, 0666);
 }

@@ -16,7 +16,7 @@ The arena is the one allocation on this console that has to end up executable,
 and a plain executable mapping is refused here: orbis_jit.c gets it by mapping
 direct memory read-write and protecting it afterwards. Which of the two calls
 diff --git a/native/pw_diagnostics.c b/native/pw_diagnostics.c
-index 3987663..6497390 100644
+index 3987663..b828677 100644
 --- a/native/pw_diagnostics.c
 +++ b/native/pw_diagnostics.c
 @@ -49,7 +49,7 @@ static void flush(void)
@@ -45,16 +45,19 @@ index 3987663..6497390 100644
      snprintf(index, sizeof(index), "%s/next.txt", directory);
      counter = open(index, O_RDONLY);
      if (counter >= 0) {
-@@ -123,7 +129,7 @@ int pw_diagnostics_open(const char *root, const char *build, const char *profile
+@@ -123,15 +129,18 @@ int pw_diagnostics_open(const char *root, const char *build, const char *profile
      snprintf(current, sizeof(current), "%s/session-%u.log", directory, next);
      snprintf(previous, sizeof(previous), "%s/session-%u.previous.log", directory, next);
      (void)unlink(previous);
 -    fd = open(current, O_WRONLY | O_CREAT | O_TRUNC, 0600);
 +    fd = open(current, O_WRONLY | O_CREAT | O_TRUNC, 0666);
      if (fd < 0) { disk_error = errno; goto out; }
++    /* ⚠ The mode above is masked by the title's umask, which leaves these 0600
++     * and unreadable over FTP however open-permissioned the directory is. */
++    (void)fchmod(fd, 0666);
      /* Identity repeats on rotation so a retained tail can be identified. */
      snprintf(identity, sizeof(identity), "PW_REPORT/1 build=%s profile=%s cycle=%u pid=%ld time=%lld\n",
-@@ -131,7 +137,7 @@ int pw_diagnostics_open(const char *root, const char *build, const char *profile
+              build ? build : "unknown", profile ? profile : "launcher", cycle,
               (long)getpid(), (long long)time(NULL));
      bytes = strlen(identity);
      if (put_all(fd, identity, bytes) != 0) { disk_error = errno; close(fd); fd = -1; goto out; }
@@ -272,7 +275,7 @@ index 549dbd4..a64d382 100644
               * first, which marks the process as exiting, so the call for
               * itself leaves through exit() and the host's exit handlers run
 diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
-index 01d21a5..560805c 100644
+index 01d21a5..9183927 100644
 --- a/wine/wowprospero/unix.c
 +++ b/wine/wowprospero/unix.c
 @@ -43,6 +43,16 @@
@@ -337,3 +340,30 @@ index 01d21a5..560805c 100644
  }
  
  static void release( void *base, size_t bytes )
+@@ -453,7 +483,25 @@ static struct pw_thread *get_thread(void)
+     int first, attempt;
+ 
+     if (thread) return thread;
+-    if (!(thread = calloc( 1, sizeof(*thread) ))) return NULL;
++    {
++        /* ⚠ One line per process, to prove this channel carries at all: a PRX
++         * other than ntdll has no stderr and no klog of its own, and every
++         * diagnostic added here was invisible until the log became a file. */
++        static int announced;
++        if (!announced++)
++            PW_WOW_NOTE( "wowprospero: translator starting, thread state %zu bytes\n",
++                         sizeof(*thread) );
++    }
++    if (!(thread = calloc( 1, sizeof(*thread) )))
++    {
++        /* ⚠ This returned NULL in silence, and the caller turns that into
++         * PW_ERR_VM with no fault address -- which reaches the log as
++         *     err:wow:BTCpuSimulate DBT error -9 ... fault address 0
++         * and looks exactly like the translator refusing guest memory. */
++        PW_WOW_NOTE( "wowprospero: no memory for %zu bytes of thread state\n",
++                     sizeof(*thread) );
++        return NULL;
++    }
+     first = !__atomic_load_n( &first_thread_ready, __ATOMIC_ACQUIRE );
+     if (pw_wow_host_backend( &thread->vm, &host_memory ) != PW_OK ||
+         (attempt = pw_wow_thread_fit( first, setup_thread, thread, &budget )) < 0)

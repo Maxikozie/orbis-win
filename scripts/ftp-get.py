@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Minimal FTP download for GoldHEN's server. Nothing optional is sent.
 
-  scripts/ftp-get.py <host> <port> <remote-path> <local-file> [user] [pass]
+  scripts/ftp-get.py <host> <port> <remote-path> <local-file|-> [user] [pass]
+
+A local file of "-" lists the remote path instead of fetching it (LIST).
 
 The sibling of ftp-put.py, and under the same rule: with no user given, NO
 LOGIN IS ATTEMPTED. GoldHEN's FTP server needs none, and an anonymous login is
@@ -98,10 +100,11 @@ def main() -> int:
 
         data = socket.create_connection((dhost, dport), timeout=15)
 
-        r = send(f"RETR {remote}")
+        verb = "LIST" if local == "-" else "RETR"
+        r = send(f"{verb} {remote}")
         if not r.startswith(("150", "125")):
             data.close()
-            raise Died(f"RETR refused: {r}")
+            raise Died(f"{verb} refused: {r}")
 
         chunks, got = [], 0
         while True:
@@ -111,8 +114,12 @@ def main() -> int:
             chunks.append(chunk)
             got += len(chunk)
         data.close()
-        with open(local, "wb") as fh:
-            fh.write(b"".join(chunks))
+        blob = b"".join(chunks)
+        if local == "-":
+            print(blob.decode("utf-8", "replace"))
+        else:
+            with open(local, "wb") as fh:
+                fh.write(blob)
         print(f"   got    {got} B")
 
         if not reply().startswith("226"):
