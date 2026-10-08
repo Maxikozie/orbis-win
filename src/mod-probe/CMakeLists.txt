@@ -1,0 +1,11 @@
+# Which PRX program type the module loader accepts. No graphics, no network.
+cmake_minimum_required(VERSION 3.16)
+project(gladius_mod_probe C)
+if(NOT DEFINED ORBIS_COMPAT_DIR OR NOT PS4)
+  message(FATAL_ERROR "configure with -DCMAKE_TOOLCHAIN_FILE=<bundle>/toolchain/orbis-sdk.cmake")
+endif()
+add_executable(modprobe mod_probe.c)
+orbis_compat_verify()
+if(COMMAND ps4_create_eboot)
+  ps4_create_eboot(modprobe)
+endif()

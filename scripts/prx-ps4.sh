@@ -89,7 +89,7 @@ done
 
 stubs=$prx/stubs; rm -rf "$stubs"; mkdir -p "$stubs"
 
-# ⚠ -ptype npdrm_dynlib. Without it create-fself stamps a library with the same
+# ⚠ -ptype fake. Without it create-fself stamps a library with the same
 # header as an executable (measured: eboot.bin and ntdll.prx were byte-identical
 # in their first 8 bytes), and the loader rejects it:
 #     load status=-2147352568 stage=1 module=0x80020008    (ENOEXEC)
@@ -139,7 +139,7 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
     then
         if "$oo/bin/linux/create-fself" -in "$prx/$name.shared.elf" \
                -out "$prx/$name.oelf" -lib "$prx/sce_module/$name.prx" \
-               -libname "$name.prx" -ptype npdrm_dynlib -library-path "$stubs:$oo/lib" >> "$log" 2>&1
+               -libname "$name.prx" -ptype fake -library-path "$stubs:$oo/lib" >> "$log" 2>&1
         then
             # Later modules import from this one. The linker needs lib<name>.so
             # to resolve -l style, and create-fself opens the DT_NEEDED name
@@ -172,7 +172,7 @@ $CC -shared -Wl,-Bsymbolic -Wl,-soname,wowprospero.prx \
 if [ -f "$prx/wowprospero.shared.elf" ]; then
     if "$oo/bin/linux/create-fself" -in "$prx/wowprospero.shared.elf" \
            -out "$prx/wowprospero.oelf" -lib "$prx/sce_module/wowprospero.prx" \
-           -libname "wowprospero.prx" -ptype npdrm_dynlib -library-path "$stubs:$oo/lib" \
+           -libname "wowprospero.prx" -ptype fake -library-path "$stubs:$oo/lib" \
            >> "$prx/wowprospero.link.log" 2>&1
     then echo "  ✓ wowprospero  $(du -h "$prx/sce_module/wowprospero.prx" | cut -f1)"
     else echo "  ✗ wowprospero: create-fself"; tail -3 "$prx/wowprospero.link.log" | sed 's/^/      /'; status=1; fi

@@ -29,6 +29,7 @@ case "$TARGET" in
   probe)    TITLE_ID=GLDS10002; TITLE="Gladius Probe";    SRC="$ROOT/src/probe" ;;
   present)  TITLE_ID=GLDS10003; TITLE="Prospero Presenter"; SRC="$ROOT/src/present-test" ;;
   fault)    TITLE_ID=GLDS10004; TITLE="Gladius Fault Probe"; SRC="$ROOT/src/fault-probe" ;;
+  modprobe) TITLE_ID=GLDS10006; TITLE="Gladius Module Probe"; SRC="$ROOT/src/mod-probe" ;;
   *) die "usage: build.sh {hello|triangle|probe|present} [--pkg] [--deploy] [--neo] [--dev-mesa]" ;;
 esac
 
@@ -136,6 +137,16 @@ if (( PKG )); then
   # this repository — see sce_module/README.md for taking them off your own
   # console. They are gitignored.
   EXTRA_FILES=()
+  # The module probe ships every PRX variant it tries, plus one copy in
+  # sce_module and one at the runtime path, so the program type and the
+  # directory are tested independently in a single run.
+  if [[ $TARGET == modprobe ]]; then
+    for v in "$ROOT"/build/prx-variants/*.prx; do
+      EXTRA_FILES+=(--extra "$v:variants/$(basename "$v")")
+    done
+    EXTRA_FILES+=(--extra "$ROOT/build/prx-variants/ntdll_fake.prx:sce_module/ntdll_fake.prx")
+    EXTRA_FILES+=(--extra "$ROOT/prospero-win/.deps/wine-ps5/prx/sce_module/ntdll.prx:win/wine/lib/wine/x86_64-unix/ntdll.prx")
+  fi
   for m in libc.prx libSceFios2.prx; do
     [[ -f "$ROOT/sce_module/$m" ]] ||
       die "missing sce_module/$m — see sce_module/README.md. Without it the title crashes with PRX_SCE_MODULE_LOAD_ERROR before main()."
