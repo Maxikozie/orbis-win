@@ -18,6 +18,9 @@
  * none of them). Presentation is its own problem; this gets the driver
  * loadable, which is what every part of the graphics stack is waiting on. */
 #include <vulkan/vulkan_core.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdlib.h>
 
 PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
 PFN_vkVoidFunction VKAPI_CALL vk_common_GetDeviceProcAddr(VkDevice device, const char *name);
@@ -30,4 +33,38 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *name)
 {
     return vk_common_GetDeviceProcAddr(device, name);
+}
+
+/* ⚠ strdup(NULL). RADV calls it during initialisation and this console's libc
+ * reads the argument with no check, so the process takes a fault at address 0
+ * inside libSceLibcInternal and the driver never reports what it was missing:
+ *
+ *     syscall fault 0xc0000005 at libSceLibcInternal.sprx+0x4fa4d, address 0
+ *       called from libvulkan.prx+0x1677e7f   -> strdup+0xf
+ *
+ * A NULL here means something RADV expected to be a string was not -- a device
+ * name, a path, an environment value -- and on this console environ is its own
+ * problem (docs/FINDINGS.md: setenv succeeds but never publishes it, and only
+ * ntdll links pw_prx_env_ps4.o). Answer NULL as a sane libc would, and say so
+ * once, so the next thing RADV reports is the missing value rather than a
+ * fault with no name on it.
+ *
+ * strdup is already defined strongly in this link -- the driver archive comes
+ * in whole -- so this goes through --wrap, the same way the cwd layer takes
+ * over its 28 calls, rather than trying to replace the definition. */
+char *__real_strdup(const char *text);
+
+char *__wrap_strdup(const char *text)
+{
+    extern int sceKernelDebugOutText(int channel, const char *line);
+    static int reported;
+
+    if (!text) {
+        if (reported < 4) {
+            reported++;
+            sceKernelDebugOutText(0, "libvulkan: strdup(NULL) refused\n");
+        }
+        return NULL;
+    }
+    return __real_strdup(text);
 }

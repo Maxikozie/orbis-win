@@ -63,6 +63,7 @@ printf '   %s weak symbols zeroed\n' "$(wc -l < "$work/mesa_optional_zero.ld")"
 
 echo "== 4. link =="
 $CC -shared -Wl,-Bsymbolic -Wl,--eh-frame-hdr -Wl,-soname,libvulkan.prx \
+    -Wl,--wrap=strdup \
     -Wl,-T,"$work/mesa_optional_zero.ld" -Wl,--warn-unresolved-symbols \
     -o "$prx/libvulkan.shared.elf" \
     "$work/obj/pw_vulkan_radv_ps4.o" "$work/obj/libvulkan_desc.o" \
