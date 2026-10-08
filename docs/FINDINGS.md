@@ -2721,3 +2721,57 @@ Two things made it safe to go straight to `d3d9=n`:
 * the `api-ms-win-crt-*` imports need no files -- Wine resolves them through its
   own API set map (`loader.c:get_apiset_entry`) -- and `setupapi.dll` and
   `vulkan-1.dll` are both already in the prefix.
+
+### The syscall fault, located (2026-10-08)
+
+Four diagnostics, each answering the next question, took it from a bare address
+to a named call chain:
+
+    syscall fault 0xc0000005 at libSceLibcInternal.sprx+0x51eca, address 2202daf860
+    syscall fault in syscall 0x147a (win32u #1146), return ip 6fffffe448a4
+    syscall fault called from libkernel.sprx+0x32aef
+    syscall fault called from win32u.prx+0x242393   -> NtUserCreateWindowStation+0xc3
+    syscall fault called from ntdll.prx+0xb58b2     -> stat_resolved+0x52
+
+win32u #1146 is `NtUserInitializeClientPfnArrays`, which USER32 calls during
+PROCESS_ATTACH. It runs `init_user()`, and the FreeType message appears directly
+before the fault because `gdi_init()` -> `font_init()` prints it, so the fault is
+in what follows -- `winstation_init()`, which is `NtUserCreateWindowStation`.
+
+Three steps were needed to get there and each is worth keeping:
+
+* **dladdr names only our own modules.** It is `pw_wine_dl`, which knows what it
+  opened or adopted, so a fault in Sony's code printed a bare address. The
+  kernel knows every module; `sceKernelGetModuleInfo` over
+  `sceKernelGetModuleList` names any of them.
+* **The module is not the call.** Every Wine path ends in libc eventually, so
+  `syscall_id` was needed to say which syscall was running -- its low bits index
+  the table, bit 12 picks win32u's over ntdll's.
+* **One module can bury the frame that matters.** The first stack walk capped at
+  three frames and spent all three inside libkernel -- `pthread_once`, which is
+  how `init_user` is entered. Reporting a module once and staying quiet until it
+  changes brought the Wine frames up.
+
+### What it points at, and the guard
+
+`stat_resolved` hands `r->full` to Sony's `stat`, which reads a path with no
+bound. Every such buffer is a `char[PW_CWD_PATH_MAX]` inside `struct resolved`,
+so reading that far is always in bounds -- what is not guaranteed is that
+anything wrote a terminator, and an unterminated buffer walks off the end of the
+mapping and faults inside libc, where it reads as a crash in a syscall rather
+than as a bad argument in our own code.
+
+`real_stat_full` and `real_lstat_full` now check for a terminator first and
+refuse with EINVAL, saying so once. ⚠ This is a hypothesis with a guard on it,
+not a diagnosis: the stack walk is a scan for code-shaped values, not an unwind,
+so `stat_resolved` may be a stale slot. If the guard never fires, the fault is
+elsewhere and the walk misled -- which the next run settles either way.
+
+### Fonts are absent, and the FreeType build is dead weight
+
+Separately, and not the cause of this crash: `init_freetype()` reaches FreeType
+only through `dlopen(SONAME_LIBFREETYPE)`, and there is no `.so` on this console,
+so it fails and fonts are unavailable. `build_wine_ps5.sh` builds
+`libfreetype.a` and passes it as `FREETYPE_LIBS`, but it is **not on win32u's
+link line** -- only Wine's own `freetype.o` is. The build step produces a library
+nothing links and nothing can reach.
