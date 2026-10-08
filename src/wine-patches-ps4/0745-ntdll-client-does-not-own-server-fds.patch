@@ -25,24 +25,51 @@ The 16 KiB rounding 0744 added stays -- the section is a host page wide (0102)
 and mapping it whole is correct either way.
 ---
 diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
-index 08cc7b0772..e59fef61c3 100644
+index ceb82e7182..5747dd9089 100644
 --- a/dlls/ntdll/unix/server.c
 +++ b/dlls/ntdll/unix/server.c
-@@ -2572,6 +2572,8 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE
-     /* the cache held a copy of the server's descriptor; here it held the
-      * server's own -- see server_get_unix_fd */
-     if (fd != -1) close( fd );
-+#else
-+    (void)fd;  /* evicted from the cache, but the server closes it */
- #endif
-     return ret;
- }
-@@ -2643,6 +2645,8 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
-     /* as above: evicting the cache entry does not close the server's own
-      * descriptor, which it closes with the object */
+@@ -1285,6 +1285,16 @@ int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+                     *needs_close = (!reply->cacheable ||
+                                     !add_fd_to_cache( handle, fd, reply->type,
+                                                       reply->access, reply->options ));
++#ifdef __PROSPERO__
++                    /* ⚠ This descriptor is the server's own, not a copy of it:
++                     * nothing can be duplicated on this console, so the server
++                     * hands the descriptor itself over (see wine_server_send_fd
++                     * and send_client_fd). Closing it here closes the server's,
++                     * and the next request for the same object answers with a
++                     * number that is no longer open. The server owns these and
++                     * closes them with the object. */
++                    *needs_close = 0;
++#endif
+                 }
+                 else ret = STATUS_TOO_MANY_OPENED_FILES;
+             }
+@@ -2105,7 +2115,13 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE
+ 
+     server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
+ 
++#ifndef __PROSPERO__
++    /* the cache held a copy of the server's descriptor; here it holds the
++     * server's own -- see server_get_unix_fd */
      if (fd != -1) close( fd );
 +#else
 +    (void)fd;
- #endif
++#endif
+     return ret;
+ }
+ 
+@@ -2170,7 +2186,13 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
+ 
+     server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
+ 
++#ifndef __PROSPERO__
++    /* as above: evicting the cache entry does not close the server's own
++     * descriptor, which it closes with the object */
+     if (fd != -1) close( fd );
++#else
++    (void)fd;
++#endif
  
      if (ret != STATUS_INVALID_HANDLE || !handle) return ret;
+     if (!peb->BeingDebugged) return ret;
