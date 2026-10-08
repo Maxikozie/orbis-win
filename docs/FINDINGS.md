@@ -2874,3 +2874,50 @@ is the environment route, but the profile only emits a fixed set of variables
 That is preferred over forcing `dxgi=n` to DXVK's: DXVK has no d3d12, so Wine's
 builtin d3d12 would still come back to wined3d and still want GL. Setting the
 renderer fixes the whole builtin stack at once.
+
+### Fonts: three gaps between a built library and a glyph (2026-10-08)
+
+With the Vulkan driver loading, GTA IV reached its own error dialog -- the
+first frames this port has ever put on screen, `frames_put=3 shown=1
+last=218x152` after an entire session at zero. The box was blank. Not a
+rendering fault: there were no fonts, and three separate things had to be true
+before there could be.
+
+**1. FreeType was built and went nowhere.** `build_wine_ps5.sh` compiles
+`libfreetype.a` and passes it to configure as `FREETYPE_LIBS`, but win32u's
+`freetype.c` reaches FreeType only through `dlopen(SONAME_LIBFREETYPE)` and
+`dlsym`, and the archive is not on win32u's link line at all. Every run since
+the beginning reported
+
+    Wine cannot find the FreeType font library.
+
+`scripts/freetype-prx-ps4.sh` puts the archive behind a PRXDESC1 descriptor, as
+`radv-prx-ps4.sh` does for the driver. The entry points are read from
+`freetype.c`'s own `LOAD_FUNCPTR` lines rather than a list kept in the script --
+all 31 verified present in the archive -- so a name added upstream cannot
+quietly become a NULL pointer at run time.
+
+⚠ The `FT_*` symbols come out `t`, not `T`, which looks like a failed export and
+is not one: a PRXDESC entry stores the address, so local binding is irrelevant.
+
+**2. The prefix had no fonts.** `drive_c/windows/Fonts` was empty, so a working
+FreeType would still have had nothing to open. Wine's build ships six TTFs;
+they are now in the prefix.
+
+**3. The registry pointed at this machine.** With both of those done the message
+changed, which is how the third showed itself:
+
+    font:select_font can't find a single appropriate font - bailing
+
+Both hives registered every font by its **host build path through the Z: drive**:
+
+    "Tahoma (TrueType)"="Z:\home\zpeirce\ps4-gladius\prospero-win\.deps\
+                         wine-host\install\usr\share\wine\fonts\tahoma.ttf"
+
+which is where the files sat when the prefix was created here, and nowhere at
+all on the console. 18 entries across `user.reg` and `system.reg`, rewritten to
+`C:\windows\Fonts\`.
+
+⚠ Worth remembering for any prefix built on the host: **`wineboot` records
+absolute host paths**, and they survive the push. Fonts are the instance found;
+anything else registered by path has the same problem waiting.
