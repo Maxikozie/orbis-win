@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Date: Thu, 8 Oct 2026 10:55:00 +0000
+Subject: [PATCH] ntdll: the client does not own the descriptors the server sends.
+
+0744 added errno to the failure and it answered a different question than the
+one asked:
+
+    failed to remap the process USD: 0 errno 9 size 1848 host_page 16384
+
+errno 9 is EBADF. The length was never the problem -- the descriptor was.
+
+server_get_unix_fd hands the caller a descriptor and a needs_close telling it to
+close it afterwards, which is right when the server sent a duplicate. Nothing
+can be duplicated on this console, so send_client_fd hands over the descriptor
+itself (0737, 0738), and closing it closes the server's. The user shared data
+shows it plainly: virtual_map_user_shared_data maps the section, closes the
+descriptor on its way out, and the next caller asks the server for the same
+object and gets a number that is no longer open.
+
+The server owns these and closes them with the object, so the client closes
+none of them: not on needs_close, and not when a cache entry is evicted.
+
+The 16 KiB rounding 0744 added stays -- the section is a host page wide (0102)
+and mapping it whole is correct either way.
+---
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 08cc7b0772..e59fef61c3 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -2572,6 +2572,8 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE
+     /* the cache held a copy of the server's descriptor; here it held the
+      * server's own -- see server_get_unix_fd */
+     if (fd != -1) close( fd );
++#else
++    (void)fd;  /* evicted from the cache, but the server closes it */
+ #endif
+     return ret;
+ }
+@@ -2643,6 +2645,8 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
+     /* as above: evicting the cache entry does not close the server's own
+      * descriptor, which it closes with the object */
+     if (fd != -1) close( fd );
++#else
++    (void)fd;
+ #endif
+ 
+     if (ret != STATUS_INVALID_HANDLE || !handle) return ret;
