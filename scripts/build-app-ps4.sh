@@ -102,7 +102,21 @@ say "link"
 # -- the loader having added its own bias on top of ours. Moving the title needs
 # ET_EXEC, not a different base. pw_dso_handle_ps4.c stays: it is what lets the
 # image link anywhere at all, and is needed whichever way that is done.
-$CC -o "$OBJ/../wine_app.elf" "$OBJ"/*.o \
+# ⚠ ET_EXEC at 0x200000000, out of the guest's reach.
+#
+# The kernel loads a PIE at 0x400000, which is where a 32-bit Windows image is
+# based -- and one with its relocations stripped, as Oblivion.exe's are, cannot
+# go anywhere else:
+#     wine: failed to create main module ... status c0000018
+#                                               (STATUS_CONFLICTING_ADDRESSES)
+# Clearing only the low 2 GiB is not enough either: that executable is
+# LARGE_ADDRESS_AWARE and may use the whole 4 GiB under WoW64.
+#
+# A base in the ELF does not move a PIE -- the loader adds its own bias on top
+# and the title died on an unmapped page -- so this links as ET_EXEC, which the
+# loader has to honour, and create-fself accepts one. pw_dso_handle_ps4.c is
+# what lets the image be based anywhere at all.
+PW_NO_PIE=1 $CC -o "$OBJ/../wine_app.elf" "$OBJ"/*.o -Wl,--image-base=0x200000000 \
     -lSceNet -lSceAudioOut -lSceSystemService -lSceVideoOut -lScePad -lSceUserService
 printf '   elf %s\n' "$(du -h "$OBJ/../wine_app.elf" | cut -f1)"
 
