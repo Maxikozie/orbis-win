@@ -140,6 +140,16 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
     [ -n "$objs" ] || { echo "  ✗ $name: no ELF link in make.log"; status=1; continue; }
     shim_objs=""
     [ "$name" = ntdll ] && shim_objs="$heap $dmem $prx/obj/pw_prx_env_ps4.o"
+    # ⚠ The server needs the heap too, and upstream says so: pw_wine_heap_libc.c
+    # reads "the in-process wineserver links its own copy". Only ntdll got it
+    # here, so wineserver kept importing malloc from the shared libc -- the very
+    # allocator pw_wine_heap exists to escape, which stops near 13 MiB. It ran
+    # out mid-game: 52 bytes refused after 100565 calls and 10322 KiB asked,
+    # which the client sees as STATUS_NO_MEMORY from open_unix_file and the
+    # loader reports as GTA IV's 30th DLL onwards failing to load. Its own copy,
+    # as upstream intends; pw_wine_heap takes its memory from anonymous mmap in
+    # 1 MiB pieces, so the server draws on flexible memory instead.
+    [ "$name" = wineserver ] && shim_objs="$heap"
     for s in $shims; do shim_objs="$shim_objs $prx/obj/$s.o"; done
     # stubs go through the shim so they land after orbis-compat and -lc
     export PW_PRX_STUBS="-L$stubs -Wl,--as-needed $(ls "$stubs"/*.so 2>/dev/null | tr '\n' ' ')"

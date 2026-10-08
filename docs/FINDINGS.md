@@ -2588,3 +2588,70 @@ that survived -- upper case fails, lower case works -- was real but was a
 consequence, and would have sent anyone into Wine's case folding, which was
 correct the whole time. Check what the repo already measured: the answer had
 been sitting in a comment in the launcher.
+
+## The server was the last component on the console's own allocator (2026-10-08)
+
+With the getdents fix in, GTA IV resolved its imports and reached 30 modules --
+and then every further builtin was refused with `STATUS_NO_MEMORY`. wmvcore,
+powrprof, oleaut32, dinput8, wintrust, shell32, and the set moved between runs.
+
+### Four wrong answers, and what each cost
+
+The symptom pointed in several plausible directions and I followed three of them
+before instrumenting properly. Recording them because each looked right:
+
+* **The 64 KiB dirents malloc.** The getdents fix allocated a whole directory
+  block per lookup, and this console's libc refuses allocations that size. A
+  real defect -- the launcher has always kept that buffer `static` -- and fixed,
+  but not this. Patch 0872 reported **zero** refused scans afterwards.
+* **The reserved-area budget.** An image view can only be placed inside a
+  reserved area here, so a short reservation would look exactly like this.
+  Patch 0873 printed the areas on the first unplaceable image and never fired:
+  the image was never reaching `map_image_view` at all.
+* **The listing cache.** `read_names` previously failed on every call, so
+  nothing was ever cached; making it work gave `pw_wine_heap` a tenant it never
+  had. The heap counters answered flatly: **181 KiB live, 1184 KiB mapped,
+  zero failures** at the moment of refusal.
+* **A single large block.** The libc allocator refuses sizeable blocks outright
+  (`calloc` of 145 KiB answers EINVAL), so the refusal might have been one big
+  request rather than exhaustion. This is why the server was instrumented
+  instead of simply being moved to the other heap -- the two need different
+  fixes and look identical from the client.
+
+### The answer
+
+Patch 0875 put the report at the source, in the server's `mem_alloc`:
+
+    wineserver: mem_alloc refused 52 bytes (errno 0) after 100565 calls,
+                10322 KiB asked
+
+**52 bytes.** Not a large block: the arena was simply full, at the ~13 MiB
+ceiling `pw_wine_heap.h` documents for the title's libc.
+
+`scripts/prx-ps4.sh` linked that heap into **ntdll alone**:
+
+    [ "$name" = ntdll ] && shim_objs="$heap $dmem $prx/obj/pw_prx_env_ps4.o"
+
+so `wineserver.shared.elf` carried `U malloc`, `U calloc`, `U realloc`, `U free`
+and took them from the shared libc -- the exact allocator `pw_wine_heap` exists
+to escape. `-Bsymbolic` and archive semantics hid it: `malloc` resolved
+dynamically to the shared libc, so the `pw_wine_heap_libc.o` member in
+`libwineshim.a` was never pulled.
+
+Upstream had already said what to do. `wine/ps5/pw_wine_heap_libc.c`, first
+paragraph:
+
+> ntdll.so links this file and exports it, so win32u.so binds its malloc family
+> to the same heap; **the in-process wineserver links its own copy**.
+
+The PS4 PRX script simply never implemented that half. It does now;
+`pw_wine_heap` takes its memory from anonymous `mmap` in 1 MiB pieces, so the
+server draws on the title's flexible memory rather than a fixed 13 MiB arena.
+
+### The lesson
+
+Instrument the component that sets the error, not the one that reports it. The
+status surfaced in ntdll, three call layers from where it was decided, and every
+theory formed on the client side was wrong. One line in the server's allocator
+answered it outright -- and the fix was a sentence in a header comment that had
+been there all along.
