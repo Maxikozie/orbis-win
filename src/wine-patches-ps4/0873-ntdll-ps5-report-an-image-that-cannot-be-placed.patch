@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] ntdll: Report an image that cannot be placed on ps5.
+
+GTA IV now resolves its imports and loads 29 modules, packed downwards
+from 0x7bfe7000, and then cannot place SHELL32, OLEAUT32, DINPUT8,
+WINTRUST or WMVCore: STATUS_NO_MEMORY, while the 32-bit address space
+below them looks 1.6 GiB free and only 38 MiB of images are mapped. The
+set that fails moves between runs, which is the shape of a budget being
+reached rather than a particular module being wrong.
+
+An image view can only be placed inside a reserved area here, so what was
+actually reserved is the whole budget. reserve_area halves on refusal and
+reserves around whatever is already mapped, and says nothing when it ends
+up with a fraction of what it was asked for -- patch 0895 asks for
+0x68000000-0x7f000000, and whether it got it has never been checked.
+
+Print the reserved areas once, the first time a view cannot be placed, by
+which point every reservation has been made, and name the request that
+failed: its size, its preferred base, the limits it was given and the
+WoW64 user-space limit. The arithmetic then settles whether the budget is
+short or the search is refusing space it has.
+
+Diagnostic only; no behaviour changes.
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 2cf071d0e2..1091901bad 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -337,6 +337,45 @@ struct reserved_area
+ 
+ static struct list reserved_areas = LIST_INIT(reserved_areas);
+ 
++#ifdef __PROSPERO__
++/* ⚠ DIAGNOSTIC. An image view can only be placed inside a reserved area on
++ * this console, so what was actually reserved is the whole budget for a
++ * game's DLLs. reserve_area halves and reserves around whatever is already
++ * mapped, and says nothing when it ends up with a fraction of what it was
++ * asked for. GTA IV loads 29 modules packed downwards from 0x7bfe7000 and
++ * then cannot place SHELL32 or OLEAUT32 -- STATUS_NO_MEMORY, with 1.6 GiB of
++ * address space apparently free below them -- so print what is really there,
++ * once, the first time a view cannot be placed, by which point every
++ * reservation has been made. */
++static void pw_dump_reserved_areas(void)
++{
++    extern int sceKernelDebugOutText( int channel, const char *text );
++    static int dumped;
++    struct reserved_area *area;
++    unsigned long long total = 0, low = 0;
++    char line[160];
++
++    if (dumped) return;
++    dumped = 1;
++    LIST_FOR_EACH_ENTRY( area, &reserved_areas, struct reserved_area, entry )
++    {
++        unsigned long long base = (unsigned long long)(ULONG_PTR)area->base;
++        unsigned long long size = (unsigned long long)area->size;
++
++        total += size;
++        if (base < 0x80000000ull)
++            low += (base + size <= 0x80000000ull) ? size : 0x80000000ull - base;
++        snprintf( line, sizeof(line), "wine: reserved %012llx-%012llx  %llu KiB\n",
++                  base, base + size, size / 1024 );
++        sceKernelDebugOutText( 0, line );
++    }
++    snprintf( line, sizeof(line),
++              "wine: reserved total %llu KiB, below 2 GiB %llu KiB\n",
++              total / 1024, low / 1024 );
++    sceKernelDebugOutText( 0, line );
++}
++#endif
++
+ struct builtin_module
+ {
+     struct list  entry;
+@@ -3714,7 +3753,24 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
+ 
+     /* then any suitable address */
+ 
++#ifdef __PROSPERO__
++    {
++        static int reported;
++        NTSTATUS last = map_view( view_ret, NULL, size, top_down ? MEM_TOP_DOWN : 0,
++                                  vprot, limit_low, limit_high, 0 );
++        if (last && reported < 8)
++        {
++            reported++;
++            pw_dump_reserved_areas();
++            ERR( "ps5 image unplaced: %u KiB wanted base %p, limits %p-%p, wow limit %p -> %x\n",
++                 (unsigned int)(size / 1024), base, (void *)limit_low, (void *)limit_high,
++                 (void *)get_wow_user_space_limit(), (unsigned int)last );
++        }
++        return last;
++    }
++#else
+     return map_view( view_ret, NULL, size, top_down ? MEM_TOP_DOWN : 0, vprot, limit_low, limit_high, 0 );
++#endif
+ }
+ 
+ 
