@@ -67,6 +67,7 @@ gen() { python3 "$root/tools/gen_prx_descriptor.py" "$@"; }
 gen "$prx/obj/ntdll_desc.c" \
     __wine_main pw_wine_dl_adopt dlopen dlsym dlerror \
     pw_wine_heap_stats pw_wine_heap_malloc pw_wine_heap_free \
+    pw_wine_heap_calloc pw_wine_heap_realloc pw_wine_heap_memalign \
     pw_wine_set_present_sink pw_wine_post_input pw_wine_sink_stats \
     pw_wine_present pw_wine_next_input pw_wine_input_fd \
     pw_wine_set_pad pw_wine_rumble pw_wine_pad pw_wine_set_rumble \
@@ -150,6 +151,25 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
     # as upstream intends; pw_wine_heap takes its memory from anonymous mmap in
     # 1 MiB pieces, so the server draws on flexible memory instead.
     [ "$name" = wineserver ] && shim_objs="$heap"
+    # ⚠ And every other unixlib gets the forwarding half alone. Without it they
+    # import malloc and free from the shared libc, while anything they are
+    # handed by ntdll came from pw_wine_heap -- and the two allocators do not
+    # know each other. NtUserCreateWindowStation is the one that found this:
+    # wine_server_alloc_object_attributes() allocates in ntdll, win32u frees it,
+    # and libc's free walked into a block it had never issued and faulted inside
+    # libSceLibcInternal, where it read as a crash in a win32u syscall.
+    #
+    # pw_wine_heap_libc.c says this is how it should be -- "ntdll.so links this
+    # file and exports it, so win32u.so binds its malloc family to the same
+    # heap" -- but on PS4 exports come from the PRXDESC descriptor, not the
+    # symbol table, so that binding never happened. Linking the forwarding half
+    # locally gets it instead, and keeps one heap rather than one per module:
+    # the libc names resolve here, the pw_wine_heap_* entry points they call
+    # resolve to ntdll.
+    case $name in
+    ntdll|wineserver) ;;
+    *) shim_objs="$prx/heap/pw_wine_heap_libc.o" ;;
+    esac
     for s in $shims; do shim_objs="$shim_objs $prx/obj/$s.o"; done
     # stubs go through the shim so they land after orbis-compat and -lc
     export PW_PRX_STUBS="-L$stubs -Wl,--as-needed $(ls "$stubs"/*.so 2>/dev/null | tr '\n' ' ')"

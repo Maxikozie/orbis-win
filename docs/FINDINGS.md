@@ -2775,3 +2775,64 @@ so it fails and fonts are unavailable. `build_wine_ps5.sh` builds
 `libfreetype.a` and passes it as `FREETYPE_LIBS`, but it is **not on win32u's
 link line** -- only Wine's own `freetype.o` is. The build step produces a library
 nothing links and nothing can reach.
+
+## The unixlibs were freeing ntdll's memory with libc's free (2026-10-08)
+
+The guard on unterminated paths never fired, which killed that hypothesis and
+also showed why it was wrong: the ntdll frame in the stack walk moved between
+runs (`0xb58b2` then `0x239400`), so `stat_resolved` had been a stale slot. The
+walk scans for code-shaped values; it does not unwind. What stayed put across
+every run was `win32u.prx+0x242393`, and a return address is the instruction
+after a call, so the disassembly settles it outright:
+
+    24238e:  e8 cd a7 01 00   call 25cb60 <free@plt>
+    242393:  48 89 d8         mov %rbx,%rax        <- the faulting return address
+
+`NtUserCreateWindowStation` calls `free()`, and free faults inside Sony's libc.
+The function is eight lines long and says the rest:
+
+    wine_server_alloc_object_attributes( attr, &objattr, &len );   /* ntdll */
+    SERVER_START_REQ( create_winstation ) ... SERVER_END_REQ;
+    free( objattr );                                               /* win32u */
+
+`wine_server_alloc_object_attributes` lives in ntdll and allocates from
+`pw_wine_heap`. `free` in win32u bound to the **shared libc**, which had never
+issued that block, and walked into it.
+
+### Why the binding was wrong
+
+`pw_wine_heap_libc.c` describes the arrangement that was supposed to hold:
+
+> ntdll.so links this file and exports it, so win32u.so binds its malloc family
+> to the same heap; the in-process wineserver links its own copy.
+
+On PS4 that export never happens. `scripts/prx-ps4.sh` says so at the top --
+exports come from the generated PRXDESC1 descriptor, **not** from the .so's
+dynamic symbol table -- and the descriptor lists `pw_wine_heap_malloc` and
+`pw_wine_heap_free`, not `malloc` and `free`. ntdll.shared.elf defines both as
+`T` symbols and exports neither, so every other unixlib kept importing them from
+libc. Measured before the fix:
+
+    win32u.shared.elf:  U calloc  U free  U malloc  U realloc,  none defined
+
+Adding the libc names to the descriptor does not work: the generator emits
+`extern char malloc[];`, which is a redefinition as a different kind of symbol
+against the real prototypes. Linking `pw_wine_heap.o` into each module would
+work for the link and be wrong at runtime -- one heap per module, and this bug
+is precisely a block crossing a module boundary.
+
+What does work is the forwarding half alone. Every unixlib but ntdll and
+wineserver now links `pw_wine_heap_libc.o`, so the libc names resolve locally
+and the `pw_wine_heap_*` entry points they call resolve to ntdll: one heap, as
+intended. `pw_wine_heap_calloc`, `_realloc` and `_memalign` joined the export
+list, being pw_-prefixed and safe to declare. Verified after:
+
+    win32u  libc-imports=0  defines=4  heap-imports=2
+    win32u's free:  jmp pw_wine_heap_free@plt
+
+### The shape of this one
+
+This is the third heap-boundary bug in a day, and the third time the answer was
+a sentence already written in the tree. The server had the same asymmetry, found
+the same way. Worth asking of any new module: **which allocator does it bind,
+and who allocated what it frees?**
