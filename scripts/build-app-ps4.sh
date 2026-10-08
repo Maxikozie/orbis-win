@@ -157,6 +157,16 @@ if (( PKG )); then
   # They come debug-stripped from the host build's install tree, which is what
   # keeps this near upstream's 515 MiB rather than the 1.3 GB it builds as.
   PELIB=$PW/.deps/wine-host/install/usr/lib/wine
+  # The WoW64 CPU backend's PE side is not part of Wine: prx-ps4.sh builds only
+  # its Unix half. Without the PE half Wine builds a builtin module out of the
+  # PRX alone, finds no DllMain in it, and stops with
+  #     err:wow:load_64bit_module failed to load dll c0000142
+  if [ ! -f "$PELIB/x86_64-windows/wowprospero.dll" ]; then
+    echo "   X no wowprospero.dll in the PE runtime" >&2
+    echo "     sh prospero-win/tools/build_wowprospero.sh --build .deps/wine-host/build --source .deps/wine-host/source" >&2
+    echo "     then strip it and copy it into $PELIB/x86_64-windows/" >&2
+    exit 1
+  fi
   for arch in i386-windows x86_64-windows; do
     if [ ! -d "$PELIB/$arch" ]; then
       echo "   ✗ no PE runtime at $PELIB/$arch" >&2
