@@ -2364,3 +2364,48 @@ is fixed:
 The anchor is the one to remember: module bases move between runs, and a clean
 exit leaves no crash dump to derive them from. `base = anchor - <symbol offset
 in the unstripped .shared.elf>`; both anchors agreed on 0x800b3c000 tonight.
+
+### The title cannot be moved off 0x400000, and that is where 32-bit games live
+
+A 32-bit Windows executable is based at `0x400000`. Where its relocations are
+stripped — `IMAGE_FILE_RELOCS_STRIPPED`, which is the norm for pre-2008 games,
+Oblivion.exe among them — it cannot be loaded anywhere else, and Wine says so:
+
+```
+wine: failed to create main module for "C:\Games\Oblivion\Oblivion.exe",
+      status c0000018            (STATUS_CONFLICTING_ADDRESSES)
+```
+
+The console loads this title at `0x400000` too, spanning `0x400000-0x55c000`.
+Three ways to move it were measured, and none works:
+
+- **A base in the ELF does not move a PIE.** The loader adds its own bias on
+  top of it. A title based at `0x200000000` was entered at `0x400479_0a8` —
+  `0x200000000 + 0x200000000 + 0x400000 + entry` — and died on an unmapped page.
+- **ET_EXEC is refused outright**, at any address. `0x200000000`,
+  `0x100000000` and `0x400000` all end the same way, with the loader placing
+  the image correctly and then failing to read the process parameter block out
+  of it:
+  `### copyin=0xe uaddr=0x49c860` then `0xa0020105 PRX_INVALID_IMAGE`. `0xe` is
+  EFAULT and the address is inside the title's own data segment each time, so
+  the base was honoured and the ELF type is what the loader cannot take.
+- **Nothing asks for a load address.** `create-fself` has no such option
+  (`-ptype` is constrained to `fake` anyway), and the process parameter block
+  has no such field — its four unknown slots are zero in the SDK's own object,
+  and `orbis_sce_params.h` warns against inventing a meaning for them.
+
+Clearing only the low 2 GiB would not have been enough regardless:
+Oblivion.exe is `LARGE_ADDRESS_AWARE`, so under WoW64 it may use the whole
+4 GiB.
+
+**What still works:** any game whose image carries relocations. Wine maps it
+elsewhere and patch 0130's `STATUS_IMAGE_NOT_AT_BASE` arm already forgives the
+move. The limit is specific to stripped-relocation images based inside
+`0x400000-0x55c000`.
+
+**The remaining idea, untried:** move every line of the title's own code into a
+PRX, which loads high, and leave the eboot a stub that does nothing but load it
+and call in. Then unmap `0x400000` from inside the PRX once control has
+transferred. Whether the loader tolerates the main image being unmapped is
+unknown, and the libc parameter block lives in the eboot's data, so Sony's libc
+may follow a pointer into it later.

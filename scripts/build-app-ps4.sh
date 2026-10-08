@@ -116,7 +116,7 @@ say "link"
 # and the title died on an unmapped page -- so this links as ET_EXEC, which the
 # loader has to honour, and create-fself accepts one. pw_dso_handle_ps4.c is
 # what lets the image be based anywhere at all.
-PW_NO_PIE=1 $CC -o "$OBJ/../wine_app.elf" "$OBJ"/*.o -Wl,--image-base=0x400000 \
+$CC -o "$OBJ/../wine_app.elf" "$OBJ"/*.o \
     -lSceNet -lSceAudioOut -lSceSystemService -lSceVideoOut -lScePad -lSceUserService
 printf '   elf %s\n' "$(du -h "$OBJ/../wine_app.elf" | cut -f1)"
 
