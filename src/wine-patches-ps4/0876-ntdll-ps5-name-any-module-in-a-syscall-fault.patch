@@ -26,7 +26,7 @@ expect; this says so rather than assuming it.
 Diagnostic only; no behaviour changes.
 
 diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
-index 2956c64e1c..4a8aa87ec6 100644
+index 2956c64e1c..491f702643 100644
 --- a/dlls/ntdll/unix/signal_x86_64.c
 +++ b/dlls/ntdll/unix/signal_x86_64.c
 @@ -2151,6 +2151,56 @@ static BOOL check_atl_thunk( struct thread_data *data, ucontext_t *sigcontext,
@@ -86,7 +86,7 @@ index 2956c64e1c..4a8aa87ec6 100644
  /***********************************************************************
   *           handle_syscall_fault
   *
-@@ -2183,18 +2233,67 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *sigconte
+@@ -2183,18 +2233,77 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *sigconte
           * success: user32 took STATUS_ACCESS_VIOLATION for a class atom. */
          void *where = context->Rip ? (void *)context->Rip : context->Rsp ? *(void **)context->Rsp : NULL;
          Dl_info info;
@@ -135,15 +135,25 @@ index 2956c64e1c..4a8aa87ec6 100644
 +
 +        if (!faulted || !pw_module_at( faulted, faulting, sizeof(faulting), &faultoff ))
 +            faulting[0] = 0;
++        /* Report a module the first time it appears and then stay quiet until it
++         * changes: the frames below the fault are a long run inside Sony's own
++         * libkernel -- pthread_once among them, which is how win32u's init_user
++         * is entered -- and printing each of those crowds out the Wine frame
++         * above them, which is the one worth having. */
 +        if (slot && !((ULONG_PTR)slot & 7))
 +        {
-+            for (i = 0; i < 128 && shown < 3; i++)
++            char previous[256];
++
++            previous[0] = 0;
++            for (i = 0; i < 512 && shown < 8; i++)
 +            {
 +                const void *candidate = (const void *)slot[i];
 +
 +                if ((ULONG_PTR)candidate < 0x10000) continue;
 +                if (!pw_module_at( candidate, callername, sizeof(callername), &calleroff )) continue;
 +                if (faulting[0] && !strcmp( callername, faulting )) continue;
++                if (!strcmp( callername, previous )) continue;
++                snprintf( previous, sizeof(previous), "%s", callername );
 +                shown++;
 +                ERR_(seh)( "syscall fault called from %s+%#lx\n", callername, calleroff );
 +            }
