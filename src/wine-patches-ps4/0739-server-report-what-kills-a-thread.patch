@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Date: Thu, 8 Oct 2026 08:10:00 +0000
+Subject: [PATCH] server: report what kills a thread or a process.
+
+With the descriptor handover done, ntdll now reaches the server and dies on a
+request instead:
+
+    start_main_thread -> wine_server_call -> server_call_unlocked
+                      -> abort_thread   (SIGSYS)
+
+That is the branch a direct call takes when the request handler left the thread
+without a reply pipe -- the server killed it while serving the request. Which
+handler, and why, is not recorded anywhere: the thread simply stops having a
+reply pipe, and every route from there ends in abort_thread, whose SIGSYS is
+uncatchable and takes the title down.
+
+Both ways a client loses its reply pipe now say so through klog, with the
+address that asked for the kill and this function's own address to resolve it
+against -- module bases move between runs, and a title that dies this way
+leaves no usable crash dump of the server's own frames.
+---
+diff --git a/server/process.c b/server/process.c
+index a0d95f4d38..49211ef01d 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -1031,6 +1031,19 @@ void resume_process( struct process *process )
+ /* kill a process on the spot */
+ void kill_process( struct process *process, int violent_death )
+ {
++#ifdef __PROSPERO__
++    /* ⚠ DIAGNOSTIC -- see kill_thread. This is the other way a client's
++     * reply pipe disappears: a protocol error on the process socket. */
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        char line[160];
++        snprintf( line, sizeof(line),
++                  "wineserver: kill_process %04x violent=%d from %p (anchor %p)\n",
++                  process->id, violent_death,
++                  __builtin_return_address(0), (void *)(uintptr_t)&kill_process );
++        sceKernelDebugOutText( 0, line );
++    }
++#endif
+     if (!violent_death && process->msg_fd)  /* normal termination on pipe close */
+     {
+         release_object( process->msg_fd );
+diff --git a/server/thread.c b/server/thread.c
+index 32afbe9653..7395019835 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -1682,6 +1682,24 @@ int thread_get_inflight_fd( struct thread *thread, int client )
+ void kill_thread( struct thread *thread, int violent_death )
+ {
+     if (thread->state == TERMINATED) return;  /* already killed */
++#ifdef __PROSPERO__
++    /* ⚠ DIAGNOSTIC. A killed thread loses its reply pipe, and every way the
++     * client then learns of it -- end of file on the pipe, or status 2 from a
++     * direct call -- ends in abort_thread, which raises the uncatchable SIGSYS
++     * and takes the title down with no indication of what decided to kill it.
++     * Name the caller. Module bases move, so print this function's own address
++     * too: base = (anchor) - (kill_thread's offset in the unstripped
++     * .shared.elf), which makes the return address resolvable. */
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        char line[160];
++        snprintf( line, sizeof(line),
++                  "wineserver: kill_thread %04x exit=%d violent=%d from %p (anchor %p)\n",
++                  thread->id, thread->exit_code, violent_death,
++                  __builtin_return_address(0), (void *)(uintptr_t)&kill_thread );
++        sceKernelDebugOutText( 0, line );
++    }
++#endif
+     thread->state = TERMINATED;
+     thread->exit_time = current_time;
+     if (current == thread) current = NULL;
