@@ -102,9 +102,17 @@ if (( PKG )); then
   # The file is gitignored; it holds this workstation's address.
   [ -f "$ROOT/build/devconf/dev.conf" ] && EXTRA+=(--extra "$ROOT/build/devconf/dev.conf:dev.conf")
 
-  # The Wine runtime: eight PRX modules the title dlopens through pw_wine_dl.
+  # ⚠ The Wine modules go to win/wine/lib/wine/x86_64-unix, NOT sce_module.
+  # wine64_main.c:64 PW_WINE64_RUNTIME "/win/wine/lib/wine/x86_64-unix", searched
+  # under /app0 and the sandbox app0. Measured 2026-10-07: with them in
+  # sce_module the title found the library and listed the game, then failed to
+  # start it with
+  #     runtime not at /app0/win/wine/lib/wine/x86_64-unix
+  #     load status=-2147352574 stage=1 module=0x80020002   (ENOENT)
+  # sce_module keeps Sony's libc.prx and libSceFios2.prx, which the loader does
+  # require there.
   for m in "$PRX"/sce_module/*.prx; do
-    EXTRA+=(--extra "$m:sce_module/$(basename "$m")")
+    EXTRA+=(--extra "$m:win/wine/lib/wine/x86_64-unix/$(basename "$m")")
   done
   printf '   modules: %s\n' "$(ls "$PRX"/sce_module/ | tr '\n' ' ')"
   "$BUNDLE/orbis-compat/scripts/ps4/make-pkg.sh" --eboot "$OBJ/../eboot.bin" --out-dir "$OUT" \
