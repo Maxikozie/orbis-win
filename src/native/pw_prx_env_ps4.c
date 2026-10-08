@@ -16,13 +16,34 @@
  *
  * Exported through the module's PRXDESC1 descriptor (scripts/prx-ps4.sh), and
  * also the reason setenv is pulled into the module at all -- nothing else in
- * ntdll calls it, so it would otherwise be absent from the static libc copy. */
+ * ntdll calls it, so it would otherwise be absent from the static libc copy.
+ *
+ * ⚠ DIAGNOSTIC. Wine reads `environ` directly (get_initial_environment), and it
+ * faulted at NULL there with the title reporting environment status=0 -- which
+ * only covers the title's own setenv, never this one. Report what setenv did to
+ * this module's environ, so "never called" and "called and did not take" stop
+ * looking alike. */
 #include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+extern char **environ;
+int sceKernelDebugOutText(int channel, const char *text);
 
 int pw_ps4_setenv(const char *name, const char *value);
 
 int pw_ps4_setenv(const char *name, const char *value)
 {
+    int status;
+    char line[200];
+    size_t count = 0;
+
     if (!name || !*name || !value) return -1;
-    return setenv(name, value, 1);
+    status = setenv(name, value, 1);
+    if (environ)
+        while (environ[count]) count++;
+    snprintf(line, sizeof(line), "[ps4-gladius] module setenv %s status=%d environ=%p entries=%zu\n",
+             name, status, (void *)environ, count);
+    sceKernelDebugOutText(0, line);
+    return status;
 }
