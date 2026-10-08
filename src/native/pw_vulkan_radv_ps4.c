@@ -68,3 +68,32 @@ char *__wrap_strdup(const char *text)
     }
     return __real_strdup(text);
 }
+
+/* ⚠ A valid, empty environ. The SDK ships libc only as a static archive, so
+ * every PRX carries a private environment, and this console's setenv reports
+ * success while never publishing it: environ stays NULL however many variables
+ * are set. ntdll answers that by linking pw_prx_env_ps4.o and pointing environ
+ * at its own list; nothing did it for this module.
+ *
+ * Mesa walks it. driParseConfigFiles reads driconf from the environment, and
+ * walked straight into the NULL:
+ *
+ *     syscall fault 0xc0000005 at libSceLibcInternal.sprx+0xbb8af, address 0
+ *       called from libvulkan.prx+0x13fa674  -> driParseConfigFiles+0xb24
+ *
+ * which is the same shape the ntdll note records for get_initial_environment.
+ * An empty list is the honest value -- there are no variables here to read --
+ * and it terminates on the first entry instead of faulting. The init array runs
+ * from module_start, so this is in place before any entry point is called. */
+extern char **environ;
+static char *pw_empty_environ[1] = { NULL };
+
+__attribute__((constructor)) static void pw_publish_environ(void)
+{
+    extern int sceKernelDebugOutText(int channel, const char *line);
+
+    if (!environ) {
+        environ = pw_empty_environ;
+        sceKernelDebugOutText(0, "libvulkan: environ was NULL, published an empty one\n");
+    }
+}
