@@ -40,8 +40,28 @@
 static int32_t platform_load_start(const char *path, size_t argc, const void *argv,
                                    uint32_t flags, const void *option, int *result)
 {
-    return (int32_t)sceKernelLoadStartModule(path, argc, argv, flags,
-                                             (void *)option, (void *)result);
+    int32_t handle = (int32_t)sceKernelLoadStartModule(path, argc, argv, flags,
+                                                       (void *)option, (void *)result);
+    /* ⚠ DIAGNOSTIC. A refused module is the one failure this layer cannot
+     * describe to its caller: dlopen's text reaches pw_wine_dl_error(), and
+     * win32u's only report is ERR("Failed to load %s", SONAME_LIBVULKAN) -- the
+     * name it asked for, never the path it tried or why the kernel said no.
+     * libvulkan.prx has now been refused three times for three different
+     * guesses. Print the kernel's own answer instead. */
+    if (handle < 0) {
+        extern int sceKernelDebugOutText(int channel, const char *text);
+        static int reported;
+        char line[256];
+
+        if (reported < 16) {
+            reported++;
+            snprintf(line, sizeof(line), "pw_wine_dl: %s refused: handle 0x%08x result 0x%08x\n",
+                     path ? path : "(null)", (unsigned)handle,
+                     (unsigned)(result ? *result : 0));
+            sceKernelDebugOutText(0, line);
+        }
+    }
+    return handle;
 }
 
 static int platform_module_info(int32_t handle, void *info)
