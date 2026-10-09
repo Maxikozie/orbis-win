@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] win32u: Stage thread_detach, and name a thread that is exiting.
+
+GTA IV reaches a loaded scene and dies 66 seconds later on a thread that
+had just been created:
+
+    00c4:err:service:device_notify_proc failed to open RPC handle, error 1722
+    00c4:err:seh:handle_syscall_fault syscall fault 0xc0000005
+        at libSceLibcInternal.sprx+0x51ef7, address 453a00af4017
+    00c4:err:seh:handle_syscall_fault syscall fault in syscall 0x133c
+        (win32u #828), return ip 6ffffff06f9f
+
+win32u #828 is NtUserCallNoParam. A thread whose RPC fails and which then
+goes away is one exiting, and the only NtUserCallNoParam codes an exiting
+thread uses are NtUserExitingThread and NtUserThreadDetach -- the latter
+reaching thread_detach and its six frees. 453a00af4017 is not an address
+this process could have allocated.
+
+What the fault report cannot say is which code the call was given: by then
+the argument is gone, and the fault is inside Sony's libc, where every
+path in Wine ends up eventually. So say it at the call. Both codes run
+once per thread, so the cost is nothing, and each stage of thread_detach
+is named -- the last line printed is the one that faulted.
+
+⚠ If no line appears, the faulting code was some other NtUserCallNoParam
+and the thread-exit reading is wrong. That is worth one build to learn.
+
+⚠ Diagnostic only. win32u does not import the libc allocator (its frees go
+to Wine's heap through pw_wine_heap_libc.o), so the provenance fix that
+RADV needed is not the explanation here, and nothing is changed until the
+stage is known.
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index d18d866860..73a67c887c 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -7565,21 +7565,62 @@ static void thread_detach(void)
+ {
+     struct user_thread_info *thread_info = get_user_thread_info();
+ 
++#ifdef __PROSPERO__
++/* ⚠ DIAGNOSTIC. GTA IV reaches a loaded scene and then dies 66 seconds later
++ * on a thread that had just been created:
++ *
++ *     00c4:err:service:device_notify_proc failed to open RPC handle, error 1722
++ *     00c4:err:seh:handle_syscall_fault syscall fault 0xc0000005
++ *         at libSceLibcInternal.sprx+0x51ef7, address 453a00af4017
++ *     00c4:err:seh:handle_syscall_fault syscall fault in syscall 0x133c
++ *         (win32u #828), return ip 6ffffff06f9f
++ *
++ * win32u #828 is NtUserCallNoParam, and a thread that fails its RPC and goes
++ * away is one exiting -- which reaches this function and its six frees. The
++ * faulting address is not a pointer this process could have allocated.
++ *
++ * What the report cannot say is which code NtUserCallNoParam was given: by the
++ * time the handler runs the argument is long gone, and the fault is inside
++ * Sony's libc, where every path in Wine ends up eventually. So say it here.
++ * This runs once per thread, which costs nothing, and each stage below is
++ * named so the last line printed is the one that faulted.
++ *
++ * ⚠ If no line appears at all, the faulting call was some other
++ * NtUserCallNoParam code and the thread-exit reading is wrong -- which is
++ * worth knowing for the price of one build. */
++#define PW_DETACH_STAGE(what) ERR( "pw-detach: %s\n", (what) )
++#else
++#define PW_DETACH_STAGE(what) do { } while (0)
++#endif
++
++    PW_DETACH_STAGE( "entered" );
+     destroy_thread_windows();
++    PW_DETACH_STAGE( "windows destroyed" );
+     destroy_thread_pointers();
++    PW_DETACH_STAGE( "pointers destroyed" );
+     user_driver->pThreadDetach();
++    PW_DETACH_STAGE( "driver detached" );
+ 
+     free( thread_info->rawinput );
++    PW_DETACH_STAGE( "rawinput freed" );
+ 
+     cleanup_imm_thread();
++    PW_DETACH_STAGE( "imm cleaned" );
+     cleanup_opengl_thread();
++    PW_DETACH_STAGE( "opengl cleaned" );
+     NtClose( thread_info->server_queue );
++    PW_DETACH_STAGE( "queue closed" );
+     if (thread_info->idle_event) NtClose( thread_info->idle_event );
++    PW_DETACH_STAGE( "idle event closed" );
+     free( thread_info->session_data );
++    PW_DETACH_STAGE( "session data freed" );
+     free( thread_info->mouse_tracking_info );
++    PW_DETACH_STAGE( "mouse tracking freed" );
+     free( thread_info );
++    PW_DETACH_STAGE( "thread info freed" );
+ 
+     exiting_thread_id = 0;
++#undef PW_DETACH_STAGE
+ }
+ 
+ static BOOL set_keyboard_auto_repeat( BOOL enable )
+@@ -7622,6 +7663,10 @@ ULONG_PTR WINAPI NtUserCallNoParam( ULONG code )
+ 
+     /* temporary exports */
+     case NtUserExitingThread:
++#ifdef __PROSPERO__
++        /* ⚠ DIAGNOSTIC, see thread_detach. Once per thread. */
++        ERR( "pw-detach: exiting thread\n" );
++#endif
+         exiting_thread_id = GetCurrentThreadId();
+         return 0;
+ 
