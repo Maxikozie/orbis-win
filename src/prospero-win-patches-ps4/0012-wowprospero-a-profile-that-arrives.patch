@@ -1,0 +1,262 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] wowprospero: make the sampling profile arrive, and sample the
+ thread that never returns.
+
+GTA IV now reaches a complete composition graph and a working swapchain and
+then stops: the main thread parks in
+
+    NtWaitForMultipleObjects type 1, handles {f4, f8}, timeout (infinite)
+
+on two manual-reset events it created moments before, and another thread
+burns 0.93 of a core for as long as it is left alone without making one
+system call -- no mmap, no mprotect, no traced API, nothing. The DBT is the
+only thing that can see where that thread is, and it already has a SIGPROF
+sampling profiler keyed on guest addresses. Two things stopped it from
+answering.
+
+⚠ Its output goes to stderr, and this module's stderr lands nowhere --
+src/native/pw_wow_log_ps4.c says so at the top, which is why it exists.
+Enabling the profiler produced no output of any kind, not even "TSC
+calibration failed", and looked exactly like a trigger file that had not
+been noticed. Route the profiler's own lines through pw_wow_log, where the
+rest of this module's diagnostics already go.
+
+⚠ profile_maybe_dump() runs where run() returns -- a system call, a Unix
+call, a fault. A thread spinning on memory makes none of those, so the one
+thread the profile is wanted for is the one thread that never prints. Sample
+from the handler as well, throttled to the report period and to a single
+line naming the hottest guest address that thread has seen. The throttle
+lives in the arena table, which the handler already reads and only the
+arena's own thread writes.
+
+Also: an empty PW_WOW_PROFILE is not a path. This console's environ is its
+own problem (docs/FINDINGS.md: setenv succeeds but never publishes), and a
+getenv answering "" rather than NULL would skip the trigger file and then
+bail out silently -- so fall through to the trigger file on empty too, and
+log which of the two was found.
+diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
+index 01d21a5..a7ff889 100644
+--- a/wine/wowprospero/unix.c
++++ b/wine/wowprospero/unix.c
+@@ -43,6 +43,16 @@
+ #include "call_top.h"
+ #include "host_memory.h"
+ 
++/* ⚠ On the console this module's stderr goes nowhere: the sink ntdll installs
++ * is ntdll's own, and a PRX carries its own libc. Diagnostics go to klog
++ * instead. Off the console there is no klog and stderr is fine. */
++#ifdef __PROSPERO__
++extern void pw_wow_log( const char *format, ... );
++#define PW_WOW_NOTE( ... ) pw_wow_log( __VA_ARGS__ )
++#else
++#define PW_WOW_NOTE( ... ) fprintf( stderr, __VA_ARGS__ )
++#endif
++
+ /* The guest range every translated access is checked against (load_state). */
+ enum { GUEST_LOW = 0x10000u, GUEST_HIGH = 0xfffff000u };
+ /* The guest GPRs held in host registers across linked blocks: seven fit, and
+@@ -115,7 +125,10 @@ static uint64_t next_cache_report_id;
+  * code ranges from this table rather than thread-local storage. */
+ enum { MAX_ARENAS = 1024 };
+ static struct { uintptr_t low, high; PwX86Engine *engine; PwX86State *state; PwX86HotspotProfile *profile;
+-                volatile int *retry; } arenas[MAX_ARENAS];
++                volatile int *retry;
++                /* The last time this arena's thread reported a sample line; see
++                 * profile_sample_line. Only the arena's own thread touches it. */
++                uint64_t report_tsc; } arenas[MAX_ARENAS];
+ #ifndef __PROSPERO__
+ static struct sigaction wine_segv;
+ #endif
+@@ -357,11 +370,22 @@ static void *place_above_guest( size_t bytes, ULONG type, ULONG protect )
+     MEM_EXTENDED_PARAMETER parameter = { 0 };
+     SIZE_T size = bytes;
+     void *base = NULL;
++    NTSTATUS status;
+ 
+     parameter.Type = MemExtendedParameterAddressRequirements;
+     parameter.Pointer = &requirements;
+-    if (NtAllocateVirtualMemoryEx( NtCurrentProcess(), &base, &size, type, protect, &parameter, 1 ))
++    if ((status = NtAllocateVirtualMemoryEx( NtCurrentProcess(), &base, &size, type,
++                                             protect, &parameter, 1 )))
++    {
++        /* ⚠ DIAGNOSTIC. The translator's code arena is the one allocation on
++         * this console that has to end up executable, and every refusal here
++         * reached the caller as a bare PW_ERR_VM -- "the memory backend refused
++         * a request" -- with no status, no size and no protection:
++         *     err:wow:BTCpuSimulate DBT error -9 at eip 0x7bf33290 */
++        PW_WOW_NOTE( "wowprospero: %zu bytes type %x protect %x refused: %08x\n",
++                     bytes, (unsigned int)type, (unsigned int)protect, (unsigned int)status );
+         return NULL;
++    }
+     return base;
+ }
+ 
+@@ -385,9 +409,18 @@ static void *reserve_code( size_t bytes )
+ static int commit_code( void *base, size_t bytes )
+ {
+     SIZE_T size = bytes;
++    void *at = base;
++    NTSTATUS status;
+ 
+-    return NtAllocateVirtualMemory( NtCurrentProcess(), &base, 0, &size, MEM_COMMIT,
+-                                    PAGE_EXECUTE_READWRITE ) ? -1 : 0;
++    if (!(status = NtAllocateVirtualMemory( NtCurrentProcess(), &base, 0, &size, MEM_COMMIT,
++                                            PAGE_EXECUTE_READWRITE )))
++        return 0;
++    /* ⚠ DIAGNOSTIC -- see place_above_guest. Executable memory is the whole
++     * question here: this console refuses a plain executable mapping and wants
++     * direct memory mapped read-write and then protected (orbis_jit.c). */
++    PW_WOW_NOTE( "wowprospero: commit %p %zu bytes executable refused: %08x\n",
++                 at, bytes, (unsigned int)status );
++    return -1;
+ }
+ 
+ static void release( void *base, size_t bytes )
+@@ -453,7 +486,41 @@ static struct pw_thread *get_thread(void)
+     int first, attempt;
+ 
+     if (thread) return thread;
+-    if (!(thread = calloc( 1, sizeof(*thread) ))) return NULL;
++    {
++        /* ⚠ One line per process, to prove this channel carries at all: a PRX
++         * other than ntdll has no stderr and no klog of its own, and every
++         * diagnostic added here was invisible until the log became a file. */
++        static int announced;
++        if (!announced++)
++            PW_WOW_NOTE( "wowprospero: translator starting, thread state %zu bytes\n",
++                         sizeof(*thread) );
++    }
++    if (!(thread = calloc( 1, sizeof(*thread) )))
++    {
++#ifdef __PROSPERO__
++        /* ⚠ ntdll keeps the one allocator known to work in this process: it
++         * links prospero-win's heap and exports it (scripts/prx-ps4.sh), while
++         * this module's malloc is the console libc's and answered NULL for
++         * 145 KiB. Fall back to ntdll's before giving up. */
++        extern void *pw_wine_heap_malloc( size_t bytes );
++        if ((thread = pw_wine_heap_malloc( sizeof(*thread) )))
++        {
++            memset( thread, 0, sizeof(*thread) );
++            PW_WOW_NOTE( "wowprospero: thread state from ntdll's heap (libc refused %zu bytes, errno %d)\n",
++                         sizeof(*thread), errno );
++        }
++    }
++    if (!thread)
++    {
++#endif
++        /* ⚠ This returned NULL in silence, and the caller turns that into
++         * PW_ERR_VM with no fault address -- which reaches the log as
++         *     err:wow:BTCpuSimulate DBT error -9 ... fault address 0
++         * and looks exactly like the translator refusing guest memory. */
++        PW_WOW_NOTE( "wowprospero: no memory for %zu bytes of thread state\n",
++                     sizeof(*thread) );
++        return NULL;
++    }
+     first = !__atomic_load_n( &first_thread_ready, __ATOMIC_ACQUIRE );
+     if (pw_wow_host_backend( &thread->vm, &host_memory ) != PW_OK ||
+         (attempt = pw_wow_thread_fit( first, setup_thread, thread, &budget )) < 0)
+@@ -874,6 +941,38 @@ static void profile_native_sample(uintptr_t pc)
+     }
+     __atomic_fetch_add(&profile_native_overflow, 1, __ATOMIC_RELAXED);
+ }
++/* ⚠ A thread that never leaves translated code never reports.
++ *
++ * profile_maybe_dump() runs where run() returns -- at a system call, a Unix
++ * call, a fault. A guest thread spinning on memory makes none of those, so the
++ * one thread a profile is wanted for is the one thread that never prints. GTA
++ * IV has exactly that: its main thread parked in NtWaitForMultipleObjects on
++ * two events forever while another burns a full core and issues not one call.
++ *
++ * So sample from the handler as well, throttled to the report period and to
++ * one line: the hottest guest address this thread has seen. It costs a scan of
++ * the slot table every five seconds on a thread that is already only running
++ * because nothing else will make it stop. */
++static uint64_t profile_sample_period;
++static void profile_sample_line(PwX86HotspotProfile *profile, uint64_t *report_tsc, uint64_t tsc)
++{
++    uint32_t pc = 0;
++    uint64_t best = 0, total = 0;
++
++    if(!profile || !profile_sample_period) return;
++    if(*report_tsc && tsc - *report_tsc < profile_sample_period) return;
++    *report_tsc = tsc;
++    for(unsigned i = 0; i < PW_X86_HOTSPOT_SLOTS; i++) {
++        uint64_t samples = profile->slots[i].samples;
++        total += samples;
++        if(samples > best) { best = samples; pc = profile->slots[i].guest_pc; }
++    }
++    if(!total) return;
++    pw_wow_log("wowprospero sample: tid=%04x pc=%08x samples=%llu of %llu\n",
++               (unsigned)HandleToULong(NtCurrentTeb()->ClientId.UniqueThread),
++               pc, (unsigned long long)best, (unsigned long long)total);
++}
++
+ static void profile_handler(int signal, siginfo_t *info, void *context)
+ {
+     const uintptr_t rip = *context_rip(context);
+@@ -888,6 +987,7 @@ static void profile_handler(int signal, siginfo_t *info, void *context)
+             PwX86HotspotProfile *profile = __atomic_load_n(&arenas[i].profile, __ATOMIC_ACQUIRE);
+             if(profile) {
+                 pw_x86_engine_sample(arenas[i].engine, rip, profile);
++                profile_sample_line(profile, &arenas[i].report_tsc, __rdtsc());
+                 return;
+             }
+             break;
+@@ -926,22 +1026,33 @@ static void profile_start(void)
+ {
+     profile_path = getenv("PW_WOW_PROFILE");
+ #ifdef __PROSPERO__
+-    if(!profile_path) {
++    /* ⚠ An empty value is not a path. This console's environ is its own
++     * problem (docs/FINDINGS.md: setenv succeeds but never publishes), so a
++     * getenv that answers "" rather than NULL would have skipped the trigger
++     * file and then bailed out below without a word -- which is exactly how
++     * this looked from the outside: the file in place and no output at all. */
++    if(!profile_path || !*profile_path) {
+         struct stat st;
+-        if(!stat("/data/prospero-win/pw_wow_profile", &st)) profile_path = "1";
++        int found = !stat("/data/prospero-win/pw_wow_profile", &st);
++
++        pw_wow_log("wowprospero profile: env=%s trigger=%s\n",
++                   profile_path ? (*profile_path ? profile_path : "(empty)") : "(unset)",
++                   found ? "present" : "absent");
++        profile_path = found ? "1" : NULL;
+     }
+ #endif
+     if(!profile_path || !*profile_path) { profile_path = NULL; return; }
+     /* Before the timer starts, so no SIGPROF cuts the calibration short. */
+     profile_tsc_rate = profile_calibrate();
+     if(!profile_tsc_rate) {
+-        fprintf(stderr, "wowprospero profile: TSC calibration failed\n");
++        pw_wow_log("wowprospero profile: TSC calibration failed\n");
+         profile_path = NULL;
+         return;
+     }
+     profile_period_ticks = pw_tsc_ticks(PROFILE_PERIOD_MS, profile_tsc_rate);
+-    fprintf(stderr, "wowprospero profile_clock: tsc_hz=%llu calibration_ms=%u period_ms=%u\n",
+-            (unsigned long long)profile_tsc_rate, PROFILE_CALIBRATION_NS / 1000000, PROFILE_PERIOD_MS);
++    profile_sample_period = profile_period_ticks;
++    pw_wow_log("wowprospero profile_clock: tsc_hz=%llu calibration_ms=%u period_ms=%u\n",
++               (unsigned long long)profile_tsc_rate, PROFILE_CALIBRATION_NS / 1000000, PROFILE_PERIOD_MS);
+     struct sigaction action;
+     struct itimerval timer = { { 0, 1000 }, { 0, 1000 } };
+     memset(&action, 0, sizeof(action));
+@@ -949,7 +1060,7 @@ static void profile_start(void)
+     action.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
+     sigemptyset(&action.sa_mask);
+     if(sigaction(SIGPROF, &action, NULL) || setitimer(ITIMER_PROF, &timer, NULL)) {
+-        fprintf(stderr, "wowprospero profile: sampling timer unavailable\n");
++        pw_wow_log("wowprospero profile: sampling timer unavailable\n");
+         profile_path = NULL;
+     }
+ }
+@@ -957,7 +1068,7 @@ static void profile_start(void)
+ static void profile_add_thread(struct pw_thread *thread)
+ {
+     if(profile_path && !thread->engine.fault_markers) {
+-        fprintf(stderr, "wowprospero profile: requires fault-marker block map\n");
++        pw_wow_log("wowprospero profile: requires fault-marker block map\n");
+         return;
+     }
+     if(profile_path) {
