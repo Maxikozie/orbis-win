@@ -3083,3 +3083,46 @@ existing is not the same as the extension being enumerated.
 **grep the session log for `WINE ` lines with no channel prefix.** Every
 library that writes to stdout -- DXVK here, FreeType's warning earlier -- lands
 there already.
+
+## GTA IV reaches shader compilation (2026-10-08)
+
+Three blockers fell in sequence and the game is now inside RADV compiling its
+own shaders.
+
+**1. The surface extension.** `ps5drv` mapped `VK_KHR_win32_surface` to
+`VK_KHR_display`, which this console's RADV does not offer -- it offers
+`VK_EXT_headless_surface`, which is what the bundle's triangle uses. The host
+instance therefore got no surface extension at all, every surface entry point
+was unresolved, and `vkCreateInstance` failed (patch 0878). After it:
+
+    info:  Found device: PS5 (radv 26.2.99)
+
+DXVK enumerating the PS4's GPU through our own driver.
+
+**2. `dxgi=n` was wrong.** 1911.dll, the crack, imports `d3d12.dll` and
+`dcomp.dll` -- Wine's own -- and those ask the adapter for Wine's **private**
+DXGI interface, `17399d75-964e-4c03-99f8-9d4fd196dd62`
+(`include/wine/winedxgi.idl:83`). DXVK's dxgi cannot answer it, so overriding
+dxgi to native put DXVK underneath Wine's d3d12 and the query returned nothing;
+1911.dll dereferenced it at `+0x2c`. That crash had been read as a DRM problem
+through several runs. With dxgi left builtin the queries and the crash both
+disappear. ⚠ DXVK's d3d9 is standalone: **override d3d9 alone**.
+
+The DXVK version was never the variable -- 2.2 and 3.1.1 both reached the same
+instruction, 2.2 only getting as far as enumerating memory types first.
+
+**3. ACO faults on thread-local storage.** Now that pipelines are being built:
+
+    err:vulkan:vkCreateComputePipelines Exception 0xc0000005 in Unix call.
+    syscall fault 0xc0000005 at libvulkan.so+0x12f0f29, address 1120
+      -> aco_compile_shader + 0x2e9
+
+RADV imports `__tls_get_addr`, and this console answers general-dynamic TLS with
+NULL -- measured earlier and recorded above, which is why wowprospero is built
+`-femulated-tls` with its own `__emutls_get_address` (`src/native/pw_emutls_ps4.c`).
+ACO uses `thread_local`; the NULL comes back and a field at offset 0x1120 is
+read from it, which is the faulting address exactly.
+
+The precedent says what the fix looks like, and the awkwardness is that RADV is
+a prebuilt archive: either rebuild Mesa with `-femulated-tls`, or give the
+module a `__tls_get_addr` that works, since the one it links now returns NULL.
