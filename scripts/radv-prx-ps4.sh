@@ -35,8 +35,10 @@ oo=$bundle/sdk
 sdk=$root/build/ps4-wine-sdk
 pw=$root/prospero-win
 prx=$pw/.deps/wine-ps5/prx
-mesa_src=$bundle/mesa
-mesa_build=$bundle/mesa/build-orbis
+# The local Mesa implements low CPU aliases validated by vkmapprobe on PS4.
+# Override PW_RADV_MESA_SRC/PW_RADV_MESA_BUILD for an explicit alternate build.
+mesa_src=${PW_RADV_MESA_SRC:-$root/mesa-build/mesa-ps4}
+mesa_build=${PW_RADV_MESA_BUILD:-$mesa_src/build-orbis}
 CC=$sdk/bin/prospero-clang
 export OO_PS4_TOOLCHAIN=$oo
 
@@ -67,12 +69,23 @@ echo "== 3. optional entry points =="
     awk '{print "PROVIDE_HIDDEN(" $0 " = 0);"}' > "$work/mesa_optional_zero.ld"
 printf '   %s weak symbols zeroed\n' "$(wc -l < "$work/mesa_optional_zero.ld")"
 
+# Share ntdll's large direct-memory heap for shader compiler allocations.
+$CC -std=c11 -O2 -Wall -Wextra -Werror -fPIC \
+    -c "$root/src/native/pw_prx_heap_wrap_ps4.c" -o "$work/obj/pw_prx_heap_wrap_ps4.o"
+stubs=$prx/stubs
+export PW_PRX_STUBS="-L$stubs -Wl,--as-needed $(ls "$stubs"/*.so 2>/dev/null | tr '\n' ' ')"
+
 echo "== 4. link =="
 $CC -shared -Wl,-Bsymbolic -Wl,--eh-frame-hdr -Wl,-soname,libvulkan.prx \
     -Wl,--wrap=strdup -Wl,--wrap=__tls_get_addr -Wl,--wrap=scePthreadCreate \
+    -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free \
+    -Wl,--wrap=memalign -Wl,--wrap=aligned_alloc -Wl,--wrap=posix_memalign \
+    -Wl,--wrap=strndup -Wl,--wrap=asprintf -Wl,--wrap=vasprintf \
+    -Wl,--wrap=_ZdlPv -Wl,--wrap=_ZdaPv -Wl,--wrap=_ZdlPvm \
     -Wl,-T,"$work/mesa_optional_zero.ld" -Wl,--warn-unresolved-symbols \
     -o "$prx/libvulkan.shared.elf" \
     "$work/obj/pw_vulkan_radv_ps4.o" "$work/obj/libvulkan_desc.o" \
+    "$work/obj/pw_prx_heap_wrap_ps4.o" \
     -Wl,--whole-archive "$archive" -Wl,--no-whole-archive \
     "$zlib" -lSceGnmDriver -lSceVideoOut > "$log" 2>&1 ||
     { echo "   X link"; grep -E "error|undefined" "$log" | head -8 | sed 's/^/      /'; exit 1; }

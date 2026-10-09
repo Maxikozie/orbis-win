@@ -1070,7 +1070,7 @@ uncorrected. Worth sending upstream with the Gladius measurement.
 | dl platform block | ~70 | `pw_wine_dl_ps4.c` | 73 |
 | dmem platform block | ~130 | `pw_wine_dmem_ps4.c` | 121 |
 | heap | — | nothing | 0 |
-| threads companion | ~7 | `pw_wine_threads_ps4.c` | 8 |
+| threads companion | ~7 | `pw_pthread_stack_ps4.c` | 8 |
 
 ---
 
@@ -1142,7 +1142,7 @@ either was going back over numbers that already looked like an answer.
 | dl platform block | ~70 | `pw_wine_dl_ps4.c` | 73 |
 | dmem platform block | ~130 | `pw_wine_dmem_ps4.c` | 121 |
 | heap | — | nothing | 0 |
-| threads companion | ~7 | `pw_wine_threads_ps4.c` | 8 |
+| threads companion | ~7 | `pw_pthread_stack_ps4.c` | 8 |
 | cwd | — | nothing (28 `--wrap` flags) | 0 |
 
 **530 lines of PS4 platform code.** Underneath it, compiled unmodified: the
@@ -3267,3 +3267,468 @@ at its own position. 0867 was written against context that 0882 adds. Either
 place the patch after the one that owns that code, or fold it in -- the NULL
 `thread_data` guard went into 0882, which introduces the thread that has no
 Wine data.
+
+
+## 0015 hardware follow-up: the 16 MiB regions did not shrink (2026-10-09)
+
+Two launches, at 08:38 and 08:42, reproduce spinning dots followed by a black
+screen. The user confirmed the uploaded package was installed. Both runs
+refuse thread 0080 at 19 threads with pthread_create=0x80020023, flexible
+memory at 3072K, and the 256 KiB stack retry also refused. The large anonymous
+regions remain 16384K. Audio progresses (1143 and 1106 respectively), but
+vk_shown remains zero.
+
+The local wowprospero.shared.elf disassembly of pw_wow_thread_budget contains
+0x800000 for secondary arenas and 0x8000000 for the first arena. Its PRX
+and the packaged sce_module/wowprospero.prx have identical SHA-256 hashes.
+This verifies the local packaged budget; it does not independently hash the
+installed console copy. The original attribution of the 16 MiB regions to
+DBT arenas is unsupported by this experiment. Do not move executable memory
+on that inference.
+
+0016 records flexible memory before and after thread-state allocation, then
+actual cache, code-arena and hostexec addresses and sizes, plus the selected
+budget. The tracked emulated-TLS helper records flexible memory around
+posix_memalign as well. These diagnostics go through pw_wow_log to
+/data/prospero-win/logs/wowprospero.log; their hardware result is pending.
+
+Capture all three channels before launching: scripts/logs.sh klog (TCP 3232),
+scripts/ps5logd.py (TCP 9300, used by this package's dev.conf), and
+scripts/logs.sh (UDP 18194, used by the native probes). TCP 9300 was already
+held by an existing receiver writing ps5log-20261007-152429.log; its old
+filename does not mean it stopped recording. Never start a second klog
+receiver. Avoid FTP service probes: fetch known paths directly with ftp-get.py,
+which does not attempt anonymous login.
+
+The user proposed a smaller Windows game as a baseline before returning to
+GTA IV, whose launch additionally involves 1911.dll and DirectComposition
+compatibility patches. That baseline title is not selected yet.
+
+0016 build validation: the full Wine build reports ntdll built=True despite
+its known nonzero exit; PRX, RADV, FreeType, wineps5 and app builds completed.
+The resulting 421 MiB package contains twelve modules and SFO ATTRIBUTE
+0x00800000 (Neo). Packaged wowprospero.prx matches the rebuilt PRX, and its
+ELF contains the new diagnostic strings. The helper compiles with warnings
+as errors; the patch reverses cleanly and git diff --check passes.
+
+
+### GTA IV profile comparison (2026-10-09)
+
+The upstream prospero-win-profiles gtaiv.profile specifies video-memory
+options, 1920x1080 fullscreen launch arguments, an explicit 1920x1080 desktop,
+and XInput. The installed hand-written profile omitted arguments, display
+and input sections; runtime logs confirmed desktop=default. Its d3d9-only
+native override is deliberate for this copy's 1911.dll D3D12/DirectComposition
+path, which needs Wine's private DXGI interfaces. Upstream's broader native
+overrides and DXVK 2.6.2 are not equivalent to this prefix's DXVK 3.1.1.
+
+Saved the original to build-ps4-logs/gtaiv-installed-20261009.profile and
+created src/profiles/gtaiv.profile with upstream arguments/display and explicit
+XInput while retaining d3d9=n and the existing diagnostic channels. The real
+profile parser accepts it, and the launcher splits its arguments into 13 words.
+A direct request for the game's commandline.txt returned FTP 550 (unavailable);
+this does not establish whether that file is absent or inaccessible.
+
+
+## The 16 MiB regions are explained by the SDK stack floor (2026-10-09)
+
+At 08:52 the corrected profile loaded (desktop=1920x1080, arguments=13),
+but GTA IV again went from spinning dots to black. This run also used 0016:
+actual secondary arenas are 8388608 bytes at 0x100f160000 and similar high
+addresses; cache entries and hostexec are in the same Wine-managed range.
+Flexible memory generally does not fall across DBT setup. It does fall in
+16 MiB steps as host threads are created, reaching zero; thread 007c fails
+at 18 threads, including the small-stack retry.
+
+ntdll.shared.elf defines pthread_create from the SDK compatibility archive.
+Its disassembly resolves the stack floor from stackOfSelf, compares the
+requested size against it, and raises smaller requests. The corresponding
+orbis_thread.cpp creates new attributes for a raised stack and copies detach
+and guard settings, but never the supplied stack address. Wine's explicit
+1 MiB stack is replaced by a library-allocated 16 MiB flexible stack.
+That is why the bare probe's 146-thread result did not predict Wine's ceiling.
+The linked SDK binary is older than the SDK source's environment-aware
+resolveFloor: do not assume setting ORBIS_THREAD_STACK will fix that binary.
+
+Added src/native/pw_pthread_stack_ps4.c and linked it into ntdll with
+--wrap=pthread_create. Explicit supplied stacks go directly to scePthreadCreate;
+calls without a supplied address retain the compatibility wrapper. Wine
+installs its own alternate signal stack in ntdll/unix/server.c:init_thread_pipe.
+The helper reports supplied and actual stack address/size, creation status
+and query status. Kernel error codes are returned unchanged.
+
+A host check with real pthread workers and mocked console entry points
+confirmed the supplied 1 MiB stack was actually used, creation errors
+propagated, and the default path retained. PS4 compilation with warnings
+as errors passes. Linked ntdll disassembly confirms spawn_thread calls
+__wrap_pthread_create and the supplied-stack path calls scePthreadCreate.
+Hardware confirmation of recovered flexible memory is still pending.
+
+
+### Supplied stacks confirmed live; next baseline is Pinball (2026-10-09)
+
+At 09:00 GTA IV uses the wrapper: requested and actual stack addresses
+match, both 1024K, with create=0 and query=0. Flexible memory stays at
+290816K, rather than falling to 0-3072K. This confirms the stack fix on
+hardware. The guest now fails at vkd3d:d3d12_heap_init (vkMapMemory returns
+-1), followed by a failed map_ptr assertion and a guest access violation
+0xc0000005 at 0x7b9268e1, writing address zero. No frame or audio is produced
+before this failure. The user reports the application closes without a host
+crash. The D3D12 path belongs to this copy's 1911.dll startup; its relationship
+to the failure needs further investigation.
+
+Pinball at /media/D/games/pinball is the next authorized target. Its 32-bit
+PE is fixed at 0x1000000, clear of the runtime, and imports GDI/User32/WinMM
+and other basic Windows DLLs, with no Direct3D imports. src/profiles/pinball.profile
+selects GDI and explicitly selects cpu=translator, avoiding the PS5-native
+CPU default. Its separate prefix was initialized with the pinned host Wine
+as user prospero and staged under build/pinball-console-prefix. Font registry
+paths are repointed to C:\windows\Fonts, fonts are copied into the prefix,
+the WoW64 CPU key selects wowprospero.dll, and symlinks become .pw-symlinks
+tables using upstream pw_prefix.py's local_tree and to_console helpers.
+
+Do not use upstream pw_prefix.py's FTP transport directly with GoldHEN: it
+calls login(), SELF, CWD and MLSD. scripts/ftp-put-tree.py uploads the staged
+tree with one connection, without login/probes/listing/deletion.
+
+Pinball upload completed: 1884 files / 296275 KiB, all transfers confirmed.
+The profile was uploaded last so the launcher cannot offer a partial prefix.
+Validation confirmed game-file hashes, the translator registry entry, drive
+link tables, portable font paths, and profile parsing. Hardware launch is pending.
+
+Pinball launched on 2026-10-09 at 09:07 with GDI output and audible WinMM:
+frames_put=13524, shown=1255, inputs=20, refused=0, audio=1233,
+audible=1219. User reports symbol-like (Wingdings) text and controls do not
+respond. Accepted native input packets are not proof of Windows key delivery.
+The staged prefix initially copied six TTFs but omitted the installed Wine
+bitmap fonts referenced by its registry, including MS Sans Serif and System.
+Uploaded all 50 installed .fon files (471 KiB) to the prefix without login or
+probes. Updated Pinball profile to trace font, keyboard, key and ps5drv instead
+of the very noisy winmm channel. Text correction and key dispatch still need
+verification on the next launch. Profile mappings: Options=F2 (new game),
+Cross=Space (launch ball), L1=Z, R1=Slash (flippers).
+
+### Pinball input pipe and bitmap font fixes prepared (2026-10-09)
+
+The 09:12 launch registers only Marlett, Symbol, Webdings and Wingdings;
+System selection falls back to charset=2 / cp=42. All .fon attempts fail
+FT_New_Face with error 1. Tahoma on the console matches the staged SHA256,
+so its absence is not a truncated FTP upload. Path-resolution trace is added
+for the next run; the reason outline fonts are absent is still open.
+
+0821-win32u-ps4-font-memory-face.patch selects FT_New_Memory_Face for already
+mapped font bytes on this platform. FreeType's own fopen cannot traverse the
+emulated dosdevices links. The metadata face is closed before those bytes
+are unmapped; copied font metadata survives. Local FreeType checks parse
+System, MS Sans Serif (three faces), and Tahoma from these exact files.
+
+Native inputs increase (20 to 28) while no key mapping/dispatch appears.
+server/queue.c:set_queue_fd still calls dup on the shared input pipe, and
+closing its temporary file handle also closes the original descriptor on
+this shared-table port. Patch 0869 uses borrowed poll fd objects retaining
+the source file owner, with one persistent input handle in the PS5 driver.
+Borrowed fd teardown removes its poll registration and releases its owner
+without closing the shared native descriptor. Allocation failure also leaves
+the borrowed descriptor open. Each UI thread retains its own poll object.
+The existing unconditional drain would block after its first read because
+PS4 refuses nonblocking mode; it now checks poll before each read, matching
+inprocess_wake_poll_event. Key injection logs hwnd, VK, scan, down and status.
+A real blocking-pipe check drains its bytes and returns without hanging.
+
+The user clarified the application is running but its initial window frame
+is gone. Both launches report 606x467 output; no persisted fullscreen setting
+was found in the current Pinball user registry. Set profile display.view to
+desktop to show the surrounding 800x600 desktop rather than crop to the game.
+This is a presentation check, not proof of a fullscreen mode change.
+
+Validation: a fresh archive of the pinned Wine base accepts all 124 patches
+sequentially; the five changed source files exactly match the built tree.
+Win32u and server compile/link with the updated sources; the PRX chain restores
+RADV, FreeType and wineps5 after prx-ps4.sh. Hardware validation is pending.
+
+Uploaded the rebuilt 441974784-byte Neo package to /data/pkg/wine-app.pkg
+at approximately 09:26; FTP confirmed 226. Packaged win32u, wineserver,
+ntdll and FreeType byte-for-byte match their rebuilt PRXs. The updated
+Pinball profile is uploaded separately. Install this package before testing;
+source fixes are not present in the previously installed title.
+
+### Pinball controls confirmed on hardware (2026-10-09, 09:36 launch)
+
+User installed the 09:26 package and confirms controls work. Runtime traces
+show both down/up delivery with status=0 to hwnd=10046: F2 VK71 scan3c,
+Space VK20 scan39, Z VK5a scan2c, Slash VKbf scan35. UI threads 0024 and 002c
+both register queue fd=74 successfully. Patch 0869 is hardware-confirmed.
+
+Font list now includes Courier, Fixedsys, MS Sans Serif (13/16/20 pixels),
+Small Fonts and System (16 pixels), alongside the four symbol families.
+System selects charset=0 / cp=1252 rather than charset=2 / cp=42. Patch 0821
+fixes bitmap metadata loading on hardware; no Tahoma appears in resolution
+traces, so its absence is still open. Do not conflate font enumeration with
+user confirmation of all rendered text.
+
+User clarifies repeatedly: game itself renders, window decorations are absent.
+Full desktop presentation is active, with last=800x600; at 09:38:21 there are
+70336 submitted frames, 5442 shown, 70 inputs/refused=0, audio9272/audible8780.
+Changing presentation crop did not restore decorations. Existing prefix
+CaptionHeight=25 and MenuHeight=18 are sane. Driver default style masks leave
+the outer window rectangle intact; no explicit client-only crop was found.
+Next Pinball profile replaces verbose +font with +win and warn+font, retaining
+key/ps5drv traces, to inspect window styles/rectangles and nonclient painting.
+No further runtime rebuild or reinstall is required for this diagnostic profile.
+
+User accepts Pinball's missing window decorations and requests returning to
+GTA IV. Pinball controls are the confirmed working baseline. GTA IV profile
+now explicitly selects cpu=translator, keeps its existing upstream arguments,
+1920x1080 and d3d9=n override, and uses +tid,err+all,+loaddll,+seh,+thread to
+capture its loader/exception path without the prior sync/server flood.
+All three log receivers were verified ready. Next launch uses the already
+installed 09:26 runtime; compare with the 09:00 vkd3d vkMapMemory=-1 failure
+in the 1911.dll startup path before changing another component.
+
+GTA IV 09:43 launch repeats vkd3d vkMapMemory=-1 then null write at
+7b9268e1; no frames/audio and flexible_free=290816K. A preceding line identifies
+why: win32u_vkMapMemory2KHR returns mapping 0x883320000, which does not fit a
+32-bit pointer. Wine unmaps it and returns VK_ERROR_OUT_OF_HOST_MEMORY. This
+is a pointer-width failure, not evidence that flexible memory is exhausted.
+The no-DRM RADV CPU-map path returns the existing GPU-arena address; it cannot
+honor arbitrary placed addresses. Wine's placed-map/external-host capability
+selection needs inspecting before choosing a repair. Updated GTA IV profile
+traces Vulkan and D3D12 instead of SEH/thread for the next launch.
+
+09:51 GTA IV run with Vulkan tracing confirms the same failure and address
+0x883320000. init_physical_device enumerates neither VK_EXT_map_memory_placed
+nor VK_EXT_external_memory_host for the loaded PS4 driver. Wine therefore
+uses ordinary CPU mapping, then rejects its high pointer for WoW64. More
+unchanged launches will not resolve this; driver/bridge support for a low
+32-bit CPU mapping is the next implementation requirement.
+
+Important source distinction: scripts/radv-prx-ps4.sh links the prebuilt
+sdk/orbis-sdk-v1/mesa/build-orbis/src/amd/vulkan/libvulkan_radeon.a. The full
+source in mesa-build/mesa-ps4 gates placed mapping on KMS/DRM in
+radv_physical_device.c; its no-DRM ac_orbis_drm CPU map rejects a fixed address different from the
+existing GPU-arena mapping. It is not evidence that the currently packaged
+SDK archive supports the feature, and enabling an extension alone is not a
+correct repair. Do not truncate the pointer or treat VK_ERROR_OUT_OF_HOST_MEMORY
+here as proof of memory exhaustion.
+
+After the network interruption, UDP18194 and runtime TCP9300 remained alive
+with fresh runtime data. Replaced only klog receiver PID790090 with PID902402,
+exec session8937; connected and received buffered console output. New klog:
+build-ps4-logs/ps4-klog-20261009-094758.log. Original klog remains preserved.
+
+### Low-address direct-memory alias probe built (2026-10-09)
+
+User authorized building the feasibility probe before the Mesa mapping change.
+New standalone target mapprobe / GLDS10010 / Gladius Mapping Probe, source
+src/map-probe/map_probe.c. Package path /data/pkg/mapprobe.pkg; does not modify
+the installed Wine runtime or driver. Built with --neo and -Wall -Wextra -Werror;
+entry point, process parameters and 16 KiB PT_LOAD alignment checks pass.
+
+For each Onion(type0) and Garlic(type3) allocation, map 64 KiB with CPU/GPU RW
+protection0x33 at a kernel-chosen address. Reserve a low address without
+overwrite (fixed|no-overwrite) before mapping the SAME physical allocation
+there. Candidates: 0x10000000, 0x20000000, 0x40000000, 0x60000000. Check writes
+in both directions over every word, unmap the alias and verify the primary
+mapping survives. Also test a one-page alias at physical offset+16 KiB for
+suballocation support. Retain physical backing until title exit if mapped
+memory cleanup fails. The title stays alive after DONE for normal shell close.
+
+A host harness substitutes memfd-backed shared mmap for the console kernel
+entry points: all 18 maps (two primaries, eight aliases, eight offset aliases)
+pass with zero mismatches and both allocations release. Injected alias-map
+refusal also cleans reservations and releases both primary allocations.
+These checks validate probe logic, not PS4 kernel support. No GPU commands
+are submitted; a GPU-copy probe must follow any successful kernel alias test.
+Output uses klog and begins 'mapprobe: BEGIN'; inspect 'below4g=1',
+'bidirectional ... mismatches=0', cleanup return codes and DONE.
+
+
+### Kernel alias test passed; Mesa implementation built (2026-10-09 10:08 onward)
+
+Hardware mapprobe passed both Onion and Garlic at all four low addresses:
+0x10000000, 0x20000000, 0x40000000, 0x60000000. Full 64 KiB bidirectional
+checks and physical+16 KiB page aliases had zero mismatches. All alias/primary
+unmaps and direct-memory releases returned zero; the primary remained usable
+after each alias unmap. Evidence: build-ps4-logs/ps4-klog-20261009-094758.log,
+10:08:11 through mapprobe DONE at 10:08:11.822. This proves kernel feasibility,
+not Vulkan GPU access.
+
+Mesa now creates a separately owned placed CPU view of the BO's real backing:
+Onion physical offset is arena_phys + GPU_VA - arena_map_base; Garlic uses its
+own direct allocation and offset. Foreign/unmapped/misaligned buffers refuse
+placed maps. Unmapping an alias leaves the GPU mapping intact; RESERVE restores
+a no-overwrite virtual reservation. Aliases are also removed before backing
+retirement/free. PS4 advertises VK_EXT_map_memory_placed only with this code.
+
+Patches saved in src/mesa-patches-ps4/: 0001 preserves the existing Gladius
+changes; 0002 adds CPU aliases. Base Mesa commit is
+1a59cc147b54e3970814b37313e2f27357672e9d. Archive build passed (766 targets),
+log build-ps4-logs/mesa-placed-local-build.log. Actual mapping functions also
+passed host shared-memfd tests for Onion/Garlic, reserve/remap, map refusal,
+unmap failure retention, reservation failure and invalid inputs; evidence
+build-ps4-logs/mesa-alias-host-check.log.
+
+New vkmapprobe / GLDS10011 / Gladius Vulkan Mapping Probe is uploaded to
+/data/pkg/vkmapprobe.pkg. Built with --pkg --neo --dev-mesa and warnings as
+errors. Tests every host-visible coherent memory type, low placed maps, a
+GPU copy of 16384 words, RESERVE unmap, remap at the same address, a second
+GPU copy, normal unmap and resource destruction. Hardware result pending.
+
+radv-prx-ps4.sh accepts PW_RADV_MESA_SRC/PW_RADV_MESA_BUILD to select this
+archive explicitly. Its default remains SDK Mesa pending the GPU-copy test.
+Do not launch unchanged GTA IV expecting the new path: the installed Wine
+package still has the original Vulkan PRX until a rebuilt package is installed.
+
+Local RADV PRX build passed (24 MiB), log
+build-ps4-logs/radv-placed-prx-build.log. A candidate Wine package also built
+(442236928 bytes), but is not uploaded. Final source review added a null-BO
+guard for VA-only unmaps; archive and PRX were rebuilt and host checks/reverse
+patch verification passed again. Repackage Wine from that latest PRX before
+uploading after the hardware test. No vkmapprobe START received yet.
+
+
+### Vulkan low aliases passed first GPU checks (2026-10-09 10:22:10)
+
+vkmapprobe hardware run: memory type2 (GTT, flags0x6) and type3 (visible VRAM,
+flags0x7) both mapped 64 KiB buffers at 0x10000000/0x11000000 and copied
+16384 words with zero mismatches, twice each, including RESERVE, remap and
+normal cleanup. This validates Onion and Garlic through the actual Vulkan
+mapping and GPU submission path. Evidence in current klog at 10:22:10.043.
+
+The probe then incorrectly reported FAIL for type4: that is the VRAM
+RADEON_FLAG_32BIT memory type excluded by this transfer buffer's
+memoryTypeBits. This was a probe error, not a failed alias/copy. Corrected it
+to destroy the incompatible buffer and SKIP the type, so cached type5 can
+also be tested; uploaded revised /data/pkg/vkmapprobe.pkg. Awaiting rerun.
+
+RADV PRX script now defaults to paired local Mesa; explicit
+PW_RADV_MESA_SRC/PW_RADV_MESA_BUILD overrides remain available. Latest Wine
+package rebuilt with the final PRX (442236928 bytes). Upload in progress.
+The first corrected-probe upload authorization timed out; one retry succeeded.
+No FTP probes or listings were performed.
+Wine upload completed successfully: /data/pkg/wine-app.pkg, 442236928 bytes,
+FTP226. User should rerun corrected mapping probe before installing/launching
+Wine for GTA IV. Runtime driver change is not yet confirmed through WoW64.
+
+
+### Vulkan mapping probe fully passed (2026-10-09 10:25:27)
+
+Corrected hardware run ended `vkmapprobe: DONE tested=3 result=PASS`.
+Type2 GTT (flags0x6), type3 visible VRAM (flags0x7), and type5 cached GTT
+(flags0xe) each passed two GPU copies of 16384 words with zero mismatches,
+placed CPU views at 0x10000000 and 0x11000000, RESERVE unmap, same-address
+remap, normal unmap and resource cleanup. Type4/type6 RADEON_FLAG_32BIT GPU-VA
+memory types were correctly skipped because transfer buffer memoryTypeBits
+excludes them. Six copies verified 98304 words in total. Evidence:
+build-ps4-logs/ps4-klog-20261009-094758.log, 10:25:15.448 START through
+10:25:27.248 DONE. The 12-second startup completed without a probe failure.
+
+Next: close probe, install /data/pkg/wine-app.pkg (already uploaded with the
+new RADV PRX), launch GTA IV. Check extension enumeration for
+VK_EXT_map_memory_placed and low WoW64 CPU maps; native probe success does
+not yet prove Wine's integration or GTA IV rendering. Runtime listener9300,
+klog3232 and UDP18194 remain required.
+
+
+### First GTA IV run with placed mapping: progress, then map refusal (10:27)
+
+Wine recognized placed mapping and successfully mapped at 0xd40000, created
+D3D12 resources and submitted GPU work. At 10:27:31.850 a later map returned
+VK_ERROR_MEMORY_MAP_FAILED (-5); vkd3d then asserted heap->map_ptr and the guest
+faulted at 0x79f9bff6 writing NULL. No frames or audio; flexible free286720K.
+This differs from the original high-pointer rejection: low aliases are active.
+Evidence: build-ps4-logs/ps5log-20261007-152429.log, 10:27:18 launch onward.
+
+Source review found a definite mapping bug: the new alias required BO size to
+be a multiple of16 KiB, but RADV allocations can be4 KiB. GPU VA/backing already
+rounds these to the kernel page; aliases now do the same. The exact size of the
+failed GTA buffer was not printed, so hardware rerun must confirm causality.
+Small-buffer actual-function host checks passed for Onion and Garlic, including
+coherence, reserve/remap and failure cleanup; log
+build-ps4-logs/mesa-alias-small-host-check.log. Archive and PRX rebuilt; patch0002
+updated and reverse-apply check passed.
+
+Expanded vkmapprobe now tests both64 KiB and4 KiB payloads for each compatible
+memory type; allocationSize stays at the Vulkan requirement while low VA
+reservations round to16 KiB. Uploaded /data/pkg/vkmapprobe.pkg and requested
+hardware run. Wine package rebuild in progress; do not install the previously
+uploaded Wine package expecting this size fix until replacement upload finishes.
+User reported probe crashed on close after prior PASS; recorded but deferred
+at their direction. Completed copy results precede that teardown crash.
+
+
+### Small-buffer hardware validation passed (10:30:18.256)
+
+Expanded vkmapprobe ended DONE tested=3 result=PASS. Both64 KiB and4 KiB
+allocations on GTT, visible VRAM and cached GTT passed low placed maps, GPU
+copies, reserve/remap and cleanup. Twelve GPU copies, zero mismatches
+(104448 words total). This validates kernel-page rounding in the driver.
+Wine packaging/upload remains next before repeating GTA IV. The failing GTA
+buffer size was not logged, so do not claim the game is fixed before rerun.
+Small-buffer Wine package upload completed: /data/pkg/wine-app.pkg,
+442236928 bytes, FTP226. Console install and GTA IV rerun pending.
+
+
+### GTA IV progressed beyond cracktro; shader compiler heap failure (10:32)
+
+With small-BO page rounding, the previously failed mapping now succeeds at
+0x39e0000; the Razor1911 cracktro runs (user confirmed), with GPU work and
+audible audio. GTA IV then initializes native D3D9/DXVK but stalls during
+shader compilation. Runtime reached frames_put6, audio2951/audible1656.
+
+First faults at10:32:25.539: libvulkan.so+0x10b04ce writes address9 and
++0x10b07c1 writes address18. llvm-addr2line resolves them to
+nir_alu_instr_create / nir_intrinsic_instr_create; disassembly shows a NULL
+return from gc_zalloc_size being dereferenced. DXVK then reports
+VK_ERROR_OUT_OF_HOST_MEMORY after Unix-call exceptions. The runtime still has
+278528K flexible memory; Wine heap is25360K. These aren't proof of system
+memory exhaustion. libvulkan.shared.elf still imported the malloc family
+from libSceLibcInternal instead of Wine's heap (the earlier13 MiB libc trap).
+
+RADV PRX now links pw_prx_heap_wrap_ps4.o and imports ntdll's
+pw_wine_heap_malloc/calloc/realloc/free/memalign. Standard/aligned allocators,
+strdup/strndup/asprintf/vasprintf all use this heap, keeping allocation/free
+provenance consistent. Existing strdup(NULL) guard preserved. ntdll.prx is
+NEEDED and those C libc allocation imports are absent from final ELF. PRX
+build passed; host actual-wrapper tests passed formatting/truncation,
+alignment validation, calloc/realloc and matching frees. Logs:
+build-ps4-logs/radv-heap-prx-build.log and radv-heap-host-check.log.
+
+Wine package build in progress. GTA IV rerun required to confirm this
+allocator change fixes shader compilation. No hardware success claimed yet.
+Final allocator review also found imported C++ delete/delete[]/sized-delete.
+orbis-compat's local C++ new calls the now-wrapped malloc, so those three
+deletes are wrapped to Wine heap free too. Disassembly confirmed new ->
+__wrap_malloc; final ELF no longer imports C++ delete. PRX rebuilt and host
+allocator tests passed again; Wine package rebuilding from this final PRX.
+Final shader-heap Wine package built and uploaded successfully (10:37):
+/data/pkg/wine-app.pkg, 442236928 bytes, FTP226. Host tests include all three
+C++ deletes. Install/launch GTA IV pending; loggers left running.
+
+### GTA IV reached the loaded scene (2026-10-09 10:39)
+
+User confirmed “IT LOADED” after launching the heap-corrected Wine package.
+The run passed the earlier crash site; no repeated NIR NULL write or DXVK
+VK_ERROR_OUT_OF_HOST_MEMORY. New WoW64 placed maps include 0x1f450000 and
+0x20450000. Swapchain reached1920x1080, frames_put rose to7, and runtime kept
+alive through tick2520; logs continue GPU fence/command-pool activity. User has
+not confirmed sound; audio callback counters alone are not proof of audible
+output. `shown=0` in diagnostic counter, so visual confirmation comes from the
+user, not that counter. This is a major milestone; assess controls, sound and
+sustained gameplay with user feedback before claiming full compatibility.
+Evidence: build-ps4-logs/ps5log-20261007-152429.log 10:38:43–10:39:32.
+
+### App crash after loaded scene (2026-10-09 10:39:46)
+
+The current GTA IV run stayed alive ~66 seconds after the user confirmed the
+scene loaded. It submitted/presented Vulkan frames and did not repeat the
+shader allocator failure. At10:39:46 thread00c4 faulted inside
+libSceLibcInternal+0x51ef7 while executing win32u syscall NtUserCallNoParam
+(0x133c). Fault address reported as0x453a00af4017, followed by syscall and
+thread teardown faults; the runtime disconnected10:39:51 and GoldHEN opened
+its crash reporter. No cause is proven: faulting code is Sony libc and the
+syscall's subcode/registers were not logged. Before the fault, system flexible
+memory remained235520K and RADV used Wine heap peak63472K, so the prior shader
+allocation failure did not recur. Capture for next iteration: log syscall
+argument/code and x86_64 fault registers only on syscall faults, to avoid noisy
+normal Vulkan traces; inspect NtUserCallNoParam code path before changing it.

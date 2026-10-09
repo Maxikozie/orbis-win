@@ -106,6 +106,7 @@ ntdll_shims="pw_wine_prx pw_wine_dl pw_wine_dl_libc pw_wine_compat pw_wine_compa
              pw_wine_sink pw_wine_cwd pw_wine_cwd_libc"
 # This port's own: lets the title write into ntdll's environment (see the file).
 $CC -std=gnu11 -O2 -fPIC -c "$gladius/src/native/pw_prx_env_ps4.c" -o "$prx/obj/pw_prx_env_ps4.o"
+$CC -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC -c "$gladius/src/native/pw_pthread_stack_ps4.c" -o "$prx/obj/pw_pthread_stack_ps4.o"
 srv_shims="pw_wine_compat pw_wine_compat_libc pw_wine_threads pw_wine_threads_libc \
            pw_wine_cwd pw_wine_cwd_libc"
 # A title cannot chdir: ntdll and wineserver each keep their own working
@@ -142,7 +143,11 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
     objs=$(link_objects "$target")
     [ -n "$objs" ] || { echo "  ✗ $name: no ELF link in make.log"; status=1; continue; }
     shim_objs=""
-    [ "$name" = ntdll ] && shim_objs="$heap $dmem $prx/obj/pw_prx_env_ps4.o"
+    thread_wraps=""
+    if [ "$name" = ntdll ]; then
+        shim_objs="$heap $dmem $prx/obj/pw_prx_env_ps4.o $prx/obj/pw_pthread_stack_ps4.o"
+        thread_wraps="-Wl,--wrap=pthread_create"
+    fi
     # ⚠ The server needs the heap too, and upstream says so: pw_wine_heap_libc.c
     # reads "the in-process wineserver links its own copy". Only ntdll got it
     # here, so wineserver kept importing malloc from the shared libc -- the very
@@ -190,7 +195,7 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
     log=$prx/$name.link.log
     # shellcheck disable=SC2086
     if (cd "$build" && $CC -shared -Wl,-Bsymbolic -Wl,--eh-frame-hdr \
-            -Wl,-soname,"$name.prx" -Wl,--warn-unresolved-symbols $cwd_wraps \
+            -Wl,-soname,"$name.prx" -Wl,--warn-unresolved-symbols $cwd_wraps $thread_wraps \
             -o "$prx/$name.shared.elf" $objs $shim_objs "$prx/obj/${name}_desc.o" \
             ) > "$log" 2>&1
     then

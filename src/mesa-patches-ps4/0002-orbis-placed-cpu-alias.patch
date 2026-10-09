@@ -1,0 +1,200 @@
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -391,6 +391,9 @@
+    /* Where ac_drm_bo_va_op_raw last mapped it. Zero until then, and ac_drm_bo_cpu_map says so rather than
+     * returning a plausible NULL. */
+    void *cpu;
++   /* Separately owned placed CPU view; cpu remains the GPU VA. */
++   void *cpu_alias;
++   uint64_t cpu_alias_bytes;
+    uint32_t handle;
+    struct amdgpu_bo_metadata metadata;
+    bool has_metadata;
+@@ -7609,6 +7612,8 @@
+ orbis_backing_unmap_locked(uint64_t addr, uint64_t size, struct orbis_bo *bo)
+ {
+ #if defined(__PS4__)
++   if (bo && ac_drm_bo_cpu_unmap(NULL, (ac_drm_bo){.abo = bo}))
++      return -EIO;
+    if (!orbis_arena_unmapped) {
+       /* The old flat arena: an unmap is bookkeeping the VA allocator already did, and there is no
+        * retire queue to park anything on - so a chunk still attached here has to go back now. */
+@@ -7709,6 +7714,9 @@
+    if (!obo)
+       return -EINVAL;
+ 
++   if (ac_drm_bo_cpu_unmap(dev, bo))
++      return -EIO;
++
+    simple_mtx_lock(&orbis_bo_lock);
+    if (obo->handle)
+       orbis_bo_slot[obo->handle - 1] = NULL;
+@@ -7732,40 +7740,92 @@
+ int
+ ac_drm_bo_cpu_map(ac_drm_device *dev, ac_drm_bo bo, void **cpu)
+ {
+-   /* NOT optional on this platform the way it is on amdgpu: radv_amdgpu_winsys_bo_map reaches the kernel
+-    * through a DRM_AMDGPU_GEM_MMAP ioctl there, and patches/0007 routes it here instead - so this is the
+-    * only door to a mapped BO.
+-    *
+-    * There is nothing to map: va_op_raw already did it, at the address RADV picked. Returning that address
+-    * is the whole body, because CPU and GPU share it. */
++   struct orbis_bo *obo = bo.abo;
++   if (!obo || !obo->cpu)
++      return -EINVAL;
++
++#if defined(__PS4__)
++   if (*cpu && *cpu != obo->cpu) {
++      const uint64_t page = orbis_page_size();
++      const uint64_t va = (uintptr_t)obo->cpu;
++      /* BO sizes can be 4 KiB; its GPU mapping and backing are rounded
++       * to the PS4 kernel page. The CPU alias must cover that same page. */
++      const uint64_t bytes = (obo->size + page - 1) & ~(page - 1);
++      uint64_t phys;
++      if (obo->foreign || obo->cpu_alias || !bytes ||
++          (((uintptr_t)*cpu | va | bytes) & (page - 1)))
++         return -EINVAL;
++      if (obo->garlic_bytes) {
++         if (va < obo->garlic_addr || bytes > obo->garlic_bytes ||
++             va - obo->garlic_addr > obo->garlic_bytes - bytes)
++            return -EINVAL;
++         phys = (uint64_t)obo->garlic_phys + va - obo->garlic_addr;
++      } else {
++         if (va < orbis_arena_map_base || va >= orbis_va_end ||
++             bytes > orbis_va_end - va)
++            return -EINVAL;
++         phys = orbis_arena_phys + va - orbis_arena_map_base;
++      }
++      void *alias = *cpu;
++      /* Vulkan's caller owns this reserved VA. Replace only that reservation,
++       * never the GPU mapping or the direct-memory allocation. */
++      const int32_t err = sceKernelMapDirectMemory(&alias, bytes, ORBIS_GRAPHICS_PROT,
++                                                  ORBIS_MAP_FIXED, (off_t)phys, page);
++      if (err) {
++         mesa_loge("orbis-drm: placed CPU map %p size=%llu failed: 0x%08x",
++                   *cpu, (unsigned long long)bytes, (unsigned)err);
++         return -ENOMEM;
++      }
++      obo->cpu_alias = alias;
++      obo->cpu_alias_bytes = bytes;
++      *cpu = alias;
++      return 0;
++   }
++#endif
++   if (*cpu && *cpu != obo->cpu)
++      return -EINVAL;
++   *cpu = obo->cpu;
++   return 0;
++}
++
++#if defined(__PS4__)
++int
++ac_drm_bo_cpu_unmap_reserve(ac_drm_device *dev, ac_drm_bo bo, bool reserve)
++{
+    struct orbis_bo *obo = bo.abo;
+    if (!obo)
+       return -EINVAL;
+-
+-   if (!obo->cpu) {
+-      /* A BO asked for by the CPU before anything mapped it. Refusing is right - inventing a second mapping
+-       * at a different address would give the CPU and the GPU two views of one buffer. */
+-      mesa_logw("orbis-drm: cpu_map on a BO with no VA mapping yet (handle %u)", obo->handle);
+-      return -EINVAL;
+-   }
+-
+-   /* *cpu carries a REQUESTED address on the way in (the virtio arm documents this), and RADV only uses that
+-    * for its replace path. Honouring it silently would hand back memory other than this BO's. */
+-   if (*cpu && *cpu != obo->cpu) {
+-      mesa_logw("orbis-drm: cpu_map at a fixed address is not supported here");
+-      return -EINVAL;
+-   }
+-
+-   *cpu = obo->cpu;
++   if (!obo->cpu_alias)
++      return reserve ? -EINVAL : 0;
++   void *alias = obo->cpu_alias;
++   const uint64_t bytes = obo->cpu_alias_bytes;
++   int32_t err = sceKernelMunmap(alias, bytes);
++   if (err)
++      return -EIO;
++   obo->cpu_alias = NULL;
++   obo->cpu_alias_bytes = 0;
++   if (reserve) {
++      /* FIXED | NO_OVERWRITE: retain ownership without committing flexible
++       * memory, and never replace an intervening allocation. */
++      err = sceKernelReserveVirtualRange(&alias, bytes, ORBIS_MAP_FIXED | 0x80,
++                                         orbis_page_size());
++      if (err) {
++         mesa_loge("orbis-drm: CPU alias reservation failed: 0x%08x", (unsigned)err);
++         return -EIO;
++      }
++   }
+    return 0;
+ }
++#endif
+ 
+ int
+ ac_drm_bo_cpu_unmap(ac_drm_device *dev, ac_drm_bo bo)
+ {
+-   /* A no-op that SUCCEEDS, and the reason is the same as cpu_map's: the mapping belongs to the VA op, not to
+-    * this call. Tearing it down here would unmap memory the GPU is still addressing. */
++#if defined(__PS4__)
++   return ac_drm_bo_cpu_unmap_reserve(dev, bo, false);
++#else
+    return bo.abo ? 0 : -EINVAL;
++#endif
+ }
+ 
+ int
+--- a/src/amd/common/ac_linux_drm.h
++++ b/src/amd/common/ac_linux_drm.h
+@@ -520,6 +520,9 @@
+ MESAPROC int ac_drm_bo_free(ac_drm_device *dev, ac_drm_bo bo) TAIL;
+ MESAPROC int ac_drm_bo_cpu_map(ac_drm_device *dev, ac_drm_bo bo, void **cpu) TAIL;
+ MESAPROC int ac_drm_bo_cpu_unmap(ac_drm_device *dev, ac_drm_bo bo) TAIL;
++#if defined(__PS4__)
++int ac_drm_bo_cpu_unmap_reserve(ac_drm_device *dev, ac_drm_bo bo, bool reserve);
++#endif
+ MESAPROC int ac_drm_va_range_alloc(ac_drm_device *dev, enum amdgpu_gpu_va_range va_range_type,
+                                uint64_t size, uint64_t va_base_alignment, uint64_t va_base_required,
+                                uint64_t *va_base_allocated, amdgpu_va_handle *va_range_handle,
+--- a/src/amd/vulkan/radv_physical_device.c
++++ b/src/amd/vulkan/radv_physical_device.c
+@@ -934,14 +934,8 @@
+       .EXT_legacy_vertex_attributes = !pdev->use_llvm,
+       .EXT_line_rasterization = true,
+       .EXT_load_store_op_none = true,
+-      /* ⚠ NEEDS A SEPARATELY OWNED CPU MAPPING, which is a DRM property rather than a Vulkan one. Placed
+-       * mapping promises the app an address it chose, and unmapping with RESERVE keeps that address
+-       * reserved by punching an anonymous PROT_NONE hole over it. Where one mapping serves both
+-       * processors - see radv_amdgpu_winsys_bo_map's no-DRM arm - neither is deliverable: the address
+-       * comes back from the allocator rather than being dictated, and the hole would land in the very
+-       * allocation the GPU is still addressing.
+-       */
+-#if MESA_SYSTEM_HAS_KMS_DRM
++      /* PS4 provides a separately owned direct-memory CPU alias. */
++#if MESA_SYSTEM_HAS_KMS_DRM || defined(__PS4__)
+       .EXT_map_memory_placed = true,
+ #endif
+       .EXT_memory_budget = true,
+--- a/src/amd/vulkan/winsys/amdgpu/radv_amdgpu_bo.c
++++ b/src/amd/vulkan/winsys/amdgpu/radv_amdgpu_bo.c
+@@ -821,6 +821,18 @@
+       return;
+ 
+    assert(bo->cpu_map);
++#if defined(__PS4__)
++   struct radv_amdgpu_winsys *ws = radv_amdgpu_winsys(_ws);
++   int err = ac_drm_bo_cpu_unmap_reserve(ws->dev, bo->bo, replace);
++   if (err) {
++      mesa_loge("radv: CPU alias unmap failed: %d", err);
++      /* Keep the recorded view if it is still mapped. */
++      if (ac_drm_bo_cpu_unmap(ws->dev, bo->bo))
++         return;
++   }
++   bo->cpu_map = NULL;
++   return;
++#endif
+    if (replace) {
+ #if !MESA_SYSTEM_HAS_KMS_DRM
+       /* ⚠ NOT REACHABLE HERE, and it must not become reachable by accident. `replace` is

@@ -55,7 +55,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, co
  * strdup is already defined strongly in this link -- the driver archive comes
  * in whole -- so this goes through --wrap, the same way the cwd layer takes
  * over its 28 calls, rather than trying to replace the definition. */
-char *__real_strdup(const char *text);
+
 
 char *__wrap_strdup(const char *text)
 {
@@ -69,7 +69,10 @@ char *__wrap_strdup(const char *text)
         }
         return NULL;
     }
-    return __real_strdup(text);
+    size_t bytes = strlen(text) + 1;
+    char *copy = malloc(bytes);
+    if (copy) memcpy(copy, text, bytes);
+    return copy;
 }
 
 /* ⚠ A valid, empty environ. The SDK ships libc only as a static archive, so

@@ -26,6 +26,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+extern int sceKernelAvailableFlexibleMemorySize(size_t *bytes);
+extern void pw_wow_log(const char *format, ...);
+
 typedef struct __emutls_control
 {
     size_t size;                              /* bytes in the object */
@@ -45,6 +48,7 @@ void *__emutls_get_address( __emutls_control *control )
     pthread_key_t key;
     void *object;
     size_t align;
+    size_t flexible_before = 0, flexible_after = 0;
 
     if (!control) return NULL;
 
@@ -69,7 +73,11 @@ void *__emutls_get_address( __emutls_control *control )
     if ((object = pthread_getspecific( key ))) return object;
 
     align = control->align < sizeof(void *) ? sizeof(void *) : control->align;
+    (void)sceKernelAvailableFlexibleMemorySize(&flexible_before);
     if (posix_memalign( &object, align, control->size ) || !object) return NULL;
+    (void)sceKernelAvailableFlexibleMemorySize(&flexible_after);
+    pw_wow_log("wowprospero memory: emutls object=%p bytes=%zu flexible_before=%zuK flexible_after=%zuK\n",
+               object, control->size, flexible_before >> 10, flexible_after >> 10);
     if (control->value) memcpy( object, control->value, control->size );
     else memset( object, 0, control->size );
     if (pthread_setspecific( key, object ))

@@ -119,46 +119,67 @@ flexible_region rank=3 at=7d8bb0000 bytes=16384K prot=0x3 name=orbis
 the kernel's name for any anonymous mapping, so the bucket name distinguishes
 nothing; the addresses do.
 
-**The current hypothesis** is that these are the DBT's per-thread code arenas.
-`thread_budget.h` sizes them against *"direct memory … out of up to 12 GiB"* —
-the PS5's budget — at 32 MiB per secondary thread, and `pw_wow_thread_fit`
-halves on refusal, which is exactly why they measure 16 MiB and not 32.
-Patch `0015` sets 8 MiB for secondary threads on PS4 (the first thread keeps its
-128 MiB; that is the arena a game's hot loop must fit in).
+**The DBT hypothesis was wrong.** Two runs of `0015` left the regions at
+16 MiB. `0016` records the actual allocations: secondary DBT arenas are
+8 MiB at `0x100...` addresses, not the `0x7d...` regions, and their setup
+usually leaves flexible memory unchanged. They already use Wine's direct-memory
+path. Do not move executable memory to solve this symptom.
 
-⚠ **`0015` is a measurement as much as a fix, and the next run decides it.**
-That those regions are arenas is *inferred* — from the address range being
-`place_above_guest`'s, and the count tracking the thread count — not proven;
-`prot=0x3` means they would be the read-write half of the engine's write/exec
-pair. If `flexible_region` drops to `8192K`, they are arenas. If it stays at
-`16384K`, the attribution is wrong and the next step is not the one it looks
-like.
+**The linked SDK thread interposer explains the 16 MiB regions.** Wine asks
+for a supplied 1 MiB kernel stack. The compatibility layer uses the calling
+thread's stack size as a floor (16 MiB here), raises Wine's request, and
+constructs new attributes without copying its supplied address. The kernel
+therefore allocates a fresh 16 MiB flexible stack for every worker.
+The bare thread probe does not exercise the same linked interposer.
 
-⚠ Do not credit the RADV `--wrap=scePthreadCreate` (4 MiB default stacks) with
-the 13 → 19 thread improvement. Halved arenas explain that equally well, and
-`mapped=461024K` was identical to the byte before and after it, which it should
-not have been if 288 MiB of Mesa stacks had been freed. The wrap is right on its
-own terms and is kept.
+`src/native/pw_pthread_stack_ps4.c`, linked into ntdll with
+`--wrap=pthread_create`, sends explicitly supplied stacks directly to
+`scePthreadCreate`. Calls without a supplied stack retain the SDK path.
+Wine installs its own alternate signal stack in `init_thread_pipe`.
+The wrapper reports both requested and actual stack addresses and sizes.
+**Confirmed on hardware:** the 09:00 run uses the supplied 1 MiB stacks
+and retains 290816K of flexible memory. GTA IV then fails earlier in its
+1911.dll D3D12 path with a Vulkan map error and guest access violation.
+The application closes without a host crash. Pinball is the next baseline.
 
-**After that**, the proper fix is to put the arenas back in direct memory, where
-the PS5 keeps them and where this console has gigabytes rather than megabytes.
-That lands in executable memory and the write/exec alias, which is not where to
-go while the consumer is still an inference.
+Do not credit the RADV `--wrap=scePthreadCreate` (4 MiB default stacks) with
+the earlier 13 → 19 thread improvement: identical mapped memory across those
+runs never established its effect. The ntdll stack override is a separate path.
 
 ### Resuming
 
+The latest diagnostic package includes the supplied-stack fix, `0016`
+allocation measurements, and Pinball input/font patches `0869` and `0821`. Install `/data/pkg/wine-app.pkg` after upload;
+launching the old installed package cannot test a newly uploaded build.
+The corrected GTA IV profile lives in `src/profiles/gtaiv.profile` and was
+uploaded separately: 1920x1080, upstream launch arguments, and XInput,
+with the intentional `d3d9=n` override retained for this copy's 1911.dll path.
+Pinball is now the active baseline: it draws frames and plays audio, but
+controls work on hardware with patch 0869, and System/MS Sans Serif load
+with patch 0821. The game renders but its window decorations are missing.
+Its profile shows the full 800x600 desktop and traces window layout and keys.
+See the latest entries in `docs/FINDINGS.md`.
+
 ```sh
 ./scripts/logs.sh klog &               # FIRST. See the warning below.
+python3 ./scripts/ps5logd.py &         # runtime TCP logs, port 9300; only one receiver
 ./scripts/build-app-ps4.sh --pkg --neo && ./scripts/deploy.sh wine-app
 ./scripts/build.sh threadprobe --pkg --neo --deploy    # only if a number is disputed
 ```
 
-Install from `/data/pkg/` and run GTA IV. Session logs come off with
-`scripts/ftp-get.py` from `/data/prospero-win/logs/`; `next.txt` names the next
-slot, so the run that just finished is `(next+7)%8`. Read, in this order:
-`flexible_region … bytes=` (8192K or 16384K — that is the open question),
-`available=`, whether `spawn_thread … FAILED` appears at all, and then how far
-the game gets.
+Install from `/data/pkg/` and launch Pinball. Press Options (F2), Cross
+(Space), and L1/R1 (Z/Slash). Check runtime logs for `input queue … status=0`,
+`key hwnd=… vk=… status=0`, and font families System/MS Sans Serif/Tahoma.
+The previous run accepted native input packets but dispatched no Windows
+keys; bitmap fonts failed through FreeType's libc file-opening path.
+Patch 0869 retains the input descriptor rather than duplicating it and drains
+it using poll because nonblocking mode is refused. Patch 0821 reads font
+metadata from already mapped bytes, with path-resolution diagnostics for the
+still-missing Tahoma. The user also reported the window border disappearing;
+frame dimensions remained 606x467, so do not assume a fullscreen mode switch.
+Console file logs are available through `scripts/ftp-get.py` from
+`/data/prospero-win/logs/`; `next.txt` names the next slot, so the run that just
+finished is `(next+7)%8`.
 
 ⚠ **Rebuilding wowprospero or ntdll needs the whole chain**, in this order, or
 the package ships a module that does not match the patches:
@@ -251,6 +272,8 @@ the left-hand name; the home screen shows the right-hand one.
 | `statprobe` | GLDS10007 | Gladius Stat Probe |
 | `dupprobe` | GLDS10008 | Gladius Dup Probe |
 | `threadprobe` | GLDS10009 | Gladius Thread Probe |
+| `mapprobe` | GLDS10010 | Gladius Mapping Probe |
+| `vkmapprobe` | GLDS10011 | Gladius Vulkan Mapping Probe |
 
 The presenter is the first prospero-win code to put a frame on a PS4.
 
@@ -278,3 +301,41 @@ installed with, so a stale install can disagree.
 - [orbis-ports/ps4-mesa-docs](https://github.com/orbis-ports/ps4-mesa-docs) — the port's record
 - [orbis-sdk-v1](https://github.com/orbis-ports/orbis-porting-kit/releases/tag/orbis-sdk-v1) — the pinned SDK bundle
 - [mpereiraesaa/prospero-win](https://github.com/mpereiraesaa/prospero-win) — the PS5 Wine runtime this is eventually aimed at
+
+
+### Current mapping experiment (2026-10-09)
+
+The direct-memory kernel probe passed: Onion and Garlic CPU aliases below
+4 GiB had zero mismatches, including offset aliases and cleanup. Mesa's placed
+CPU mapping implementation is built and saved in `src/mesa-patches-ps4/`.
+The corrected Vulkan probe passed all three compatible memory types, including
+cached GTT: six GPU copies, zero mismatches, reserve/remap and cleanup passed
+(`DONE tested=3 result=PASS`). Next: close the probe, install the already
+uploaded `/data/pkg/wine-app.pkg`, and launch GTA IV to test Wine's integration.
+Klog receiver
+is PID902402 writing `build-ps4-logs/ps4-klog-20261009-094758.log`.
+The rebuilt Wine package contains the new Vulkan driver; console installation
+is pending. `radv-prx-ps4.sh` now defaults to the local Mesa build.
+
+
+Latest GTA IV run confirmed low placed maps (0xd40000) and GPU submissions,
+then a later map failed (-5) and the guest faulted. Fixed the alias's rejection
+of4 KiB BO sizes by rounding to the same16 KiB kernel page as the GPU mapping.
+The expanded `/data/pkg/vkmapprobe.pkg` tests4 KiB as well as64 KiB buffers;
+hardware rerun passed both sizes on all three compatible memory types:
+12 GPU copies with zero mismatches. Wine package is rebuilding with this refinement.
+
+
+GTA IV with page rounding now runs the Razor1911 intro, then initializes DXVK
+and faults during shader compilation: NIR allocations return NULL from the
+console libc heap. RADV PRX now uses ntdll's Wine heap for ordinary/aligned and
+allocating string functions; build and host checks pass. Replacement Wine
+package is uploaded at `/data/pkg/wine-app.pkg`; reinstall and launch GTA IV.
+Shader compilation hardware verification remains pending.
+
+
+2026-10-09: user confirmed GTA IV reached the loaded scene with the heap
+corrected Vulkan PRX. Runtime passed the previous shader-allocation fault,
+created low placed mappings and reached a1920x1080 swapchain with frame
+submissions. Sound is unconfirmed; continue checking controls and sustained
+play rather than declaring compatibility complete.

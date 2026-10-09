@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] wowprospero: measure per-thread allocations against flexible memory
+
+0015 is present in the packaged translator, but live regions remain 16 MiB
+and pthread_create fails at 19 threads with 3 MiB flexible memory free.
+Record state and actual code allocations rather than infer their identity
+from anonymous region sizes. PS4 emulated TLS also records its allocation
+in the tracked src/native/pw_emutls_ps4.c helper.
+
+diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
+--- a/wine/wowprospero/unix.c
++++ b/wine/wowprospero/unix.c
+@@ -52,6 +52,23 @@
+ #else
+ #define PW_WOW_NOTE( ... ) fprintf( stderr, __VA_ARGS__ )
+ #endif
++
++/* Compare the actual allocations with the flexible-memory regions. */
++static void thread_memory_note( const char *stage, const void *address, size_t bytes )
++{
++#ifdef PW_WOW_PS4_BUDGET
++    extern int sceKernelAvailableFlexibleMemorySize( size_t *bytes );
++    size_t available = 0;
++    int status = sceKernelAvailableFlexibleMemorySize( &available );
++    PW_WOW_NOTE( "wowprospero memory: tid=%04x stage=%s at=%p bytes=%zu flexible=%zuK status=%d\n",
++                 (unsigned)(uintptr_t)NtCurrentTeb()->ClientId.UniqueThread,
++                 stage, address, bytes, available >> 10, status );
++#else
++    (void)stage;
++    (void)address;
++    (void)bytes;
++#endif
++}
+ 
+ /* The guest range every translated access is checked against (load_state). */
+ enum { GUEST_LOW = 0x10000u, GUEST_HIGH = 0xfffff000u };
+@@ -495,6 +512,7 @@
+             PW_WOW_NOTE( "wowprospero: translator starting, thread state %zu bytes\n",
+                          sizeof(*thread) );
+     }
++    thread_memory_note( "before-state", NULL, sizeof(*thread) );
+     if (!(thread = calloc( 1, sizeof(*thread) )))
+     {
+ #ifdef __PROSPERO__
+@@ -521,6 +539,7 @@
+                      sizeof(*thread) );
+         return NULL;
+     }
++    thread_memory_note( "after-state", thread, sizeof(*thread) );
+     first = !__atomic_load_n( &first_thread_ready, __ATOMIC_ACQUIRE );
+     if (pw_wow_host_backend( &thread->vm, &host_memory ) != PW_OK ||
+         (attempt = pw_wow_thread_fit( first, setup_thread, thread, &budget )) < 0)
+@@ -530,6 +549,12 @@
+         free( thread );
+         return NULL;
+     }
++    thread_memory_note( "after-setup", thread->entries, budget.entries * sizeof(*thread->entries) );
++    thread_memory_note( "code-arena", thread->engine.code.write_base, thread->engine.code.bytes );
++    thread_memory_note( "hostexec", thread->hostexec.code.write_base, thread->hostexec.code.bytes );
++    PW_WOW_NOTE( "wowprospero budget: tid=%04x first=%d attempt=%d entries=%u arena=%zuK hostexec=%zuK\n",
++                 (unsigned)(uintptr_t)NtCurrentTeb()->ClientId.UniqueThread,
++                 first, attempt, budget.entries, budget.arena_bytes >> 10, budget.hostexec_bytes >> 10 );
+     if (attempt)
+         fprintf( stderr, "wowprospero: %s thread's translator reduced to %u entries, %zu KiB of code\n",
+                  first ? "first" : "further", budget.entries, budget.arena_bytes >> 10 );
