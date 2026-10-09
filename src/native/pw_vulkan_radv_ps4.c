@@ -28,8 +28,15 @@
 PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
 PFN_vkVoidFunction VKAPI_CALL vk_common_GetDeviceProcAddr(VkDevice device, const char *name);
 
+/* Defined at the end of this file, next to the reasoning for it. */
+static void pw_radv_load_env(void);
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char *name)
 {
+    /* Before RADV can read a single one of them: this is the first entry point
+     * anything calls, and vkCreateInstance -- where the driver reads its
+     * environment -- comes through it. */
+    pw_radv_load_env();
     return vk_icdGetInstanceProcAddr(instance, name);
 }
 
@@ -266,4 +273,59 @@ int __wrap_scePthreadCreate(pthread_t *thread, const pthread_attr_t *attr,
         sceKernelDebugOutText(0, line);
     }
     return rc;
+}
+
+/* ⚠ RADV's own switches have never been reachable on this console.
+ *
+ * mesa-ps4 is full of them -- ORBIS_TESS_WORKGROUPS to resize the tessellation
+ * ring, ORBIS_HS_OFFCHIP_PER_SE to re-arm the per-shader-engine reading,
+ * ORBIS_TESS_RING_WATERMARK to measure the ring's high-water mark, which is how
+ * the 256-workgroup figure in ac_gpu_info.c was arrived at in the first place.
+ * Every one of them is a getenv, and this module imports getenv but has no
+ * environment to read: the SDK ships libc as a static archive, so each PRX
+ * carries a private one, and src/native/pw_prx_env_ps4.c exists because this
+ * console's setenv reports success while leaving environ NULL.
+ *
+ * So the driver's instrumentation has been switched off the whole time, and
+ * the comment in ac_gpu_info.c offering ORBIS_HS_OFFCHIP_PER_SE=1 "if the
+ * factor-ring candidate is eliminated" describes a knob nobody here could
+ * turn.
+ *
+ * Give this module an environment of its own, out of a file, so those knobs
+ * work. pw_ps4_setenv writes into this PRX's environment and publishes it, and
+ * because RADV is linked into this same PRX its getenv reads exactly that.
+ *
+ * /data/prospero-win/radv.env, one NAME=VALUE per line, # for a comment:
+ *
+ *     ORBIS_TESS_RING_WATERMARK=1
+ *     ORBIS_TESS_WORKGROUPS=512
+ *
+ * ⚠ A file rather than the title's environment on purpose. Nothing can hand a
+ * variable across to a private environment, and a file is also the pattern the
+ * rest of this port already uses for switches it cannot pass (pw_wow_profile,
+ * pw_sched, pw_image_view_fd_release). Absent file: nothing set, as before. */
+int pw_ps4_setenv(const char *name, const char *value);
+
+static void pw_radv_load_env(void)
+{
+    static int loaded;
+    char line[256];
+    FILE *file;
+
+    if (loaded++) return;
+    if (!(file = fopen("/data/prospero-win/radv.env", "r"))) return;
+    while (fgets(line, sizeof(line), file)) {
+        char *equals, *end;
+        char *name = line;
+
+        while (*name == ' ' || *name == '\t') name++;
+        if (*name == '#' || *name == '\n' || !*name) continue;
+        if (!(equals = strchr(name, '='))) continue;
+        *equals = 0;
+        for (end = equals; end > name && (end[-1] == ' ' || end[-1] == '\t'); end--) end[-1] = 0;
+        end = equals + 1;
+        for (char *p = end; *p; p++) if (*p == '\n' || *p == '\r') { *p = 0; break; }
+        pw_ps4_setenv(name, end);
+    }
+    fclose(file);
 }

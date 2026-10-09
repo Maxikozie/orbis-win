@@ -55,6 +55,13 @@ echo "== 1. entry points =="
 $CC -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$mesa_src/include" \
     -c "$root/src/native/pw_vulkan_radv_ps4.c" -o "$work/obj/pw_vulkan_radv_ps4.o"
 
+# ⚠ The module's own environment, so RADV's ORBIS_* switches can be read at
+# all. Each PRX carries a private environment here and this one had none, which
+# left the driver's tessellation knobs and its ring watermark probe switched
+# off; pw_vulkan_radv_ps4.c fills it from /data/prospero-win/radv.env.
+$CC -std=c11 -O2 -Wall -Wextra -Werror -fPIC \
+    -c "$root/src/native/pw_prx_env_ps4.c" -o "$work/obj/pw_prx_env_ps4.o"
+
 echo "== 2. descriptor =="
 python3 "$pw/tools/gen_prx_descriptor.py" "$work/obj/libvulkan_desc.c" \
     vkGetInstanceProcAddr vkGetDeviceProcAddr
@@ -84,7 +91,7 @@ $CC -shared -Wl,-Bsymbolic -Wl,--eh-frame-hdr -Wl,-soname,libvulkan.prx \
     -Wl,--wrap=_ZdlPv -Wl,--wrap=_ZdaPv -Wl,--wrap=_ZdlPvm \
     -Wl,-T,"$work/mesa_optional_zero.ld" -Wl,--warn-unresolved-symbols \
     -o "$prx/libvulkan.shared.elf" \
-    "$work/obj/pw_vulkan_radv_ps4.o" "$work/obj/libvulkan_desc.o" \
+    "$work/obj/pw_vulkan_radv_ps4.o" "$work/obj/pw_prx_env_ps4.o" "$work/obj/libvulkan_desc.o" \
     "$work/obj/pw_prx_heap_wrap_ps4.o" \
     -Wl,--whole-archive "$archive" -Wl,--no-whole-archive \
     "$zlib" -lSceGnmDriver -lSceVideoOut > "$log" 2>&1 ||
