@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>      /* snprintf, for the stack-size note below */
 
 PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
 PFN_vkVoidFunction VKAPI_CALL vk_common_GetDeviceProcAddr(VkDevice device, const char *name);
@@ -186,4 +187,80 @@ void *__wrap___tls_get_addr(struct pw_tls_index *index)
         if (pthread_setspecific(pw_tls_key, block)) { free(block); return NULL; }
     }
     return block + index->offset;
+}
+
+/* ⚠ A thread created without a stack size costs 16 MiB of flexible memory.
+ *
+ * GTA IV cannot start a thread after about a dozen, and the reason is not
+ * threads: flexible memory is gone. At the moment pthread_create is refused
+ * there are 3072 KiB left of 449536, and the regions holding it are these --
+ *
+ *     flexible_holder rank=1 bytes=378880K count=24 prot=0x3 name=orbis
+ *     flexible_region rank=2 at=7d7bb0000 bytes=16384K prot=0x3 name=orbis
+ *     flexible_region rank=3 at=7d8bb0000 bytes=16384K prot=0x3 name=orbis
+ *     ...
+ *
+ * twenty-four contiguous 16 MiB mappings, 370 MiB of the 461 MiB this process
+ * has mapped. src/thread-probe had already measured what a 16 MiB region is:
+ * its trial C, threads taking the library's own stack, managed 28 before
+ * flexible memory hit zero -- about 16 MiB each. These are thread stacks.
+ *
+ * Mesa starts its worker threads through scePthreadCreate (u_thread_create),
+ * and where the attribute is NULL this console gives each one a 16 MiB stack.
+ * Wine's own threads escape it only because spawn_thread hands over a stack of
+ * its own.
+ *
+ * So supply the size Mesa does not. 4 MiB: generous for what these threads do
+ * -- ACO and NIR, which recurse over a shader's control flow and not much else
+ * -- and a quarter of what Linux hands a default thread, where the same code
+ * runs. Twenty-four of them cost 96 MiB instead of 384 MiB. If a compile
+ * thread ever faults deep in a pass, this is the number to raise first.
+ *
+ * ⚠ Only threads that asked for nothing, or for more than this, are changed. A
+ * caller that chose its own smaller stack keeps it. */
+enum { PW_RADV_THREAD_STACK = 4u << 20 };
+
+int scePthreadAttrInit(pthread_attr_t *attr);
+int scePthreadAttrDestroy(pthread_attr_t *attr);
+int scePthreadAttrSetstacksize(pthread_attr_t *attr, size_t size);
+int scePthreadAttrGetstacksize(const pthread_attr_t *attr, size_t *size);
+int scePthreadAttrGetdetachstate(const pthread_attr_t *attr, int *state);
+int scePthreadAttrSetdetachstate(pthread_attr_t *attr, int state);
+int sceKernelDebugOutText(int channel, const char *text);
+
+int __real_scePthreadCreate(pthread_t *thread, const pthread_attr_t *attr,
+                            void *(*entry)(void *), void *arg, const char *name);
+
+int __wrap_scePthreadCreate(pthread_t *thread, const pthread_attr_t *attr,
+                            void *(*entry)(void *), void *arg, const char *name)
+{
+    static unsigned adjusted;
+    pthread_attr_t local;
+    size_t size = 0;
+    int detach = 0, rc;
+
+    if (attr && !scePthreadAttrGetstacksize(attr, &size) && size && size <= PW_RADV_THREAD_STACK)
+        return __real_scePthreadCreate(thread, attr, entry, arg, name);
+    if (scePthreadAttrInit(&local))
+        return __real_scePthreadCreate(thread, attr, entry, arg, name);
+    if (attr && !scePthreadAttrGetdetachstate(attr, &detach))
+        scePthreadAttrSetdetachstate(&local, detach);
+    scePthreadAttrSetstacksize(&local, PW_RADV_THREAD_STACK);
+    rc = __real_scePthreadCreate(thread, &local, entry, arg, name);
+    scePthreadAttrDestroy(&local);
+
+    /* The first few, so a run says whether this module owns those twenty-four
+     * mappings or only some of them. ⚠ Whether this channel carries from a PRX
+     * is not certain -- it does from wineserver and does not from wowprospero
+     * -- but the flexible-memory figures in the title's log answer the same
+     * question without it. */
+    if (adjusted++ < 8) {
+        char line[160];
+
+        snprintf(line, sizeof(line),
+                 "radv: thread %u \"%s\" asked %zuK, given %uK\n",
+                 adjusted, name ? name : "-", size >> 10, PW_RADV_THREAD_STACK >> 10);
+        sceKernelDebugOutText(0, line);
+    }
+    return rc;
 }
