@@ -3818,3 +3818,49 @@ Open, and unprioritised: whether the loss is time- or event-dependent (does a
 second run die at the same point?), whether lowering the game's video-memory
 argument or resolution changes it, and whether RADV's hang detection can be
 reached on this console given that the environment is not published to it.
+
+### The GPU loss is deterministic, at the cutscene (2026-10-09)
+
+Two Neo runs, both dying at the same place: through the loading screen, through
+"loading first mission", and then at the moment the intro cutscene would start
+rendering. The user's observation, not the log's -- `vk_shown=0` means the
+title's counters never see RADV's own presents, so what is on screen is only
+knowable from the room.
+
+So it is event-driven, not time- or leak-driven: a render path that appears for
+the first time at that moment takes the GPU down.
+
+The two deaths differ in severity, which is itself information:
+
+    run 1  11:38:03  DxvkSubmissionQueue: Command submission failed:
+                     VK_ERROR_DEVICE_LOST        (then ran on briefly)
+    run 2  11:45:35  alive tick=11220, then --- disconnected ---
+                     (no DXVK error at all)
+
+Run 2's kill arrived faster than DXVK could report it. Audio was healthy to the
+last tick in both (`audible=19665`).
+
+⚠ Correction to an earlier reading in this file: **every run today reports
+`1002:9924`, Gladius.** The `1002:9920` seen previously was from before the
+`--neo` fix. The Pro path has been active for all of today's work, including
+the runs that loaded a scene with working sound and input -- so Gladius is not
+newly implicated by this crash, it has simply never been exercised this far.
+
+### The base-PS4 experiment, set up but not yet answered
+
+A package built without `--neo` runs the Pro as a base PS4: 18 CUs, Liverpool.
+The point is to switch off the path README calls *"written and unexercised"* --
+`CHIP_GLADIUS` is declared and every captured dump, CTS run and frame in
+mesa-ps4's record came off a base PS4.
+
+    renders the cutscene  -> the fault is in the Gladius path
+    dies the same way     -> Neo is not the variable, and the cutscene's own
+                             shaders are next, on any CU count
+
+Status: the control is confirmed good -- the run reports `1002:9920`, so the
+Neo bit really is off -- and it was healthy at 2m40s, past where the Neo runs
+were by then. But it was closed before the cutscene, so **it proves nothing
+yet**. The Neo package is kept so the pair can be compared properly.
+
+⚠ Do not read "survived longer" as a result. The Neo runs died at the
+cutscene, not at a time, so only reaching the same point counts.
