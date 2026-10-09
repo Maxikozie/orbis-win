@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] ntdll: Say where a new thread stops on this console.
+
+GTA IV's hang is not graphics. The game waits on a DirectSound buffer's
+notification positions; under that is waveOutOpen(WAVE_MAPPER), and under
+that WINMM_StartDevicesThread, which creates a thread and waits on
+{event, thread handle} forever (dlls/winmm/waveform.c:2377) -- the
+"handles {f4, f8}, timeout (infinite)" that has been in every log today.
+
+That thread never runs one guest instruction. With a probe in the WoW64
+CPU backend, BTCpuThreadInit fires exactly once in a whole run, for the
+main thread, and never for this one; only two thread ids appear in the
+log at all. The thread object exists and has not died -- it is the
+handle being waited on. So the host thread is wedged somewhere between
+pthread_create and wow64's per-thread hook, and nothing in that stretch
+says a word.
+
+This is that stretch, four lines of it: the spawn and its stack, entry to
+server_init_thread, the reply pipe and unix tid, and the suspend flag the
+server answered with. Each one separates a different cause -- a thread
+that never starts, one that cannot make its first server call, one the
+server told to stay suspended.
+
+⚠ fprintf to stderr, not ERR: this runs before the thread has a debug
+channel, and ntdll's stderr reaches the session log as "WINE <text>".
+
+⚠ Diagnostic only. There is a WINE_PS5_WAIT_WATCHDOG that covers some of
+this already, but the launcher passes Wine no environment and this
+console's environ is its own problem, so it has never once been on.
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index e725c4d521..4443a98cc3 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -2437,12 +2437,25 @@ void server_init_thread( struct thread_data *data )
+ 
+     data->pthread_id = pthread_self();
+     pthread_setspecific( thread_data_key, data );
++#ifdef __PROSPERO__
++    /* ⚠ DIAGNOSTIC: see spawn_thread in dlls/ntdll/unix/thread.c. A 32-bit
++     * thread never reaches wow64, and nothing between pthread_create and
++     * BTCpuThreadInit says a word. These lines are that stretch. */
++    fprintf( stderr, "wine-ps5: thread entered tid=%04x\n", (unsigned)data->tid );
++#endif
+     if (data->ps5_spawn_us && ps5_now_us() - data->ps5_spawn_us > 100000)
+         fprintf( stderr, "wine-ps5: slow thread start ms=%llu\n", (ps5_now_us() - data->ps5_spawn_us) / 1000 );
+ 
+     reply_pipe = init_thread_pipe( data );
++#ifdef __PROSPERO__
++    fprintf( stderr, "wine-ps5: thread pipe tid=%04x reply=%d unix_tid=%d\n",
++             (unsigned)data->tid, reply_pipe, get_unix_tid() );
++#endif
+ #ifdef WINE_INPROCESS_SERVER
+     register_inprocess_thread( get_unix_tid() );
++#endif
++#ifdef __PROSPERO__
++    fprintf( stderr, "wine-ps5: thread registered tid=%04x\n", (unsigned)data->tid );
+ #endif
+     SERVER_START_REQ( init_thread )
+     {
+@@ -2455,6 +2468,10 @@ void server_init_thread( struct thread_data *data )
+         data->suspend = reply->suspend;
+     }
+     SERVER_END_REQ;
++#ifdef __PROSPERO__
++    fprintf( stderr, "wine-ps5: thread init done tid=%04x suspend=%d\n",
++             (unsigned)data->tid, data->suspend );
++#endif
+ #ifndef __PROSPERO__
+     /* the server holds a duplicate of this pipe. On PS4 it holds this very
+      * descriptor -- wine_server_send_fd hands it over rather than copying it --
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 0477c558ca..e81863931a 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1349,6 +1349,18 @@ static NTSTATUS spawn_thread( struct thread_data *data )
+         InterlockedDecrement( &nb_threads );
+         status = STATUS_NO_MEMORY;
+     }
++#ifdef __PROSPERO__
++    /* ⚠ DIAGNOSTIC. A 32-bit thread this process creates never reaches wow64:
++     * BTCpuThreadInit fires once, for the main thread, and never again, while
++     * winmm's devices thread -- created here -- waits to be told it is ready
++     * and never is. The thread object exists and has not died, so the host
++     * thread is wedged somewhere between pthread_create and wow64's per-thread
++     * hook, and nothing in that stretch says a word. These four lines are that
++     * stretch; stderr from ntdll reaches the session log as "WINE <text>". */
++    fprintf( stderr, "wine-ps5: spawn_thread tid=%04x status=%08x stack=%p+%zu\n",
++             (unsigned)data->tid, (unsigned)status, get_kernel_stack( data ),
++             (size_t)kernel_stack_size );
++#endif
+     pthread_attr_destroy( &attr );
+     pthread_sigmask( SIG_SETMASK, &sigset, NULL );
+     return status;
