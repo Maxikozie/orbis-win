@@ -230,6 +230,7 @@ WOW_DBT="$root/src/pw_x86_engine.c $root/src/pw_x86_block.c $root/src/pw_x86_cac
 $CC -shared -Wl,-Bsymbolic -Wl,-soname,wowprospero.prx \
     -femulated-tls \
     -D__WINESRC__ -DWINE_UNIX_LIB -D_REENTRANT \
+    -DPW_WOW_PS4_BUDGET \
     -I"$root/wine/wowprospero" -I"$build/include" -I"$work/source/include" \
     -I"$root/src" -I"$root/include" \
     "$root/wine/wowprospero/unix.c" $WOW_DBT "$gladius/src/native/pw_emutls_ps4.c" "$gladius/src/native/pw_wow_log_ps4.c" "$prx/obj/wowprospero_desc.o" \
