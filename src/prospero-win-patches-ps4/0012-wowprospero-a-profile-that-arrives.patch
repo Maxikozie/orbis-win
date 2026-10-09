@@ -40,6 +40,11 @@ index 01d21a5..a7ff889 100644
 --- a/wine/wowprospero/unix.c
 +++ b/wine/wowprospero/unix.c
 @@ -43,6 +43,16 @@
+diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
+index 01d21a5..a51c06d 100644
+--- a/wine/wowprospero/unix.c
++++ b/wine/wowprospero/unix.c
+@@ -43,6 +43,16 @@
  #include "call_top.h"
  #include "host_memory.h"
  
@@ -156,7 +161,7 @@ index 01d21a5..a7ff889 100644
      first = !__atomic_load_n( &first_thread_ready, __ATOMIC_ACQUIRE );
      if (pw_wow_host_backend( &thread->vm, &host_memory ) != PW_OK ||
          (attempt = pw_wow_thread_fit( first, setup_thread, thread, &budget )) < 0)
-@@ -874,6 +941,38 @@ static void profile_native_sample(uintptr_t pc)
+@@ -874,6 +941,111 @@ static void profile_native_sample(uintptr_t pc)
      }
      __atomic_fetch_add(&profile_native_overflow, 1, __ATOMIC_RELAXED);
  }
@@ -192,10 +197,83 @@ index 01d21a5..a7ff889 100644
 +               pc, (unsigned long long)best, (unsigned long long)total);
 +}
 +
++#ifdef __PROSPERO__
++/* ⚠ The console's own module table, declared here rather than included: this
++ * is a Wine unix library and orbis/libkernel.h does not belong in it. Shapes
++ * from sdk/orbis-sdk-v1/sdk/include/orbis/_types/kernel.h. */
++typedef struct { void *address; uint32_t size; int32_t prot; } pw_module_segment;
++typedef struct { size_t size; char name[256]; pw_module_segment segment[4];
++                 uint32_t segments; uint8_t fingerprint[20]; } pw_module_info;
++int32_t sceKernelGetModuleList(int32_t *array, size_t size, size_t *available);
++int32_t sceKernelGetModuleInfo(int32_t handle, pw_module_info *info);
++
++/* Log where every module sits, once, so the raw host addresses below can be
++ * attributed offline. dladdr answers nothing here, and resolving a name inside
++ * the signal handler is not worth the risk for a diagnostic. */
++static void profile_modules(void)
++{
++    int32_t handles[256];
++    size_t available = 0;
++
++    if(sceKernelGetModuleList(handles, sizeof(handles) / sizeof(handles[0]), &available)) return;
++    if(available > sizeof(handles) / sizeof(handles[0])) available = sizeof(handles) / sizeof(handles[0]);
++    for(size_t i = 0; i < available; i++) {
++        pw_module_info info;
++
++        memset(&info, 0, sizeof(info));
++        info.size = sizeof(info);
++        if(sceKernelGetModuleInfo(handles[i], &info)) continue;
++        info.name[sizeof(info.name) - 1] = 0;
++        pw_wow_log("wowprospero module: %s text=%p+%x\n", info.name,
++                   info.segments ? info.segment[0].address : (void *)0,
++                   info.segments ? info.segment[0].size : 0u);
++    }
++}
++#endif
++
++/* ⚠ The samples that matter may never be attributed to a guest address.
++ *
++ * A sample lands in a thread's hotspot table only while that thread is inside
++ * its translator's arena. A thread running host code -- Wine, a PRX, RADV --
++ * is counted in profile_unattributed and keyed by host PC in profile_native,
++ * and profile_native_dump only runs where run() returns, which a spinning
++ * thread never reaches. So report from the handler here too, throttled to the
++ * report period, with no malloc and no qsort: pick the top few by repeated
++ * scan, which is four passes over the table every five seconds. */
++static uint64_t profile_native_report_tsc;
++static void profile_native_line(uint64_t tsc)
++{
++    uint64_t ceiling = ~0ull;
++
++    if(!profile_sample_period) return;
++    if(profile_native_report_tsc && tsc - profile_native_report_tsc < profile_sample_period) return;
++    profile_native_report_tsc = tsc;
++    pw_wow_log("wowprospero profile_process: ticks=%llu unattributed=%llu overflow=%llu\n",
++               (unsigned long long)__atomic_load_n(&profile_ticks, __ATOMIC_RELAXED),
++               (unsigned long long)__atomic_load_n(&profile_unattributed, __ATOMIC_RELAXED),
++               (unsigned long long)__atomic_load_n(&profile_native_overflow, __ATOMIC_RELAXED));
++    for(unsigned rank = 0; rank < 4; rank++) {
++        uintptr_t pc = 0;
++        uint64_t best = 0;
++
++        for(unsigned i = 0; i < PROFILE_NATIVE_SLOTS; i++) {
++            uint64_t samples = __atomic_load_n(&profile_native[i].samples, __ATOMIC_RELAXED);
++            if(samples > best && samples < ceiling) {
++                best = samples;
++                pc = __atomic_load_n(&profile_native[i].pc, __ATOMIC_ACQUIRE);
++            }
++        }
++        if(!best) return;
++        pw_wow_log("wowprospero native: rank=%u pc=%#lx samples=%llu\n",
++                   rank, (unsigned long)pc, (unsigned long long)best);
++        ceiling = best;
++    }
++}
++
  static void profile_handler(int signal, siginfo_t *info, void *context)
  {
      const uintptr_t rip = *context_rip(context);
-@@ -888,6 +987,7 @@ static void profile_handler(int signal, siginfo_t *info, void *context)
+@@ -888,6 +1060,7 @@ static void profile_handler(int signal, siginfo_t *info, void *context)
              PwX86HotspotProfile *profile = __atomic_load_n(&arenas[i].profile, __ATOMIC_ACQUIRE);
              if(profile) {
                  pw_x86_engine_sample(arenas[i].engine, rip, profile);
@@ -203,7 +281,15 @@ index 01d21a5..a7ff889 100644
                  return;
              }
              break;
-@@ -926,22 +1026,33 @@ static void profile_start(void)
+@@ -895,6 +1068,7 @@ static void profile_handler(int signal, siginfo_t *info, void *context)
+     }
+     __atomic_fetch_add(&profile_unattributed, 1, __ATOMIC_RELAXED);
+     profile_native_sample(rip);
++    profile_native_line(__rdtsc());
+ }
+ 
+ static uint64_t profile_monotonic_ns(void)
+@@ -926,22 +1100,36 @@ static void profile_start(void)
  {
      profile_path = getenv("PW_WOW_PROFILE");
  #ifdef __PROSPERO__
@@ -237,12 +323,15 @@ index 01d21a5..a7ff889 100644
 -    fprintf(stderr, "wowprospero profile_clock: tsc_hz=%llu calibration_ms=%u period_ms=%u\n",
 -            (unsigned long long)profile_tsc_rate, PROFILE_CALIBRATION_NS / 1000000, PROFILE_PERIOD_MS);
 +    profile_sample_period = profile_period_ticks;
++#ifdef __PROSPERO__
++    profile_modules();
++#endif
 +    pw_wow_log("wowprospero profile_clock: tsc_hz=%llu calibration_ms=%u period_ms=%u\n",
 +               (unsigned long long)profile_tsc_rate, PROFILE_CALIBRATION_NS / 1000000, PROFILE_PERIOD_MS);
      struct sigaction action;
      struct itimerval timer = { { 0, 1000 }, { 0, 1000 } };
      memset(&action, 0, sizeof(action));
-@@ -949,7 +1060,7 @@ static void profile_start(void)
+@@ -949,7 +1137,7 @@ static void profile_start(void)
      action.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
      sigemptyset(&action.sa_mask);
      if(sigaction(SIGPROF, &action, NULL) || setitimer(ITIMER_PROF, &timer, NULL)) {
@@ -251,7 +340,7 @@ index 01d21a5..a7ff889 100644
          profile_path = NULL;
      }
  }
-@@ -957,7 +1068,7 @@ static void profile_start(void)
+@@ -957,16 +1145,24 @@ static void profile_start(void)
  static void profile_add_thread(struct pw_thread *thread)
  {
      if(profile_path && !thread->engine.fault_markers) {
@@ -260,3 +349,21 @@ index 01d21a5..a7ff889 100644
          return;
      }
      if(profile_path) {
++        unsigned i;
++
+         thread->profile = calloc(1, sizeof(*thread->profile));
+-        for(unsigned i = 0; i < MAX_ARENAS; i++)
++        for(i = 0; i < MAX_ARENAS; i++)
+             if(__atomic_load_n(&arenas[i].high, __ATOMIC_ACQUIRE) && arenas[i].engine == &thread->engine) {
+                 __atomic_store_n(&arenas[i].profile, thread->profile, __ATOMIC_RELEASE);
+                 break;
+             }
++        /* ⚠ A thread whose arena is not mapped yet is never published, and
++         * then every guest sample it takes is counted as unattributed for the
++         * life of the process. Say so rather than let it look like host code. */
++        if(i == MAX_ARENAS)
++            pw_wow_log("wowprospero profile: tid=%04x has no arena to publish into\n",
++                       (unsigned)HandleToULong(NtCurrentTeb()->ClientId.UniqueThread));
+     }
+ }
+ 
