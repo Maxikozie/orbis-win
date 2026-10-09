@@ -22,8 +22,13 @@ server answered with. Each one separates a different cause -- a thread
 that never starts, one that cannot make its first server call, one the
 server told to stay suspended.
 
-⚠ fprintf to stderr, not ERR: this runs before the thread has a debug
-channel, and ntdll's stderr reaches the session log as "WINE <text>".
+⚠ ERR, not fprintf to stderr. ntdll's raw stderr reaches nothing here.
+Not one "wine-ps5:" line has ever appeared in a session log -- not these,
+and not this port's own: the fd-release switch report from 0870, the
+WINE_PS5_WAIT_WATCHDOG banner, the slow-thread-start warning that exists
+for exactly this situation. The sink ntdll installs takes Wine's debug
+output, not libc's stderr. ERR arrives, and it arrives even from a thread
+with no TEB -- that is how the SIGPROF fault reported itself as 0000.
 
 ⚠ Diagnostic only. There is a WINE_PS5_WAIT_WATCHDOG that covers some of
 this already, but the launcher passes Wine no environment and this
@@ -40,21 +45,21 @@ index e725c4d521..4443a98cc3 100644
 +    /* ⚠ DIAGNOSTIC: see spawn_thread in dlls/ntdll/unix/thread.c. A 32-bit
 +     * thread never reaches wow64, and nothing between pthread_create and
 +     * BTCpuThreadInit says a word. These lines are that stretch. */
-+    fprintf( stderr, "wine-ps5: thread entered tid=%04x\n", (unsigned)data->tid );
++    ERR( "wine-ps5: thread entered tid=%04x\n", (unsigned)data->tid );
 +#endif
      if (data->ps5_spawn_us && ps5_now_us() - data->ps5_spawn_us > 100000)
          fprintf( stderr, "wine-ps5: slow thread start ms=%llu\n", (ps5_now_us() - data->ps5_spawn_us) / 1000 );
  
      reply_pipe = init_thread_pipe( data );
 +#ifdef __PROSPERO__
-+    fprintf( stderr, "wine-ps5: thread pipe tid=%04x reply=%d unix_tid=%d\n",
++    ERR( "wine-ps5: thread pipe tid=%04x reply=%d unix_tid=%d\n",
 +             (unsigned)data->tid, reply_pipe, get_unix_tid() );
 +#endif
  #ifdef WINE_INPROCESS_SERVER
      register_inprocess_thread( get_unix_tid() );
 +#endif
 +#ifdef __PROSPERO__
-+    fprintf( stderr, "wine-ps5: thread registered tid=%04x\n", (unsigned)data->tid );
++    ERR( "wine-ps5: thread registered tid=%04x\n", (unsigned)data->tid );
  #endif
      SERVER_START_REQ( init_thread )
      {
@@ -63,7 +68,7 @@ index e725c4d521..4443a98cc3 100644
      }
      SERVER_END_REQ;
 +#ifdef __PROSPERO__
-+    fprintf( stderr, "wine-ps5: thread init done tid=%04x suspend=%d\n",
++    ERR( "wine-ps5: thread init done tid=%04x suspend=%d\n",
 +             (unsigned)data->tid, data->suspend );
 +#endif
  #ifndef __PROSPERO__
@@ -85,7 +90,7 @@ index 0477c558ca..e81863931a 100644
 +     * thread is wedged somewhere between pthread_create and wow64's per-thread
 +     * hook, and nothing in that stretch says a word. These four lines are that
 +     * stretch; stderr from ntdll reaches the session log as "WINE <text>". */
-+    fprintf( stderr, "wine-ps5: spawn_thread tid=%04x status=%08x stack=%p+%zu\n",
++    ERR( "wine-ps5: spawn_thread tid=%04x status=%08x stack=%p+%zu\n",
 +             (unsigned)data->tid, (unsigned)status, get_kernel_stack( data ),
 +             (size_t)kernel_stack_size );
 +#endif
