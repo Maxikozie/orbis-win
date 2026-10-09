@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] ntdll: Name the limit that stops thread creation.
+
+With 0866 in, threads work -- eighteen complete init_thread in a run,
+reach BTCpuThreadInit, enter BTCpuSimulate and run guest code, winmm
+starts its devices thread, waveOutOpen returns and sound plays: the alive
+tick reads audio=1027 where it has read audio=0 since this port began.
+Then creation starts failing, at about the eighteenth thread:
+
+    wine-ps5: spawn_thread tid=0068 status=c0000017 stack=1027e70000+1048576
+
+c0000017 is STATUS_NO_MEMORY, but spawn_thread maps every pthread_create
+failure onto it, so the number that tells them apart never leaves the
+function: EAGAIN is a resource ceiling, ENOMEM a heap, EINVAL the stack
+handed to it. On this console those point in very different directions --
+libc malloc here was measured past a gigabyte without refusing, and the
+one refusal on record came back errno 22, EINVAL, not ENOMEM -- so this is
+worth measuring rather than guessing at.
+
+Keep the return value and the live thread count, and log only on failure:
+a working spawn costs nothing, and there are a great many of them now.
+
+⚠ The other half of this, the NULL thread_data that faulted the exit path
+on the way down, went into 0882 instead -- that patch introduces the
+in-process server thread which is the thread with no Wine data, and it
+owns pthread_exit_wrapper in this series.
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index f52e727195..54d575ac81 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1376,6 +1376,7 @@ static NTSTATUS spawn_thread( struct thread_data *data )
+     pthread_t pthread_id;
+     pthread_attr_t attr;
+     NTSTATUS status = STATUS_SUCCESS;
++    int spawn_errno = 0;
+ 
+     pthread_sigmask( SIG_BLOCK, &server_block_set, &sigset );
+     pthread_attr_init( &attr );
+@@ -1384,7 +1385,7 @@ static NTSTATUS spawn_thread( struct thread_data *data )
+     pthread_attr_setscope( &attr, PTHREAD_SCOPE_SYSTEM ); /* force creating a kernel thread */
+     InterlockedIncrement( &nb_threads );
+     data->ps5_spawn_us = ps5_slow_log() ? ps5_now_us() : 0;
+-    if (pthread_create( &pthread_id, &attr, (void * (*)(void *))server_init_thread, data ))
++    if ((spawn_errno = pthread_create( &pthread_id, &attr, (void * (*)(void *))server_init_thread, data )))
+     {
+         InterlockedDecrement( &nb_threads );
+         status = STATUS_NO_MEMORY;
+@@ -1397,8 +1398,14 @@ static NTSTATUS spawn_thread( struct thread_data *data )
+      * thread is wedged somewhere between pthread_create and wow64's per-thread
+      * hook, and nothing in that stretch says a word. These four lines are that
+      * stretch; stderr from ntdll reaches the session log as "WINE <text>". */
+-    ERR( "wine-ps5: spawn_thread tid=%04x status=%08x stack=%p+%zu\n",
+-             (unsigned)data->tid, (unsigned)status, get_kernel_stack( data ),
++    /* ⚠ pthread_create's own return is the only thing that names the limit --
++     * EAGAIN a resource ceiling, ENOMEM a heap, EINVAL the stack handed to it
++     * -- and the caller throws it away, turning every one of them into
++     * STATUS_NO_MEMORY. Keep it, with the live thread count. Logged only on
++     * failure: a working spawn costs nothing, and there are many now. */
++    if (status)
++        ERR( "wine-ps5: spawn_thread tid=%04x FAILED pthread_create=%d threads=%d stack=%p+%zu\n",
++             (unsigned)data->tid, spawn_errno, (int)nb_threads, get_kernel_stack( data ),
+              (size_t)kernel_stack_size );
+ #endif
+     pthread_attr_destroy( &attr );

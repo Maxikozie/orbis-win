@@ -69,17 +69,41 @@ diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
 index 81f3f4d..0477c55 100644
 --- a/dlls/ntdll/unix/thread.c
 +++ b/dlls/ntdll/unix/thread.c
-@@ -1116,6 +1116,10 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
+@@ -1116,11 +1116,29 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
  static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
  {
      struct thread_data *data = get_thread_data();
+-    close( data->alert_fd );
+-    close( data->wait_fd[0] );
+-    close( data->wait_fd[1] );
+-    close( data->reply_fd );
+-    close( data->request_fd );
 +#ifdef WINE_INPROCESS_SERVER
 +    extern void unregister_inprocess_thread(void);
 +    unregister_inprocess_thread();
 +#endif
-     close( data->alert_fd );
-     close( data->wait_fd[0] );
-     close( data->wait_fd[1] );
++    /* ⚠ And a thread with no Wine data reaches this -- the very thread this
++     * patch introduces. The in-process server runs on a thread of this process
++     * that was never a Wine client, so pthread_getspecific answers NULL, and
++     * abort_thread brings it through here. Closing data->alert_fd then reads
++     * offset 0x18 of NULL:
++     *
++     *     syscall fault 0xc0000005 at ntdll.prx+0x9898e, address 18
++     *       called from wineserver.prx+0x67ff0   -> inprocess_server_thread
++     *
++     * PsGetCurrentThreadId already guards the same case ("No thread, no id").
++     */
++    if (data)
++    {
++        close( data->alert_fd );
++        close( data->wait_fd[0] );
++        close( data->wait_fd[1] );
++        close( data->reply_fd );
++        close( data->request_fd );
++    }
+     pthread_exit( UIntToPtr(status) );
+ }
+ 
 diff --git a/server/thread.c b/server/thread.c
 index 94618f4..d23a29d 100644
 --- a/server/thread.c
