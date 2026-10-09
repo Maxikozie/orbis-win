@@ -3040,3 +3040,46 @@ route, and it would have looked like the fix simply not working.
 
 `nm` tells them apart in one line: **`U pw_wine_dl_open` is right, `t` is not.**
 Worth running against any new module here.
+
+### The audio driver landed, and DXVK named the next wall (2026-10-08)
+
+`wineps5.prx` cleared the soundcard check: no `mmdevapi:init_driver` failure,
+the run went from ~4,400 records to 6,758, 56 modules, 18 seconds, and a clean
+`PROCESS_DETACH`. GTA IV got far enough to write
+`…\Rockstar Games\GTA IV\Settings\SETTINGS.CFG`, which is ordinary startup.
+
+Then it printed three short strings and called `raise(22)` -- SIGABRT. The
+writes went to `NtDeviceIoControlFile (10, …, 0x00504000, …)`, a console ioctl,
+so the message went to a console with no conhost behind it.
+
+It was in the log all along, untagged. Wine's raw stderr reaches the session log
+as `WINE <text>` with no channel prefix -- the same way "Wine cannot find the
+FreeType font library" did -- so **DXVK's entire log is already there**, and
+grepping for lines without a `trace:`/`err:`/`warn:` prefix pulls it straight
+out:
+
+    info:  DXVK: v3.1.1
+    info:  Game: GTAIV.exe
+    info:  Vulkan: Found vkGetInstanceProcAddr in winevulkan.dll @ 0x7932d6d0
+    info:  Enabled instance extensions:
+    info:    VK_KHR_get_surface_capabilities2
+    info:    VK_KHR_surface
+    info:    VK_KHR_surface_maintenance1
+    info:    VK_KHR_win32_surface
+    err:   DxvkInstance::createInstance: Failed to create Vulkan instance
+
+So the stack is all present -- DXVK loads, finds winevulkan, winevulkan has
+libvulkan.prx -- and `vkCreateInstance` is refused.
+
+All four extension names are present as strings in the RADV module, so it is not
+a missing name. `VK_KHR_win32_surface` is winevulkan's own, and `ps5drv.c:853`
+maps it to **`VK_KHR_display`**, creating surfaces from display planes
+(`ps5_vulkan_surface_create`, which fails with "no host display (%u found)").
+Whether this Mesa advertises `VK_KHR_display` at instance level is the open
+question; `radv_CreateDisplayPlaneSurfaceKHR` exists, but the entry point
+existing is not the same as the extension being enumerated.
+
+⚠ Worth remembering for any future "the game printed something we cannot see":
+**grep the session log for `WINE ` lines with no channel prefix.** Every
+library that writes to stdout -- DXVK here, FreeType's warning earlier -- lands
+there already.
