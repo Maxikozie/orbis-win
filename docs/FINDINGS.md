@@ -3732,3 +3732,25 @@ memory remained235520K and RADV used Wine heap peak63472K, so the prior shader
 allocation failure did not recur. Capture for next iteration: log syscall
 argument/code and x86_64 fault registers only on syscall faults, to avoid noisy
 normal Vulkan traces; inspect NtUserCallNoParam code path before changing it.
+
+### Audio confirmed audible on hardware (2026-10-09)
+
+The user moved the console to a display with speakers and confirms sound
+plays. Until now audio had only ever been inferred from counters, and the
+record said so: *"audio callback counters alone are not proof of audible
+output."* Now it is confirmed, and the counters are vindicated as a proxy --
+GTA IV's last run read `audio=7710 audible=3501`, and `audible` counts grains
+containing non-zero samples, about 45% of them, which is what music and engine
+sound with gaps between should look like.
+
+⚠ The earlier silence was the display, not the runtime. Audio leaves this
+console over HDMI and follows the screen, and a display change can leave
+**Settings → Sound and Screen → Audio Output Settings** pointed at the previous
+device -- which from the logs is indistinguishable from a broken audio path,
+because the port opens and the grains flow either way (`PW_WINE64 audio sink=1
+port=536870919 status=ok`). Check the console's output device before reading
+silence as a bug.
+
+So the runtime now has, on hardware and user-confirmed: a rendered display
+(Pinball GDI, and GTA IV reaching a loaded scene), working controls, and
+audible sound.
