@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] server: Say which protocol error killed a thread.
+
+With 0864's probes in place, every secondary thread this process creates
+reaches "thread registered" and then hangs in its first server call. Not
+one has ever completed init_thread -- the server's own note says
+"init_thread 0024 ok" for the main thread and nothing for any other, in
+any run. GTA IV is simply the first program to notice, because the thread
+it is waiting on is winmm's devices thread.
+
+klog says what becomes of them:
+
+    wineserver: kill_thread 0028 exit=1 violent=1 from 800bd417f
+    wineserver: kill_thread 002c exit=1 violent=1 from 800bd417f
+
+and 800bd417f resolves, through kill_thread's own anchor trick, to
+fatal_protocol_error+0xcf. So the server is not failing to answer: it
+reads something it cannot parse from the new thread's request pipe,
+declares a protocol error and kills the thread.
+
+Which protocol error it is, is the one thing not recorded. This function
+prints it with fprintf to stderr, and this module's stderr reaches
+nothing on this console -- fatal_error and kill_thread, a few lines
+below, already use klog for exactly that reason. Send it there too.
+
+The message distinguishes every candidate: "read:" and "partial read" mean
+the pipe gave the wrong bytes, "bad request" means it parsed as nonsense,
+"reply write:" means the reply pipe is the broken end. Each one points at
+a different half of this port's descriptor handover, where a descriptor is
+passed by number rather than duplicated (dup is EPERM here) and the two
+ends are shared with the in-process server.
+diff --git a/server/request.c b/server/request.c
+index e92298cf64..d74ea2d80a 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -145,6 +145,32 @@ void fatal_protocol_error( struct thread *thread, const char *err, ... )
+     fprintf( stderr, "Protocol error:%04x: ", thread->id );
+     vfprintf( stderr, err, args );
+     va_end( args );
++#ifdef __PROSPERO__
++    /* ⚠ The line above reaches nothing. This module's stderr goes nowhere on
++     * this console -- klog does, which is why fatal_error and kill_thread
++     * below already use it. Without this the kill is anonymous: klog shows
++     * "kill_thread 0028 exit=1 violent=1 from fatal_protocol_error+0xcf" and
++     * no reason at all.
++     *
++     * It is the reason that matters here. Every secondary thread this process
++     * creates hangs in its first server call and is then killed from exactly
++     * this function, which is why GTA IV never gets the winmm devices thread
++     * it is waiting on, and why no second thread has ever appeared in a log. */
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        char line[256];
++        int n;
++
++        n = snprintf( line, sizeof(line), "wineserver: protocol error %04x: ", thread->id );
++        if (n > 0 && n < (int)sizeof(line))
++        {
++            va_start( args, err );
++            vsnprintf( line + n, sizeof(line) - n, err, args );
++            va_end( args );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
++#endif
+     thread->exit_code = 1;
+     kill_thread( thread, 1 );
+ }
