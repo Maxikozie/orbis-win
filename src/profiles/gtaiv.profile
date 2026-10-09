@@ -18,7 +18,17 @@ runtime = wine-wow64
 architecture = pe32
 graphics = dxvk
 [debug]
-winedebug = +tid,err+all,+loaddll,+vulkan,+d3d12
+; The crash is fixed and the graphics stack is answered, so neither needs
+; thousands of lines a second any more. Controls are the open question, and
+; the game loaded three different input DLLs -- xinput9_1_0 (which forwards
+; to xinput1_4, verified in its main.c), xinput1_4 itself, and DINPUT8 --
+; so the first thing to establish is which one it actually polls.
+;
+; +xinput: does XInputGetState get called, and does it see a connected pad?
+; +dinput: GTA IV enumerates DirectInput too; if it is driving from there,
+;   feeding the XInput slot can never work.
+; +hid: what DINPUT8 finds underneath.
+winedebug = +tid,err+all,+loaddll,+xinput,+dinput,+hid
 [display]
 desktop = 1920x1080
 [input]

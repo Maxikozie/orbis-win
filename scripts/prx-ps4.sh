@@ -86,12 +86,31 @@ gen "$prx/obj/wineserver_desc.c" \
     pw_wineserver_call_direct pw_wineserver_try_fast_mutex \
     pw_wineserver_mutex_backend pw_wineserver_sync_backend pw_cwd_share_changes
 gen "$prx/obj/wowprospero_desc.c" __wine_unix_call_funcs
-for m in winevulkan opengl32 ws2_32 crypt32 dwrite; do
+for m in winevulkan opengl32 ws2_32 crypt32 dwrite xinput1_3; do
     gen "$prx/obj/${m}_desc.c" __wine_unix_call_funcs __wine_unix_call_wow64_funcs
 done
-for d in ntdll win32u wineserver wowprospero winevulkan opengl32 ws2_32 crypt32 dwrite; do
+for d in ntdll win32u wineserver wowprospero winevulkan opengl32 ws2_32 crypt32 dwrite xinput1_3; do
     $CC -std=gnu11 -O2 -fPIC -I"$root/wine/ps5" -c "$prx/obj/${d}_desc.c" -o "$prx/obj/${d}_desc.o"
 done
+
+# ⚠ xinput's Unix library is the one unixlib with no .so of its own: the Wine
+# build never links one, so link_objects has nothing to find in make.log and
+# tools/build_wine_ps5.sh compiles it directly. This arm never did, so
+# xinput1_3.prx was simply absent from the package -- and every xinput PE asks
+# for it by that exact name:
+#
+#     UNICODE_STRING name = RTL_CONSTANT_STRING(L"xinput1_3");
+#     if ((status = __wine_load_unix_lib(&name, &module, &handle)))
+#         TRACE("no Unix library, status %#lx: HID controllers\n", status);
+#
+# which GTA IV reached 42188 times, each one answered 0xc0000135,
+# STATUS_DLL_NOT_FOUND, falling back to HID controllers that do not exist here.
+# The pad was never the problem and neither was the mapping: patch 0470's
+# reader was not in the package.
+$CC -std=gnu11 -O2 -Wall -Werror -fPIC -D__WINESRC__ -DWINE_UNIX_LIB -D_REENTRANT \
+    -I"$work/source/dlls/xinput1_3" -I"$build/include" -I"$work/source/include" \
+    -c "$work/source/dlls/xinput1_3/unixlib.c" -o "$prx/obj/xinput_unixlib.o" ||
+    { echo "  X xinput1_3: cannot compile unixlib.c" >&2; exit 1; }
 
 stubs=$prx/stubs; rm -rf "$stubs"; mkdir -p "$stubs"
 
@@ -138,9 +157,11 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
             "opengl32|dlls/opengl32/opengl32.so|" \
             "ws2_32|dlls/ws2_32/ws2_32.so|" \
             "crypt32|dlls/crypt32/crypt32.so|" \
-            "dwrite|dlls/dwrite/dwrite.so|"; do
+            "dwrite|dlls/dwrite/dwrite.so|" \
+            "xinput1_3|-|"; do
     name=${step%%|*}; rest=${step#*|}; target=${rest%%|*}; shims=${rest#*|}
-    objs=$(link_objects "$target")
+    # "-": compiled above rather than taken from a .so the build never makes.
+    if [ "$target" = - ]; then objs=$prx/obj/xinput_unixlib.o; else objs=$(link_objects "$target"); fi
     [ -n "$objs" ] || { echo "  ✗ $name: no ELF link in make.log"; status=1; continue; }
     shim_objs=""
     thread_wraps=""
