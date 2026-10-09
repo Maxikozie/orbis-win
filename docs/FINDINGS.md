@@ -3754,3 +3754,67 @@ silence as a bug.
 So the runtime now has, on hardware and user-confirmed: a rendered display
 (Pinball GDI, and GTA IV reaching a loaded scene), working controls, and
 audible sound.
+
+## The pad reader was missing from the package (2026-10-09)
+
+GTA IV's controls did nothing, and it was not the mapping. Tracing the input
+channels instead of guessing:
+
+    trace:xinput:XInputGetState index 0, state 0021F994.
+    trace:xinput:find_title_pad no Unix library, status 0xc0000135:
+        HID controllers
+
+The game polls XInput tens of thousands of times and is told there is nothing
+there. `0xc0000135` is `STATUS_DLL_NOT_FOUND`: every xinput PE asks for patch
+0470's reader by one exact name --
+
+    UNICODE_STRING name = RTL_CONSTANT_STRING(L"xinput1_3");
+
+-- and `xinput1_3.prx` was never in the package. xinput's Unix library is the
+only one with no `.so` of its own, so `tools/build_wine_ps5.sh` compiles it
+directly; this arm's `prx-ps4.sh` builds its nine modules from their `.so`
+files and never replicated that step. xinput fell back to enumerating HID
+controllers, of which this console has none.
+
+Built and shipped: thirteen modules instead of twelve, and the log now reads
+`find_title_pad controller 0 is the title's`.
+
+⚠ Two things checked rather than assumed, each of which would have been a
+wasted fix:
+
+  - GTA IV loads `xinput9_1_0.dll`, which the ps5 tree does not build. Its
+    `main.c` `LoadLibraryExW`s `xinput1_4.dll` and forwards, and the log
+    confirms `xinput1_4` loading right after -- the patched xinput was in play
+    the whole time.
+  - A USB keyboard is not an option on this console, and the title says so:
+    *"hid: no PS4 implementation, continuing without keyboard or mouse."*
+    `pw_hid_ps5.c` loads a PS5 sysmodule by id and there is no PS4 arm. The pad
+    is the only input there is.
+
+### And the next wall is the GPU
+
+With input working the game runs for about ninety-five seconds -- polling
+XInput 66228 times and DirectInput 68298, audio audible throughout -- and then:
+
+    WINE err: DxvkSubmissionQueue: Command submission failed: VK_ERROR_DEVICE_LOST
+
+Not a CPU fault: zero `handle_syscall_fault` in the whole run. The console
+agrees it is the GPU and handles it as such -- a coredump, then
+`EXEC /system/sys/gpudump.elf`, then `getGpuCrashFullDumpAppStatus` and the
+crash reporter. The title is killed by the system, not by a fault in our code.
+
+⚠ It has happened before: there is an earlier `gpudump.elf` in the same klog at
+11:18, from a previous run. So device loss is not new with the input fix.
+
+⚠ klog does not carry the reason. It shows Sony's crash *handling* only; the
+fault detail goes into the GPU dump. Nothing in the serial log says which
+submission killed it.
+
+State at the loss: `dmem=1521184K` (1.45 GiB direct memory), `flexible_free=
+206848K`, `heap=86384K`, `frames_put=7`, `vk_shown=0`. The profile passes
+`-availablevidmem 1536`.
+
+Open, and unprioritised: whether the loss is time- or event-dependent (does a
+second run die at the same point?), whether lowering the game's video-memory
+argument or resolution changes it, and whether RADV's hang detection can be
+reached on this console given that the environment is not published to it.
