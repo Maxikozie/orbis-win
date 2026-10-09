@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] wowprospero: see a new 32-bit thread arrive, or not arrive.
+
+The question that found the thread bug. winmm's devices thread was never
+running a guest instruction -- the unix side's "translator starting",
+logged once per thread that enters pw_wow_run, fired only for the main
+thread -- and nothing said how far up the thread got before stopping.
+
+BTCpuThreadInit is where wow64 first shows the CPU backend a new 32-bit
+thread, and it was an empty function, so nothing was visible at that layer
+at all. With these two lines the answer was immediate and decisive:
+
+    BTCpuThreadInit: 1       (the main thread, at process start)
+    simulate entry: 29       (all of them thread 0024)
+
+No new thread ever reached wow64, which put the fault below it, in ntdll's
+own thread startup -- and from there in the request pipe the client closed
+out from under the server (wine patch 0866).
+
+ERR rather than TRACE so they arrive with no channel enabled, and one line
+per thread: BTCpuSimulate is entered once and then looped in.
+
+⚠ Keep them. Between these and "translator starting" the three gaps a
+thread can die in are distinguishable -- before wow64, between wow64 and
+the backend, and inside the translator's own per-thread setup.
+diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
+index 549dbd4..1f8f465 100644
+--- a/wine/wowprospero/cpu.c
++++ b/wine/wowprospero/cpu.c
+@@ -112,6 +112,16 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
+ 
+ void WINAPI BTCpuThreadInit(void)
+ {
++    /* ⚠ DIAGNOSTIC, at ERR so it arrives without a channel.
++     *
++     * GTA IV hangs because winmm's devices thread never runs one guest
++     * instruction: WINMM_StartDevicesThread creates it and waits on
++     * {event, thread handle} forever, the wait never returns, and the unix
++     * side's "translator starting" -- logged once per thread that enters
++     * pw_wow_run -- fires only for the main thread. The thread exists and has
++     * not died. The question is how far up it gets, and this is the first
++     * place the CPU backend sees a new 32-bit thread at all. */
++    ERR( "new 32-bit thread\n" );
+ }
+ 
+ void WINAPI BTCpuThreadTerm( HANDLE thread, LONG status )
+@@ -426,6 +436,12 @@ void WINAPI BTCpuSimulate(void)
+ 
+     C_ASSERT( sizeof(ctx->ExtendedRegisters) == sizeof(fp) );
+ 
++    /* ⚠ DIAGNOSTIC, with BTCpuThreadInit's. Entered once per thread and then
++     * looped in, so this is one line per thread, and it says whether a thread
++     * that reached the backend also reached the translator -- "translator
++     * starting" comes from the unix side of the very first pw_wow_run below. */
++    ERR( "simulate entry, eip %#lx\n", (unsigned long)ctx->Eip );
++
+     for (;;)
+     {
+         /* The Unix side reloads the complete context on every entry, which
