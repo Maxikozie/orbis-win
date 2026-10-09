@@ -21,6 +21,8 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
+#include <pthread.h>
+#include <stdint.h>
 
 PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
 PFN_vkVoidFunction VKAPI_CALL vk_common_GetDeviceProcAddr(VkDevice device, const char *name);
@@ -119,4 +121,69 @@ __attribute__((constructor)) static void pw_publish_environ(void)
         sceKernelDebugOutText(0, "libvulkan: process name was NULL, set to prospero-win\n");
     }
     if (!program_invocation_name) program_invocation_name = program_invocation_short_name;
+}
+
+/* ⚠ General-dynamic TLS, which this console answers with NULL.
+ *
+ * RADV imports __tls_get_addr; the one it links returns NULL, and ACO uses
+ * thread_local, so a field is read off that NULL and the driver dies the
+ * moment DXVK asks it to compile anything:
+ *
+ *     err:vulkan:vkCreateComputePipelines Exception 0xc0000005 in Unix call.
+ *     syscall fault 0xc0000005 at libvulkan.so+0x12f0f29, address 1120
+ *       -> aco_compile_shader + 0x2e9
+ *
+ * docs/FINDINGS.md measured the same thing before: general-dynamic TLS answers
+ * NULL here, which is why wowprospero is built -femulated-tls with its own
+ * __emutls_get_address. RADV arrives as a prebuilt archive and cannot be
+ * recompiled that way without rebuilding Mesa, so give it a __tls_get_addr
+ * that works instead.
+ *
+ * ⚠ A zeroed block is not an approximation here, it is exact. This module's
+ * PT_TLS is
+ *
+ *     TLS  filesz 0x000000  memsz 0x001130    .tbss only, NOBITS
+ *
+ * -- no .tdata at all, so every thread-local it has starts as zero and there
+ * is no initialiser image to copy. 0x1130 bytes also covers the 0x1120 the
+ * fault was reading. The block is rounded up and bounds-checked, so an offset
+ * past the end reports itself rather than becoming a silent corruption.
+ *
+ * Through --wrap: the definition it links now comes from an archive member
+ * that is pulled in for its neighbours, so replacing it outright collides. */
+#define PW_TLS_BLOCK_BYTES 0x2000u
+
+struct pw_tls_index { unsigned long module, offset; };
+
+static pthread_key_t pw_tls_key;
+static pthread_once_t pw_tls_once = PTHREAD_ONCE_INIT;
+static int pw_tls_ready;
+
+static void pw_tls_free(void *block) { free(block); }
+
+static void pw_tls_create_key(void)
+{
+    pw_tls_ready = pthread_key_create(&pw_tls_key, pw_tls_free) == 0;
+}
+
+void *__wrap___tls_get_addr(struct pw_tls_index *index)
+{
+    extern int sceKernelDebugOutText(int channel, const char *line);
+    static int reported;
+    unsigned char *block;
+
+    pthread_once(&pw_tls_once, pw_tls_create_key);
+    if (!pw_tls_ready || !index) return NULL;
+    if (index->offset >= PW_TLS_BLOCK_BYTES) {
+        if (reported < 4) {
+            reported++;
+            sceKernelDebugOutText(0, "libvulkan: TLS offset past the block\n");
+        }
+        return NULL;
+    }
+    if (!(block = pthread_getspecific(pw_tls_key))) {
+        if (!(block = calloc(1, PW_TLS_BLOCK_BYTES))) return NULL;
+        if (pthread_setspecific(pw_tls_key, block)) { free(block); return NULL; }
+    }
+    return block + index->offset;
 }
