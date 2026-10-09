@@ -69,7 +69,7 @@ diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
 index 81f3f4d..0477c55 100644
 --- a/dlls/ntdll/unix/thread.c
 +++ b/dlls/ntdll/unix/thread.c
-@@ -1116,11 +1116,29 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
+@@ -1116,11 +1116,38 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
  static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
  {
      struct thread_data *data = get_thread_data();
@@ -93,6 +93,15 @@ index 81f3f4d..0477c55 100644
 +     *
 +     * PsGetCurrentThreadId already guards the same case ("No thread, no id").
 +     */
++    /* ⚠ DIAGNOSTIC. GTA IV dies on one exiting thread and not the five others
++     * that exit in the same run; the one that dies is sechost's
++     * device_notify_proc, after its RPC fails with 1722. user32's thread
++     * detach is known to complete, so the fault is later -- either in another
++     * DLL's THREAD_DETACH or here, in pthread_exit, which is Sony's libc and
++     * is where the fault lands. Printed, and the fault is inside pthread_exit;
++     * absent, and the thread never got this far. */
++    ERR( "wine-ps5: thread %04x leaving, data %p\n",
++         (unsigned)(data ? data->tid : 0), data );
 +    if (data)
 +    {
 +        close( data->alert_fd );

@@ -86,7 +86,7 @@ index 2956c64e1c..491f702643 100644
  /***********************************************************************
   *           handle_syscall_fault
   *
-@@ -2183,18 +2233,77 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *sigconte
+@@ -2183,18 +2233,97 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *sigconte
           * success: user32 took STATUS_ACCESS_VIOLATION for a class atom. */
          void *where = context->Rip ? (void *)context->Rip : context->Rsp ? *(void **)context->Rsp : NULL;
          Dl_info info;
@@ -120,6 +120,26 @@ index 2956c64e1c..491f702643 100644
 +                   (unsigned int)frame->syscall_id,
 +                   (frame->syscall_id & 0x1000) ? "win32u" : "ntdll",
 +                   (unsigned int)(frame->syscall_id & 0xfff), (void *)frame->rip );
++
++    /* ⚠ And that name can be stale. get_syscall_frame returns the most recent
++     * frame, not necessarily a live one: on GTA IV's crash it named win32u
++     * #828 (NtUserCallNoParam) while staging thread_detach showed that call
++     * running to completion 1.6 ms earlier. Read the line above as "the last
++     * syscall this thread made", not as where it died.
++     *
++     * The registers are not stale, and they are already dumped a few lines up
++     * at TRACE -- which is off in every configuration this port runs. A
++     * syscall fault is rare enough to afford them at ERR, and the faulting
++     * address is only interpretable once it can be traced to a register: GTA
++     * IV's has the shape 0x453a_<32 bits> across three runs, the same top half
++     * with a plausible i386 address below it. */
++    ERR_(seh)( "fault regs rip=%016lx rsp=%016lx rbp=%016lx rax=%016lx rbx=%016lx\n",
++               context->Rip, context->Rsp, context->Rbp, context->Rax, context->Rbx );
++    ERR_(seh)( "fault regs rcx=%016lx rdx=%016lx rsi=%016lx rdi=%016lx r8=%016lx\n",
++               context->Rcx, context->Rdx, context->Rsi, context->Rdi, context->R8 );
++    ERR_(seh)( "fault regs r9=%016lx r10=%016lx r11=%016lx r12=%016lx r13=%016lx\n",
++               context->R9, context->R10, context->R11, context->R12, context->R13 );
++    ERR_(seh)( "fault regs r14=%016lx r15=%016lx\n", context->R14, context->R15 );
 +
 +    /* ⚠ The faulting module is Sony's libc, which tells us nothing on its own:
 +     * every caller in Wine reaches it eventually. What matters is who called
