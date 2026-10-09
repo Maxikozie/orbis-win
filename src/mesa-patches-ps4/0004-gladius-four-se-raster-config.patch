@@ -1,0 +1,55 @@
+Subject: [PATCH] gladius: give the Pro the 4-SE raster config high half
+
+UNVERIFIED - the experiment this patch exists to run has NOT yet been run
+successfully. See docs/HANDOFF-2026-10-09.md. The change is in the binary but
+the value does not reach PA_SC_RASTER_CONFIG; find out why before judging it.
+
+ac_gpu_info.c's own comment flags the CHIP_GLADIUS pair as internally
+inconsistent: raster_config's high half is the TWO-shader-engine shape
+(0x2a......) while raster_config_1 is Hawaii's FOUR-engine SE_PAIR_MAP (0x2e).
+Every self-consistent 4-SE entry in that function pairs 0x3a00161a with 0x2e,
+and ac_orbis_drm.c reports num_shader_engines = 4 on a Pro - so by the file's
+own reasoning the high half is the wrong half. This makes it 0x3a00161a.
+
+ORBIS_RASTER_CONFIG / ORBIS_RASTER_CONFIG_1 override both halves from
+radv.env so the A/B needs no rebuild; 0x2a00161a restores the old pair.
+
+diff --git a/src/amd/common/ac_gpu_info.c b/src/amd/common/ac_gpu_info.c
+index 138472a..db778c8 100644
+--- a/src/amd/common/ac_gpu_info.c
++++ b/src/amd/common/ac_gpu_info.c
+@@ -2549,10 +2549,31 @@ void ac_get_raster_config(const struct radeon_info *info, uint32_t *raster_confi
+     * Unresolved without the hardware, and it only affects the Pro. Liverpool above is the part this port
+     * targets and its pair is consistent.
+     */
+-   case CHIP_GLADIUS:
+-      raster_config = 0x2a00161a;
+-      raster_config_1 = 0x0000002e;
++   case CHIP_GLADIUS: {
++      /* ⚠ AND THE HARDWARE HAS NOW SPOKEN, which is what the comment above was waiting for.
++       *
++       * GTA IV hangs the GPU deterministically on a Pro in Neo mode and does not hang on the SAME
++       * BUILD with the Neo bit off. The hangs are graphics-only - a PS and a VS at the stop, no
++       * compute, and the CP's own address audit comes back clean (0/372 DMA_DATA, 0/256, 0/8 - every
++       * address it was sent to was mapped). A rasterizer that is told to distribute primitives across
++       * a shader-engine layout the part does not have waits on a backend that never answers, and that
++       * is exactly the shape of this hang: nothing is wrong with where the CP was sent, only with what
++       * the geometry front end was told the machine looks like.
++       *
++       * This arm reports num_shader_engines = 4 on a Pro (orbis-drm's neo arm, and the Linux-on-PS4
++       * stack agrees), so by this function's own reasoning the TWO-engine high half was the wrong half:
++       * every self-consistent 4-SE entry here pairs 0x3a00161a with 0x2e, and that is now what a Pro
++       * gets. Liverpool keeps its measured 2-engine pair and is untouched.
++       *
++       * ORBIS_RASTER_CONFIG / ORBIS_RASTER_CONFIG_1 override both halves so the A/B needs no rebuild;
++       * 0x2a00161a restores the inconsistent pair this replaced. */
++      const char *const rc  = getenv("ORBIS_RASTER_CONFIG");
++      const char *const rc1 = getenv("ORBIS_RASTER_CONFIG_1");
++
++      raster_config   = rc != NULL ? (uint32_t)strtoul(rc, NULL, 0) : 0x3a00161a;
++      raster_config_1 = rc1 != NULL ? (uint32_t)strtoul(rc1, NULL, 0) : 0x0000002e;
+       break;
++   }
+    /* 2 SEs / 8 RBs */
+    case CHIP_TAHITI:
+    case CHIP_PITCAIRN:
