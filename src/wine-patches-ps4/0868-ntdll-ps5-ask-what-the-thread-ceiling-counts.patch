@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] ntdll: Ask whether the thread ceiling counts threads or bytes.
+
+src/thread-probe settled what pthread_create itself can do. A bare title
+creates 146 threads with exactly the attributes spawn_thread asks for --
+1 MiB caller-supplied stack, system scope, no guard -- and sees EAGAIN
+only once flexible memory is down to about a megabyte:
+
+    A  wine's own: 1 MiB stack, system scope   created 146, flexible 1024K
+    B  256 KiB stack, system scope             created 192 (cap), 7168K
+    C  library's own stack (~16 MiB each)      created  28, flexible 0K
+    H  after 2048 mprotect splits              created 141
+
+So the mechanism is sound, the stack size is what sets the number, and VM
+entries are not the resource -- H barely moved, and G showed munmap gives
+every mapping back.
+
+None of which fits this process, which is refused at a dozen threads with
+146432K of flexible memory free, the same figure the alive tick has
+reported unchanged in every run. Same errno, a different cause.
+
+Two questions, asked where it is refused rather than guessed at from
+outside: what flexible memory actually says at that instant, and whether a
+256 KiB stack is accepted when a 1 MiB one is not. A retry that succeeds
+means the ceiling is per-thread and size-shaped, and the 1 MiB kernel
+stack is what to shrink. A retry refused means it counts threads, and no
+stack size will help -- which would put the next look on what else this
+process has that a bare title does not.
+
+⚠ The retry's thread is pthread_exit itself, so it ends immediately, and it
+is detached so nothing has to join it. One extra thread on the failure path
+only.
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 54d575ac81..672644b053 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1404,9 +1404,43 @@ static NTSTATUS spawn_thread( struct thread_data *data )
+      * STATUS_NO_MEMORY. Keep it, with the live thread count. Logged only on
+      * failure: a working spawn costs nothing, and there are many now. */
+     if (status)
+-        ERR( "wine-ps5: spawn_thread tid=%04x FAILED pthread_create=%d threads=%d stack=%p+%zu\n",
++    {
++        /* ⚠ Ask the console two questions at the moment it refuses, because
++         * EAGAIN here does not mean what it means in a bare title.
++         *
++         * src/thread-probe creates 146 threads with exactly these attributes
++         * and only sees EAGAIN once flexible memory is down to about a
++         * megabyte -- yet this process is refused at a dozen with 143 MiB
++         * still free, which the alive tick has been reporting unchanged all
++         * along. Same errno, different cause.
++         *
++         * So: how much flexible memory there really is, and whether a much
++         * smaller stack is accepted. If the retry succeeds the ceiling is
++         * something per-thread and size-shaped, and Wine's 1 MiB kernel stack
++         * is the thing to shrink; if it is refused too, the ceiling counts
++         * threads and no stack size will help. */
++        extern int sceKernelAvailableFlexibleMemorySize( size_t *size );
++        size_t flexible = 0;
++        pthread_attr_t small;
++        pthread_t probe_id;
++        int retry;
++
++        if (sceKernelAvailableFlexibleMemorySize( &flexible )) flexible = 0;
++
++        pthread_attr_init( &small );
++        pthread_attr_setscope( &small, PTHREAD_SCOPE_SYSTEM );
++        pthread_attr_setstacksize( &small, 256 * 1024 );
++        retry = pthread_create( &probe_id, &small, (void * (*)(void *))pthread_exit, NULL );
++        pthread_attr_destroy( &small );
++        if (!retry) pthread_detach( probe_id );
++
++        ERR( "wine-ps5: spawn_thread tid=%04x FAILED pthread_create=%d threads=%d stack=%p+%zu "
++             "flexible=%zuK retry_256k=%d (%s)\n",
+              (unsigned)data->tid, spawn_errno, (int)nb_threads, get_kernel_stack( data ),
+-             (size_t)kernel_stack_size );
++             (size_t)kernel_stack_size, flexible >> 10, retry,
++             retry ? "a count, not a size: the stack is not what to shrink"
++                   : "a size: the 1 MiB kernel stack is what to shrink" );
++    }
+ #endif
+     pthread_attr_destroy( &attr );
+     pthread_sigmask( SIG_SETMASK, &sigset, NULL );
