@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] diagnostics: name the regions, not just the buckets.
+
+Thread creation fails at a dozen threads because flexible memory is gone
+-- 3072K left, and the 256 KiB retry 0868 added is taken where the 1 MiB
+one is refused. log_flexible_holders says where it went, and then cannot
+say which allocator:
+
+    flexible_holders available=3072K mapped=461024K unnamed=0K buckets=29
+    flexible_holder rank=1 bytes=378880K count=24 prot=0x3 name=orbis
+
+370 MiB of 461 MiB in one bucket. "orbis" is simply what the kernel calls
+an ordinary anonymous mapping, so that bucket is every plain mmap in the
+process summed together, and the name distinguishes nothing.
+
+Twenty-four regions averaging 15 MiB each is a specific enough shape to
+chase, but only with addresses: an address can be matched against what
+this port maps where -- the frame boxes, the Wine heap's blocks, the
+guest's own memory, RADV's -- and a bucket name cannot. So list the
+largest individual regions with their addresses, alongside the buckets.
+
+Only on the path that already logs, which is entered once below 64 MiB and
+once below 4 MiB.
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 12039c7..106add4 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -291,6 +291,48 @@ static void log_flexible_holders(size_t available)
+     PS5LOG_LOG("PW_WINE64 flexible_holders available=%zuK mapped=%lluK unnamed=%lluK buckets=%u overflow=%u",
+                available >> 10, (unsigned long long)(total >> 10), (unsigned long long)(unnamed >> 10), used,
+                other);
++    /* ⚠ And the individual regions, because the bucket above cannot answer
++     * the question it raises. Everything plain mmap returns is named "orbis"
++     * by the kernel, so one bucket swallowed 370 MiB of 461 MiB in 24
++     * mappings and said nothing about which allocator made them. An address
++     * and a size can be matched against what the port maps where; a bucket
++     * name cannot. Largest first, and only on this already-rare path. */
++    {
++        enum { REGIONS = 12 };
++        struct { uintptr_t start; uint64_t bytes; int32_t protection; char name[33]; } top[REGIONS];
++        unsigned held = 0;
++
++        memset(top, 0, sizeof(top));
++        address = 0;
++        for (unsigned steps = 0; steps < 200000; steps++) {
++            uint64_t bytes;
++            unsigned slot;
++
++            memset(&info, 0, sizeof(info));
++            if (sceKernelVirtualQuery((const void *)address, 1, &info, sizeof(info)) ||
++                info.end <= address) break;
++            address = info.end;
++            if (!(info.flags & 1)) continue;
++            bytes = info.end - info.start;
++            if (held == REGIONS && bytes <= top[REGIONS - 1].bytes) continue;
++            slot = held < REGIONS ? held++ : REGIONS - 1;
++            top[slot].start = (uintptr_t)info.start;
++            top[slot].bytes = bytes;
++            top[slot].protection = info.protection;
++            info.name[sizeof(info.name) - 1] = 0;
++            memcpy(top[slot].name, info.name, sizeof(info.name));
++            while (slot && top[slot].bytes > top[slot - 1].bytes) {
++                __typeof__(top[0]) swap = top[slot];
++                top[slot] = top[slot - 1];
++                top[slot - 1] = swap;
++                slot--;
++            }
++        }
++        for (unsigned i = 0; i < held; i++)
++            PS5LOG_LOG("PW_WINE64 flexible_region rank=%u at=%p bytes=%lluK prot=%#x name=%s",
++                       i + 1, (void *)top[i].start, (unsigned long long)(top[i].bytes >> 10),
++                       (unsigned)top[i].protection, top[i].name[0] ? top[i].name : "-");
++    }
+     for (unsigned rank = 0; rank < TOP && rank < used; rank++) {
+         unsigned best = rank;
+         for (unsigned i = rank + 1; i < used; i++)
