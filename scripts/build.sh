@@ -32,6 +32,7 @@ case "$TARGET" in
   modprobe) TITLE_ID=GLDS10006; TITLE="Gladius Module Probe"; SRC="$ROOT/src/mod-probe" ;;
   statprobe) TITLE_ID=GLDS10007; TITLE="Gladius Stat Probe"; SRC="$ROOT/src/stat-probe" ;;
   dupprobe) TITLE_ID=GLDS10008; TITLE="Gladius Dup Probe"; SRC="$ROOT/src/dup-probe" ;;
+  threadprobe) TITLE_ID=GLDS10009; TITLE="Gladius Thread Probe"; SRC="$ROOT/src/thread-probe" ;;
   *) die "usage: build.sh {hello|triangle|probe|present} [--pkg] [--deploy] [--neo] [--dev-mesa]" ;;
 esac
 

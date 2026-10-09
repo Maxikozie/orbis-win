@@ -3178,3 +3178,92 @@ refuses a swapchain. Check that before measuring anything else.
 (`.deps/wine-host`), not the ps5 one. Patching the ps5 tree alone changes
 nothing on the console; the rebuilt DLL has to be stripped and copied into
 `install/usr/lib/wine/{i386,x86_64}-windows/` for both architectures.
+
+## The bug that was under everything: threads (2026-10-08, evening)
+
+GTA IV's black screen was never graphics. The renderer was finished hours
+before the cause was found, and the cause was that **no thread this port
+created had ever run**.
+
+### The chain, top to bottom
+
+GTAIV.exe stops at `0x1211d82`. The disassembly says what it wants: it
+queries its sound buffer for `{b0210783-89cd-11d0-af08-00a0c925cd16}` =
+`IID_IDirectSoundNotify`, calls `SetNotificationPositions(2)` (vtable+0x0C),
+`Lock` (+0x2C), `Unlock` (+0x4C), `Play(0,0,DSBPLAY_LOOPING)` (+0x30), and
+waits on two handles, `bWaitAll` FALSE, INFINITE. Under that:
+
+    winmm:waveOutOpen (..., 4294967295 = WAVE_MAPPER, ...)
+    winmm:WINMM_StartDevicesThread Starting up devices thread
+    sync:NtWaitForMultipleObjects type 1, handles {f4, f8}, (infinite)
+
+`dlls/winmm/waveform.c:2377` line for line: an event, a thread,
+`events[1] = the thread handle`, wait for either. The thread never signals
+and never dies, because the server kills it:
+
+    wineserver: protocol error 0028: read: Bad file descriptor
+    wineserver: kill_thread 0028 exit=1 violent=1 from fatal_protocol_error+0xcf
+
+### The bug
+
+`create_server_thread` makes the request pipe, hands the read end to the
+server with `wine_server_send_fd`, names it in `new_thread`, and closes it.
+Correct where `SCM_RIGHTS` duplicated it into the receiver. **Nothing is
+duplicated here** -- `dup` is EPERM for every kind of descriptor on this
+console (`src/dup-probe`), so `wine_server_send_fd` passes the descriptor's
+*number* and the in-process server, sharing this descriptor table, reads
+that very fd. Closing it shut the pipe the server reads requests from, so
+the server got EBADF on the first request and killed the thread.
+
+⚠ The same hazard was already guarded twice, with the reasoning written out
+both times -- `server_init_thread`'s close of the reply pipe, and the
+server's own close of this pipe's other end. **This was the third and it was
+missed.** When a port changes descriptor ownership, every `close()` after a
+handover is a candidate; grep them all at once.
+
+Patch 0866. After it: eighteen threads complete `init_thread` in a run,
+reach `BTCpuThreadInit`, enter `BTCpuSimulate`, run guest code, winmm comes
+up, `waveOutOpen` returns, and the alive tick reads **audio=1027** where it
+had read audio=0 since the port began.
+
+### ⚠ fprintf(stderr) reaches nothing, and has never reached anything
+
+Zero `wine-ps5:` lines exist in any session log, ever -- including this
+port's own: 0870's fd-release switch report, the `WINE_PS5_WAIT_WATCHDOG`
+banner, and the slow-thread-start warning written for exactly the situation
+above. The sink ntdll installs takes Wine's *debug* output, not libc's
+stderr. **Use ERR() in ntdll** (it arrives even from a thread with no TEB)
+and **sceKernelDebugOutText in wineserver** (klog, as `kill_thread` and
+`pw_init_thread_note` already do). A diagnostic nobody receives costs more
+than no diagnostic, because it reads as evidence of absence.
+
+⚠ And keep the klog receiver alive. `pw_init_thread_note` had been naming
+the exact failure all day into a channel that stopped recording when the
+console rebooted.
+
+### Where it stands now
+
+`pthread_create` refuses at about a dozen threads with `-2147352541` =
+`0x80020023` = `0x8002_0000 | 0x23` = **EAGAIN**, a resource ceiling, not a
+heap -- though `spawn_thread` maps every failure onto `STATUS_NO_MEMORY`,
+which sent this the wrong way for a while (0867 keeps the real number).
+
+`src/thread-probe` (GLDS10009, `scripts/build.sh threadprobe`) asks which
+resource: Wine's exact attributes, then a smaller stack, the library's own
+stack, process scope, and a repeat after the first threads are joined --
+separating a per-thread cost from a concurrent-thread ceiling. Built, not
+yet run.
+
+### Two traps paid for today
+
+⚠ `build-app-ps4.sh` defaults to **NEO=0**. Every package built with just
+`--pkg` runs a PS4 Pro as a base PS4, and the only sign is
+`adapter_vk_init_driver_info ... device "PS5" 1002:9920` in the log. Always
+`--pkg --neo`.
+
+⚠ A patch regenerated with `git diff` against the **fully applied** tree
+carries context from patches later in the series, and then will not apply
+at its own position. 0867 was written against context that 0882 adds. Either
+place the patch after the one that owns that code, or fold it in -- the NULL
+`thread_data` guard went into 0882, which introduces the thread that has no
+Wine data.

@@ -1,0 +1,11 @@
+# How many threads pthread_create will make here, and which resource refuses.
+cmake_minimum_required(VERSION 3.16)
+project(gladius_thread_probe C)
+if(NOT DEFINED ORBIS_COMPAT_DIR OR NOT PS4)
+  message(FATAL_ERROR "configure with -DCMAKE_TOOLCHAIN_FILE=<bundle>/toolchain/orbis-sdk.cmake")
+endif()
+add_executable(threadprobe thread_probe.c)
+orbis_compat_verify()
+if(COMMAND ps4_create_eboot)
+  ps4_create_eboot(threadprobe)
+endif()
