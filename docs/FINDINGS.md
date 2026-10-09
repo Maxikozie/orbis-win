@@ -3864,3 +3864,98 @@ yet**. The Neo package is kept so the pair can be compared properly.
 
 ⚠ Do not read "survived longer" as a result. The Neo runs died at the
 cutscene, not at a time, so only reaching the same point counts.
+
+## The GPU's own account of the hang, and why we nearly read it wrong (2026-10-09)
+
+The RADV env loader paid off: with `MESA_LOG_FILE` pointing at
+`/data/prospero-win/logs/radv.log`, `ORBIS_DUMP_HUNG` finally wrote somewhere
+readable, and a Neo run produced the first hang dump this project has ever had.
+
+### Two hangs, and the dump covers the wrong one
+
+    line  210   submit #4997 - label stuck at 4996 for 4 submissions. DUMPED.
+    ...         the run continues for ~14,300 more submissions, 6528 frames
+    line  578   fence slot 10 still owed to submission 19323 after 5 s. NO DUMP.
+
+**#4997 recovered.** The log runs on past it for thousands of submissions with
+working scan-out (`ZERO COPY`, 1920x1080, 3 us copies). The hang that actually
+killed the process is **#19323**, and it produced no stream at all -- only the
+five numbers in that error line.
+
+Two separate reasons, both in the instrumentation rather than the driver:
+
+* The submit-path detector held `static bool reported` as a **process-wide
+  one-shot**. #4997 tripped it, and the latch stayed thrown for the rest of the
+  run. Every later hang, including the fatal one, was silently skipped.
+* The fatal hang does not go through the submit-path detector at all. That check
+  runs *on the way in to a submit*, so it only fires while submissions keep
+  arriving -- it goes quiet exactly when the GPU stops for good. #19323 was
+  caught in the fence-slot wait, which printed numbers and returned `-ETIME`.
+
+Both fixed in `src/mesa-patches-ps4/0003-orbis-dump-the-hang-that-kills.patch`:
+the detector re-arms whenever the fence label moves again (capped at
+`ORBIS_HUNG_DUMP_MAX` dumps), and the fence-slot wait now runs the same dump on
+`label + 1` before it gives up.
+
+### ⚠ The dump's own conclusion was wrong, and it was stated as fact
+
+The #4997 dump printed, in capitals:
+
+    submit #4997 compute user data at the stop: 0x8327c000 0x80000008
+                 0x88720000 0x00000008 0xfffc0000 0x00000ff0
+    submit #4997 its buffer 0x888720000 + 4294705152 bytes lives in BO 24's
+                 mapping 0x885c00000..0x889c00000
+                 - THE WRITE RUNS PAST THE END OF THE MAPPING
+
+That reads as a 4 GiB fill running off a 64 MiB buffer, and it is wrong. The
+block assumes the stopped dispatch is RADV's `fill_memory` meta, whose push
+constants are `{uint64 addr; uint32 max_offset; uint32 data}` -- so slot 4 is a
+length. **Every compute pipeline writes the same `COMPUTE_USER_DATA` registers**,
+so that reading is a guess, and here it did not survive its own stream: the
+`DISPATCH_DIRECT` a few dwords later is
+
+    c0031502 000000c0 00000001 00000001 00000045    -> 192 x 1 x 1 groups
+
+`fill_memory` launches `ceil(size/16)` threads in groups of 64, so 192 groups is
+at most **192 KiB** -- which fits inside BO 24 with ~21 MiB to spare. The grid
+and the "length" disagree by four orders of magnitude, which means the push
+constants are not a fill's and there is no overrun to explain.
+
+Patch 0003 also rewrites that block to print the mapping, the launched grid and
+the assumption as three separate facts, instead of announcing a conclusion drawn
+from one number that may not mean what it is being read to mean.
+
+### What was ruled out along the way
+
+* `radv_init_dcc()` (`radv_cmd_buffer.c:15962`) is the one metadata path with a
+  subtraction that can underflow (`meta_size - size`), and it is the obvious
+  Neo-shaped suspect. **It is gated on `gfx_level == GFX8` and cannot run here:**
+  `amd_family.h` places `CHIP_LIVERPOOL` and `CHIP_GLADIUS` between `CHIP_KAVERI`
+  and `CHIP_KABINI`, so *both* Sony parts are **GFX7**. Neo is not a different
+  gfx level from the base PS4, only a different topology.
+* `ac_surface.c` and the RADV sources contain **no** `CHIP_GLADIUS` or
+  `CHIP_LIVERPOOL` arms at all -- surface layout goes through the generic GFX7
+  addrlib paths, parameterised by `info`. So a Gladius surface bug would have to
+  come from wrong topology *input*, not from a Gladius-specific code path.
+
+### Still open
+
+The Neo-vs-base-PS4 result stands: the same code without `--neo` gets through
+the cutscene. But the mechanism is **not** identified -- the one dump we have
+describes a hang that recovered, and its headline conclusion does not hold up.
+The next Neo run is the first that can dump #19323 itself.
+
+Two leads in the same log that are still unadjudicated:
+
+    RESIDUE GREW across devices - 49 BO(s) was 43, 32 syncobj(s) was 28,
+    49 VA range(s) was 43 - something is leaking per device
+
+    radv/orbis: offchip stride 32768 B, 256 buffer(s) allocated,
+    4 shader engine(s); VGT_HS_OFFCHIP_PARAM <- 0x00000100
+
+The second is the `ORBIS_HS_OFFCHIP_PER_SE` question: `ac_gpu_info.c` states that
+these parts read `OFFCHIP_BUFFERING` **per shader engine**, and 256 programmed
+across 4 engines implies 1024 buffers against 256 allocated. GTA IV is 2008-era
+D3D9 through DXVK and almost certainly never tessellates, so a mis-sized tess
+ring would be allocated and never written -- which is why this stays a lead and
+not a hypothesis.

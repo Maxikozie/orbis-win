@@ -1,0 +1,183 @@
+Subject: [PATCH] orbis: dump the hang that kills, not the one that recovers
+
+Three defects in the ORBIS_DUMP_HUNG instrumentation, all found by reading one
+run's radv.log against the stream it dumped:
+
+1. `reported` was a process-wide one-shot. A four-submission stall is not always
+   fatal - in the run that prompted this, submit #4997 stalled, got the full
+   dump, and then RECOVERED; the GPU went on to retire fourteen thousand more
+   submissions before hanging for good at #19323. By then the latch had been
+   thrown and the fatal hang could never be dumped. It now re-arms whenever the
+   fence label moves again, capped by ORBIS_HUNG_DUMP_MAX.
+
+2. The fence-slot wait - the path the FATAL hang actually takes, because the
+   check on the way in to submit goes quiet exactly when submissions stop
+   arriving - printed numbers and no stream. It now runs the same dump.
+
+3. The user-data block announced "THE WRITE RUNS PAST THE END OF THE MAPPING"
+   from a reading of slot 4 as fill_memory's `max_offset`. Every compute
+   pipeline writes those registers, so that reading is a guess, and in #4997 it
+   was wrong: it reported a four-gigabyte overrun while the DISPATCH_DIRECT in
+   the same stream launched 192 groups - 192 KiB, which fits with room to
+   spare. It now prints the grid beside the mapping and names the assumption,
+   so the two can be compared instead of one being announced as a conclusion.
+
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -2883,6 +2883,10 @@
+  * dump has cost this project more than half a megabyte of memory ever will. ORBIS_DUMP_HUNG=0 turns it off. */
+ #define ORBIS_HUNG_RING 8
+ 
++/* How many distinct hangs one process will dump. The dumper re-arms whenever the fence label moves
++ * again, so this is the only thing bounding a run that stalls repeatedly. */
++#define ORBIS_HUNG_DUMP_MAX 4
++
+ struct orbis_hung_slot {
+    uint64_t seq;
+    uint32_t dwords;
+@@ -9459,15 +9463,25 @@
+       static uint32_t last_label;
+       static unsigned stall;
+       static bool     reported;
++      static unsigned dumps;
+       const uint32_t  label = *orbis_fence_label;
+ 
+-      if (label == last_label)
++      /* ⚠ RE-ARM WHEN THE LABEL MOVES AGAIN. `reported` was a process-wide one-shot, and that cost a
++       * whole run: a four-submission stall early in a session is not always fatal - one of them recovered
++       * and the GPU went on to retire fourteen thousand more submissions - but the latch had already been
++       * thrown, so the hang that actually killed the process could never be dumped. A stall that clears is
++       * a different event from the one that follows it, and each deserves its own dump. The counter keeps
++       * a pathological run from filling the log. */
++      if (label == last_label) {
+          ++stall;
+-      else
+-         stall = 0;
++      } else {
++         stall    = 0;
++         reported = false;
++      }
+       last_label = label;
+ 
+-      if (stall >= 4 && !reported) {
++      if (stall >= 4 && !reported && dumps < ORBIS_HUNG_DUMP_MAX) {
++         ++dumps;
+          const uint64_t              hung = (uint64_t)label + 1;
+          struct orbis_hung_slot *const hs = &orbis_hung_ring[hung % ORBIS_HUNG_RING];
+          reported = true;
+@@ -9595,22 +9609,29 @@
+              *
+              * The brackets put the stop on one DISPATCH_DIRECT, and the same shader with the same initiator
+              * and the same thread count completes six times earlier in the same stream at smaller grids. So
+-             * the shape is not the question; the arguments are. RADV's fill_buffer meta takes a base in user
+-             * data 2:3 and a length in user data 4, and its own descriptor carries num_records = -1, which
+-             * means the store is NOT clamped by the hardware - the length is the only bound there is.
++             * the shape is not the question; the arguments are. IF this dispatch is RADV's fill_memory meta,
++             * user data 2:3 is a base and user data 4 is `max_offset`, and that pipeline's descriptor carries
++             * num_records = -1 - so the hardware does not clamp the store and max_offset is the only bound.
+              *
+-             * Printing the containing mapping's extent beside the length makes "the fill runs off the end of
+-             * its buffer" a fact or not a fact, in one line, instead of an inference from three numbers in
+-             * three different places. */
++             * That "IF" is load-bearing, and it was not here the first time. Every compute pipeline writes the
++             * same user-data registers, so reading slot 4 as a length is a GUESS - and the first hang this
++             * block reported is one where the guess was wrong: it announced a confident four-gigabyte overrun
++             * while the DISPATCH_DIRECT in the same stream launched 192 groups, which is 192 KiB and fits the
++             * mapping with room to spare. So print the mapping, the grid and the assumption as three separate
++             * things and let them be compared, instead of stating a conclusion drawn from one number that may
++             * not mean what it is being read to mean. */
+             {
+                uint32_t ud[8] = {0};
+                bool have_ud = false;
++               uint32_t grid[3] = {0};
++               bool have_grid = false;
+                for (uint32_t i = 0; i + 1 < scan_to && i + 1 < hs->dwords;) {
+                   const uint32_t hdr = hs->stream[i];
+                   if ((hdr >> 30) != 3)
+                      break;
+                   const uint32_t cnt = ((hdr >> 16) & 0x3FFF) + 2;
+-                  if (((hdr >> 8) & 0xFF) == 0x76 && cnt >= 3 && i + cnt <= hs->dwords) {
++                  const uint32_t op  = (hdr >> 8) & 0xFF;
++                  if (op == 0x76 && cnt >= 3 && i + cnt <= hs->dwords) {
+                      const uint32_t base = hs->stream[i + 1];
+                      for (uint32_t k = i + 2; k < i + cnt; ++k) {
+                         const uint32_t reg = base + (k - i - 2);
+@@ -9619,6 +9640,12 @@
+                            have_ud = true;
+                         }
+                      }
++                  } else if (op == 0x15 && cnt >= 5 && i + cnt <= hs->dwords) {
++                     /* IT_DISPATCH_DIRECT: the grid that was actually launched. */
++                     grid[0]   = hs->stream[i + 1];
++                     grid[1]   = hs->stream[i + 2];
++                     grid[2]   = hs->stream[i + 3];
++                     have_grid = true;
+                   }
+                   i += cnt;
+                }
+@@ -9630,12 +9657,31 @@
+                   mesa_logi("orbis-drm: submit #%" PRIu64 " compute user data at the stop: "
+                             "0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x",
+                             hung, ud[0], ud[1], ud[2], ud[3], ud[4], ud[5]);
++                  /* ⚠ THE GRID IS THE SECOND OPINION, AND IT IS THE HONEST ONE.
++                   *
++                   * ud[4] is only `max_offset` if this dispatch really is RADV's fill_memory meta; every
++                   * other compute pipeline puts something else in that slot, and the reading is silently
++                   * wrong when it is one of those. So say what was assumed, and print the grid beside it:
++                   * fill_memory launches ceil(size/16) threads in groups of 64, so the grid bounds the
++                   * bytes that can actually be written no matter which pipeline this is. When the two
++                   * disagree, the push constants are not a fill's and the overrun is not real - which is
++                   * exactly the trap the first reading of this line walked into. */
+                   if (orbis_va_mapping_of(bufva, &lo, &hi, &bo)) {
+-                     mesa_logi("orbis-drm: submit #%" PRIu64 " its buffer 0x%" PRIx64 " + %u bytes lives in "
+-                               "BO %u's mapping 0x%" PRIx64 "..0x%" PRIx64 " - %s",
+-                               hung, bufva, ud[4], bo, lo, hi,
+-                               bufva + ud[4] <= hi ? "the write fits"
+-                                                   : "THE WRITE RUNS PAST THE END OF THE MAPPING");
++                     mesa_logi("orbis-drm: submit #%" PRIu64 " its buffer 0x%" PRIx64 " lives in BO %u's mapping "
++                               "0x%" PRIx64 "..0x%" PRIx64 " (%" PRIu64 " bytes of room behind it)",
++                               hung, bufva, bo, lo, hi, hi - bufva);
++                     if (have_grid) {
++                        const uint64_t bytes = (uint64_t)grid[0] * 64ull * 16ull;
++                        mesa_logi("orbis-drm: submit #%" PRIu64 " the grid launched is %ux%ux%u groups - at most "
++                                  "%" PRIu64 " bytes if this is fill_memory, and %s. If that disagrees with a "
++                                  "max_offset of %u then these push constants are NOT a fill's.",
++                                  hung, grid[0], grid[1], grid[2], bytes,
++                                  bufva + bytes <= hi ? "it FITS" : "IT RUNS PAST THE END OF THE MAPPING", ud[4]);
++                     } else {
++                        mesa_logi("orbis-drm: submit #%" PRIu64 " no DISPATCH_DIRECT found before the stop, so "
++                                  "ud[4]=%u cannot be cross-checked against a grid - treat it as unidentified",
++                                  hung, ud[4]);
++                     }
+                   } else if (bufva != 0) {
+                      mesa_loge("orbis-drm: submit #%" PRIu64 " its buffer 0x%" PRIx64 " is in NO live mapping",
+                                hung, bufva);
+@@ -9950,6 +9996,28 @@
+                       slot, owner, (unsigned long long)(ORBIS_WAIT_CAP_NS / 1000000000ull),
+                       *orbis_fence_label, (unsigned long long)orbis_submit_seq_no,
+                       (unsigned)(owner - *orbis_fence_label));
++
++            /* ⚠ AND DUMP THE STREAM, WHICH THIS PATH NEVER DID.
++             *
++             * This is the path the FATAL hang takes. The check on the way IN to submit only runs while
++             * submissions keep arriving, and it goes quiet exactly when the GPU stops for good - so the
++             * run that dies has been leaving numbers and no stream, while a stall that RECOVERED got the
++             * full dump. That is backwards. `label + 1` names the submission that never wrote its
++             * end-of-pipe, the same way it does on the way in. */
++            if (orbis_dump_hung_enabled()) {
++               const uint64_t              hung = (uint64_t)*orbis_fence_label + 1;
++               struct orbis_hung_slot *const hs = &orbis_hung_ring[hung % ORBIS_HUNG_RING];
++
++               if (hs->seq == hung && hs->dwords > 0) {
++                  mesa_logw("orbis-drm: dumping submit #%" PRIu64 ", the one the label never reached.", hung);
++                  orbis_dump_ib(hung, hs->stream, hs->dwords, "HUNG-WAIT", true);
++               } else {
++                  mesa_logw("orbis-drm: submit #%" PRIu64 " has already left the %u-slot hung ring (it holds "
++                            "#%" PRIu64 ") - nothing to dump. Raise ORBIS_HUNG_RING.",
++                            hung, (unsigned)ORBIS_HUNG_RING, hs->seq);
++               }
++            }
++
+             /* The ticket goes back the same way the builder's failure returns it: nothing was
+              * submitted, so nothing will ever write this sequence number, and the counter must not
+              * be left ahead of the fence. Still under the lock, so no other thread took one. */
