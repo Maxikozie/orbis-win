@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] wowprospero: free thread state with the allocator that made it.
+
+GTA IV reaches a loaded scene and dies sixty-six seconds later,
+reproducibly, on one exiting thread of the six that exit in a run. Three
+readings of the fault report were wrong before the registers settled it.
+
+The report names a syscall -- "syscall fault in syscall 0x133c (win32u
+#828)" -- and that is NtUserCallNoParam, so thread_detach looked like the
+place. Staging it showed every one of its stages completing, with the
+fault 1.6 ms later: get_syscall_frame returns the most recent frame, not
+a live one, and the call had already returned.
+
+The registers are not stale:
+
+    fault regs rip=00000008000e1ef7 rsp=000000103542f8c0 rbp=000000103542f910
+               rax=000245380000000d rbx=0000000800061410
+    fault regs rcx=0000453800000008 ... r14=0000000201a38010 r15=0000000201a38020
+    syscall fault 0xc0000005 at libSceLibcInternal.sprx+0x51ef7,
+               address 453a01a44017
+
+0x24538 is 148792 -- the size of this structure, the number this module
+prints at startup -- sitting in the high half of a register where a chunk
+size belongs. And the faulting address is arithmetic, not corruption:
+
+    0x453800000000 + 0x201a44017 = 0x453a01a44017
+
+a real heap pointer, with r14/r15 pointing at its neighbours, plus a size
+read at the wrong width. libc's allocator was walking a chunk header that
+was never libc's.
+
+It never was. get_thread takes the state from the console libc's calloc,
+and from ntdll's heap when that refuses -- which it does, for this size,
+on this console, and says so: "thread state from ntdll's heap (libc
+refused 148792 bytes, errno 22)". Both release paths then called libc's
+free().
+
+So record which allocator served the block and release it through that
+one. Provenance rather than an assumption: either may serve, and libc
+refusing this size is measured here, not guaranteed.
+
+⚠ The same class as the RADV heap wrapping earlier today, and as win32u
+freeing ntdll's memory before that. On this console an allocator's
+metadata is not portable between the two heaps, and every cross-module
+allocation is a candidate until its free is checked.
+diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
+index 01d21a5..30472f6 100644
+--- a/wine/wowprospero/unix.c
++++ b/wine/wowprospero/unix.c
+@@ -57,6 +84,11 @@ enum { CALL_STACK = 0x40000 };
+ 
+ struct pw_thread
+ {
++    /* ⚠ Which allocator served this block. It comes from the console libc's
++     * calloc, or -- when that refuses, which it does for this size here --
++     * from ntdll's heap, and the two keep incompatible metadata. Freeing it
++     * with the wrong one is what killed GTA IV; see free_thread_state. */
++    int state_from_wine_heap;
+     PwVmBackend vm;
+     PwX86Engine engine;
+     PwX86State state;
+@@ -446,6 +501,43 @@ static void execution_report( struct pw_thread *thread )
+              (unsigned long long)thread->engine.execution_clock_errors );
+ }
+ 
++/* ⚠ Release the thread state through the allocator that produced it.
++ *
++ * It comes from the console libc's calloc, and from ntdll's heap when that
++ * refuses -- which it does, for this size, on this console: "thread state from
++ * ntdll's heap (libc refused 148792 bytes, errno 22)". Both paths then freed it
++ * with libc's free(), so libc read ntdll's metadata as one of its own chunks.
++ *
++ * GTA IV died on that, reproducibly, sixty-six seconds after reaching a loaded
++ * scene, on the one exiting thread of six that had been through this path:
++ *
++ *     fault regs rip=00000008000e1ef7 ... rax=000245380000000d
++ *                rcx=0000453800000008 r15=0000000201a38020
++ *     syscall fault 0xc0000005 at libSceLibcInternal.sprx+0x51ef7,
++ *                address 453a01a44017
++ *
++ * 0x24538 is 148792, this structure's size, sitting in the high half of a
++ * register where a chunk size belongs; and the faulting address is exactly
++ * 0x453800000000 + 0x201a44017 -- a real heap pointer plus a size read at the
++ * wrong width. libc was walking a chunk header that was never libc's.
++ *
++ * ⚠ Provenance is recorded rather than assumed: either allocator may serve,
++ * and libc refusing this size is measured on this console, not guaranteed. */
++static void free_thread_state( struct pw_thread *thread )
++{
++    if (!thread) return;
++#ifdef __PROSPERO__
++    if (thread->state_from_wine_heap)
++    {
++        extern void pw_wine_heap_free( void *ptr );
++
++        pw_wine_heap_free( thread );
++        return;
++    }
++#endif
++    free( thread );
++}
++
+ static struct pw_thread *get_thread(void)
+ {
+     struct pw_thread *thread = self;
+@@ -453,16 +545,59 @@ static struct pw_thread *get_thread(void)
+     int first, attempt;
+ 
+     if (thread) return thread;
+-    if (!(thread = calloc( 1, sizeof(*thread) ))) return NULL;
++    {
++        /* ⚠ One line per process, to prove this channel carries at all: a PRX
++         * other than ntdll has no stderr and no klog of its own, and every
++         * diagnostic added here was invisible until the log became a file. */
++        static int announced;
++        if (!announced++)
++            PW_WOW_NOTE( "wowprospero: translator starting, thread state %zu bytes\n",
++                         sizeof(*thread) );
++    }
++    thread_memory_note( "before-state", NULL, sizeof(*thread) );
++    if (!(thread = calloc( 1, sizeof(*thread) )))
++    {
++#ifdef __PROSPERO__
++        /* ⚠ ntdll keeps the one allocator known to work in this process: it
++         * links prospero-win's heap and exports it (scripts/prx-ps4.sh), while
++         * this module's malloc is the console libc's and answered NULL for
++         * 145 KiB. Fall back to ntdll's before giving up. */
++        extern void *pw_wine_heap_malloc( size_t bytes );
++        if ((thread = pw_wine_heap_malloc( sizeof(*thread) )))
++        {
++            memset( thread, 0, sizeof(*thread) );
++            thread->state_from_wine_heap = 1;
++            PW_WOW_NOTE( "wowprospero: thread state from ntdll's heap (libc refused %zu bytes, errno %d)\n",
++                         sizeof(*thread), errno );
++        }
++    }
++    if (!thread)
++    {
++#endif
++        /* ⚠ This returned NULL in silence, and the caller turns that into
++         * PW_ERR_VM with no fault address -- which reaches the log as
++         *     err:wow:BTCpuSimulate DBT error -9 ... fault address 0
++         * and looks exactly like the translator refusing guest memory. */
++        PW_WOW_NOTE( "wowprospero: no memory for %zu bytes of thread state\n",
++                     sizeof(*thread) );
++        return NULL;
++    }
++    thread_memory_note( "after-state", thread, sizeof(*thread) );
+     first = !__atomic_load_n( &first_thread_ready, __ATOMIC_ACQUIRE );
+     if (pw_wow_host_backend( &thread->vm, &host_memory ) != PW_OK ||
+         (attempt = pw_wow_thread_fit( first, setup_thread, thread, &budget )) < 0)
+     {
+         fprintf( stderr, "wowprospero: no memory for a %s thread's translator\n",
+                  first ? "first" : "further" );
+-        free( thread );
++        free_thread_state( thread );
+         return NULL;
+     }
++    thread_memory_note( "after-setup", thread->entries, budget.entries * sizeof(*thread->entries) );
++    thread_memory_note( "code-arena", thread->engine.code.write_base, thread->engine.code.bytes );
++    thread_memory_note( "hostexec", thread->hostexec.code.write_base, thread->hostexec.code.bytes );
++    PW_WOW_NOTE( "wowprospero budget: tid=%04x first=%d attempt=%d entries=%u arena=%zuK hostexec=%zuK\n",
++                 (unsigned)(uintptr_t)NtCurrentTeb()->ClientId.UniqueThread,
++                 first, attempt, budget.entries, budget.arena_bytes >> 10, budget.hostexec_bytes >> 10 );
+     if (attempt)
+         fprintf( stderr, "wowprospero: %s thread's translator reduced to %u entries, %zu KiB of code\n",
+                  first ? "first" : "further", budget.entries, budget.arena_bytes >> 10 );
+@@ -1795,7 +2065,7 @@ static NTSTATUS thread_term( void *args )
+     pw_x86_engine_destroy( &thread->engine );
+     release( thread->entries, 0 );
+     if (thread->call_stack) release( thread->call_stack, 0 );
+-    free( thread );
++    free_thread_state( thread );
+     return STATUS_SUCCESS;
+ }
+ 
+
