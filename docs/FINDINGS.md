@@ -3126,3 +3126,55 @@ read from it, which is the faulting address exactly.
 The precedent says what the fix looks like, and the awkwardness is that RADV is
 a prebuilt archive: either rebuild Mesa with `-femulated-tls`, or give the
 module a `__tls_get_addr` that works, since the one it links now returns NULL.
+
+## GTA IV reaches a swapchain, and the screen goes black (2026-10-08)
+
+Three stubs in a row, each one hiding the next.
+
+**1. dcomp (patch 0879).** `DCompositionCreateDevice` returned `E_NOTIMPL`
+and never wrote `*device`; 1911.dll does not check the HRESULT and read a
+field at `+0x2c` off the NULL it was left with. That is the `+0x2c` crash
+that had been read as a DRM check, as a DXGI problem and as a DXVK version
+problem over most of a day. A device object that answers `E_NOTIMPL` from
+every method, but exists, ends it.
+
+**2. dxgi (patch 0860).** The next line was
+`dxgi_factory_CreateSwapChainForComposition ... stub!`, then thirty seconds
+of nothing on a full core, `frames_put=0 vk_shown=0`. A composition
+swapchain is one with no window; on this console that costs nothing,
+because `ps5drv` returns a headless surface for any HWND. Make a hidden
+`WS_POPUP` window and forward to the `ForHwnd` path.
+
+**3. win32u (patch 0861).** Now `d3d12_swapchain_init` runs, the Win32
+surface is created, and the title hands the display to Vulkan --
+`PW_WINE64 display released to vulkan close=state shown=0`, which is the
+black screen, not a failure. Then `vkCreateSwapchainKHR` -> `-3`
+(`VK_ERROR_INITIALIZATION_FAILED`) and the whole stack unwinds, leaving
+nobody owning the screen.
+
+`adjust_surface_capabilities` overwrites the host's image extents with the
+window's client rect. Correct where a window system exists; here the
+surface *is* the display, and RADV's WSI scans it out through
+`sceVideoOutRegisterBuffers`, which has buffers at the video mode's size
+and no other. Leave the host extents alone under `__PROSPERO__`.
+
+⚠ What the log does **not** say is which field RADV objected to: its stderr
+goes nowhere from inside a PRX. 0861 therefore logs the eleven fields of
+the request and the capabilities they were built from whenever the host
+refuses a swapchain. Check that before measuring anything else.
+
+⚠ Two process traps, both paid for today:
+
+  - The patch series is `0100-0899` and `0870-0899` is contiguous. A new
+    patch goes in the free `0821-0869` range. `build_wine_ps5.sh` refuses a
+    duplicate or out-of-range number, and refuses it *after* resetting the
+    tree.
+  - `scripts/prx-ps4.sh` empties `prx/sce_module` and rebuilds only its own
+    nine modules. `libvulkan`, `libfreetype` and `wineps5` have to be
+    rebuilt after every run of it, or the package ships 50 MB light with no
+    Vulkan driver in it.
+
+⚠ `dxgi` and `dcomp` are PE modules and come from the **host** Wine build
+(`.deps/wine-host`), not the ps5 one. Patching the ps5 tree alone changes
+nothing on the console; the rebuilt DLL has to be stripped and copied into
+`install/usr/lib/wine/{i386,x86_64}-windows/` for both architectures.
