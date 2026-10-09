@@ -2991,3 +2991,52 @@ across wholesale.
 
 The last working log would have said so in one grep. `loaddll` names the CPU
 backend on every run.
+
+### The dialog could be read, and it asked for a soundcard (2026-10-08)
+
+With fonts working the error box finally said what it wanted:
+
+    GTA IV requires a soundcard in order to run
+
+Not a crash and not graphics -- the game ran its startup checks, found no audio
+endpoint, and said so. The cause had been in every log of the day, misread as a
+printer driver:
+
+    pw_wine_dl: cannot open .../wineps5.so ... not found
+    err:mmdevapi:init_driver ...
+
+`wineps5` is the audio driver. Patch 0120 already points
+`HKCU\Software\Wine\Drivers\Audio` at "ps5", so Wine asks for it on every run;
+upstream's `build_wine_ps5.sh` builds it from `wine/wineps5/unix.c` and
+`src/pw_audio_mix.c` and finishes with ps5-native-tool. `scripts/prx-ps4.sh`
+builds nine modules and this was never one of them.
+`scripts/wineps5-prx-ps4.sh` is the PS4 arm, with upstream's compile flags and
+export list verbatim.
+
+### ⚠ PW_PRX_LINK, and three modules that were quietly wrong
+
+Building it surfaced a mistake in all three PRXs added today.
+`src/toolchain/prospero-clang:108`:
+
+    if [ -n "${PW_PRX_LINK:-}" ]; then SHIMLIB=""; ... else SHIMLIB="$PWSHIM"; fi
+
+`libwineshim.a` carries this port's stand-ins for the `wine/ps5` units, and
+`prx-ps4.sh` sets `PW_PRX_LINK=1` so it stays off the line. My scripts did not
+set it, so the archive answered `pw_wine_heap_malloc` and `pw_wine_dl_open`
+out of its own members -- each module getting a private heap and a private
+module registry instead of ntdll's.
+
+For the heap that is a leak across the boundary rather than corruption
+(`pw_wine_heap` counts a foreign pointer and returns). For the registry it is
+fatal and silent: the driver looks its endpoint up by name --
+
+    dlsym(RTLD_DEFAULT, "pw_wine_audio_available")
+    dlsym(RTLD_DEFAULT, "pw_wine_audio_output")
+
+-- ntdll exports both, but a private registry has nothing registered in it, so
+`dlsym` answers NULL, the driver reports itself unavailable, and the game says
+it has no soundcard. The same symptom we started from, reached by a different
+route, and it would have looked like the fix simply not working.
+
+`nm` tells them apart in one line: **`U pw_wine_dl_open` is right, `t` is not.**
+Worth running against any new module here.

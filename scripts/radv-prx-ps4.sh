@@ -23,6 +23,12 @@ set -eu
 # NEEDED. Measured: libvulkan.prx built that way loads nowhere, and win32u
 # reports only "Failed to load libvulkan.so".
 : "${PW_SHARED_LIBC:=1}"; export PW_SHARED_LIBC
+# ⚠ PW_PRX_LINK=1 keeps libwineshim.a off the line (src/toolchain/prospero-clang
+# :108). It carries this port's stand-ins for the wine/ps5 units, so with it
+# present the linker answers pw_wine_heap_malloc and pw_wine_dl_open out of the
+# archive and the module gets its own copy of the heap and of the module
+# registry instead of ntdll's. prx-ps4.sh sets this for every module it builds.
+PW_PRX_LINK=1; export PW_PRX_LINK
 root=/home/zpeirce/ps4-gladius
 bundle=$root/sdk/orbis-sdk-v1
 oo=$bundle/sdk
