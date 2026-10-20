@@ -1,0 +1,97 @@
+Subject: wow64native: make native guest PC sampling explicit opt-in
+
+Use the existing per-thread watcher to optionally send SIGPROF to busy native
+WoW64 threads and report the saved RIP/RSP/CS from ntdll's atomic signal
+snapshot. On PS4 the libkernel signal trampoline treats guest FS:0x10 as a
+native TCB pointer, so synthetic SIGPROF can fault before the sampler runs.
+Require PW_NATIVE_PC=1 to enable this diagnostic; ordinary CPU-time and
+transition counters remain available without signals.
+
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -11,6 +11,7 @@
+ #include <string.h>
+ #ifdef __PROSPERO__
+ #include <errno.h>
++#include <signal.h>
+ #include <stdint.h>
+ #include <sys/mman.h>
+ #include <time.h>
+@@ -45,12 +46,20 @@
+ struct pw_profile_watch_entry
+ {
+     struct pw_native_thread_state *state;
++    pthread_t native_thread;
+     clockid_t cpu_clock;
+     int cpu_clock_valid;
+     unsigned long long cpu_ns;
+     unsigned long long host_calls, guest_calls, unix_calls, syscall_calls;
+     unsigned int samples;
+ };
++typedef unsigned int (*pw_native_pc_query)(unsigned long long *, unsigned long long *,
++                                           unsigned long long *, unsigned long long *,
++                                           unsigned long long *, unsigned long long *,
++                                           unsigned long long *, unsigned long long *,
++                                           unsigned long long *);
++static pw_native_pc_query profile_pc_query;
++static int profile_pc_enabled;
+ static pthread_mutex_t profile_watch_lock = PTHREAD_MUTEX_INITIALIZER;
+ static struct pw_profile_watch_entry profile_watch_entries[PW_PROFILE_WATCH_MAX_THREADS];
+ static pthread_t profile_watch_thread;
+@@ -109,6 +115,29 @@
+                 cpu_ns = (unsigned long long)cpu_time.tv_sec * 1000000000ull + cpu_time.tv_nsec;
+                 if (entry->samples && cpu_ns >= entry->cpu_ns) cpu_delta_ns = cpu_ns - entry->cpu_ns;
+             }
++            if (profile_pc_enabled && cpu_delta_ns > 100000000ull)
++            {
++                unsigned long long before = 0, sequence = 0, rip = 0, rsp = 0, cs = 0;
++                unsigned long long rax = 0, rdi = 0, rsi = 0, rdx = 0, r10 = 0;
++                int rc;
++                profile_pc_query(&before, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
++                rc = pthread_kill(entry->native_thread, SIGPROF);
++                if (!rc)
++                {
++                    struct timespec pause = {0, 1000000};
++                    for (unsigned int attempt = 0; attempt < 50; ++attempt)
++                    {
++                        nanosleep(&pause, NULL);
++                        profile_pc_query(&sequence, &rip, &rsp, &cs, &rax, &rdi, &rsi, &rdx, &r10);
++                        if (sequence != before) break;
++                    }
++                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx seq=%llu rip=%llx rsp=%llx cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
++                                 entry->state->guest_fs, sequence, rip, rsp, cs,
++                                 rax, rdi, rsi, rdx, r10,
++                                 sequence != before ? "ok" : "timeout");
++                }
++                else WINE_MESSAGE("PW_NATIVE_PC teb=%llx signal-error=%d\n", entry->state->guest_fs, rc);
++            }
+             changed = !entry->samples || host_calls != entry->host_calls ||
+                       guest_calls != entry->guest_calls || unix_calls != entry->unix_calls ||
+                       syscall_calls != entry->syscall_calls;
+@@ -142,6 +169,7 @@
+         if (!profile_watch_entries[i].state)
+         {
+             profile_watch_entries[i].state = state;
++            profile_watch_entries[i].native_thread = pthread_self();
+             profile_watch_entries[i].cpu_clock = cpu_clock;
+             profile_watch_entries[i].cpu_clock_valid = cpu_clock_valid;
+             profile_watch_entries[i].cpu_ns = 0;
+@@ -229,8 +257,18 @@
+             return STATUS_NOT_SUPPORTED;
+         }
+         caps = query(PW_NW64_CAPS_VERSION);
++        profile_pc_query = dlsym(RTLD_DEFAULT, "__wine_prospero_native_profile_sample");
++        /* PS4 libkernel's signal trampoline treats guest TEB FS:0x10 as its
++         * native thread pointer. Synthetic SIGPROF therefore faults before
++         * reaching the sampler while native WoW64 runs with guest FS active.
++         * Keep PC sampling opt-in until the per-thread signal/TLS bridge is
++         * fixed; ordinary CPU-time and transition counters need no signal. */
++        profile_pc_enabled = (caps & 0x20u) && profile_pc_query &&
++                             getenv("PW_NATIVE_PC") && !strcmp(getenv("PW_NATIVE_PC"), "1");
+         WINE_MESSAGE("PW_NATIVE_STAGE process_init caps=%08x required=%08x\n",
+                      caps, PW_NW64_CAP_REQUIRED);
++        WINE_MESSAGE("PW_NATIVE_STAGE process_init pc_sampler=%d query=%p\n",
++                     profile_pc_enabled, profile_pc_query);
+         if ((caps & PW_NW64_CAP_REQUIRED) != PW_NW64_CAP_REQUIRED)
+         {
+             WINE_MESSAGE("PW_NATIVE_STAGE process_init insufficient-caps\n");

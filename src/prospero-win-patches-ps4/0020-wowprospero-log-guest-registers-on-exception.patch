@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 12 Oct 2026 18:00:00 -0700
+Subject: [PATCH] wowprospero: log guest registers on an exception
+
+The repeated FalloutNV fault is at the same EIP and stack pointer, and its
+read from [EBP-4] faults at address 0x4. Include the i386 registers in the
+existing bounded exception diagnostic so the next run shows whether EBP was
+already invalid when the translator raised the fault.
+---
+ wine/wowprospero/cpu.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
+--- a/wine/wowprospero/cpu.c
++++ b/wine/wowprospero/cpu.c
+@@ -343,6 +343,7 @@ static void raise_guest_exception( I386_CONTEXT *ctx, DWORD code, UINT address, UINT write )
+         const UINT *stack = ULongToPtr( ctx->Esp );
+ 
+-        ERR( "guest exception %#lx at eip %#lx esp %#lx address %#x write %u\n",
+-             code, ctx->Eip, ctx->Esp, address, write );
++        ERR( "guest exception %#lx at eip %#lx esp %#lx ebp %#lx eax %#lx ebx %#lx ecx %#lx edx %#lx esi %#lx edi %#lx address %#x write %u\n",
++             code, ctx->Eip, ctx->Esp, ctx->Ebp, ctx->Eax, ctx->Ebx, ctx->Ecx,
++             ctx->Edx, ctx->Esi, ctx->Edi, address, write );
+         /* The top of the i386 stack, for the callers' return addresses. */
+         if (!NtQueryVirtualMemory( GetCurrentProcess(), stack, MemoryBasicInformation, &info, sizeof(info), NULL ) &&
+-- 
+2.45.0

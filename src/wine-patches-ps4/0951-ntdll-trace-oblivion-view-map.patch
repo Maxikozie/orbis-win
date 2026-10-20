@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace Oblivion file-view remaps
+
+0963 confirmed the image page becomes read-only after its RX requests, but no
+later mprotect wrapper call covers it. Trace direct fixed file mappings that
+overlap 0x004a8330, including their result, to catch mapping paths that bypass
+the PS4 mmap wrapper.
+---
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 58a9d01b8c..91cdf8dfb9 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2784,6 +2784,7 @@ static NTSTATUS map_file_into_view( struct file_view *view, int fd, size_t start
+ {
+     char *map_addr, *host_addr;
+     size_t map_size, host_size;
++    void *mapped;
+     int prot = PROT_READ | PROT_WRITE;
+     unsigned int flags = MAP_FIXED;
+ 
+@@ -2815,7 +2816,20 @@ static NTSTATUS map_file_into_view( struct file_view *view, int fd, size_t start
+        and if alignment is correct */
+     if ((!removable || (flags & MAP_SHARED)) && host_addr == map_addr && host_size == map_size)
+     {
+-        if (mmap( host_addr, host_size, prot, flags, fd, offset ) != MAP_FAILED)
++        BOOL trace_oblivion = host_addr <= (char *)0x004a8330 &&
++                              host_addr + host_size > (char *)0x004a8330;
++
++        if (trace_oblivion)
++            ERR( "PS4_OBLIVION map-file enter view=%p start=%lx size=%lx map=%p map_size=%lx fd=%d offset=%s prot=%#x flags=%#x vprot=%#x removable=%u\n",
++                 view->base, (unsigned long)start, (unsigned long)size, host_addr,
++                 (unsigned long)host_size, fd, wine_dbgstr_longlong(offset), prot,
++                 flags, vprot, removable );
++        mapped = mmap( host_addr, host_size, prot, flags, fd, offset );
++        if (trace_oblivion)
++            ERR( "PS4_OBLIVION map-file result view=%p map=%p map_size=%lx result=%p errno=%d\n",
++                 view->base, host_addr, (unsigned long)host_size, mapped,
++                 mapped == MAP_FAILED ? errno : 0 );
++        if (mapped != MAP_FAILED)
+             return STATUS_SUCCESS;
+ 
+         switch (errno)
+--
+2.43.0

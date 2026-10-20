@@ -1,0 +1,49 @@
+diff --git a/mesa-build/orbis-compat/include/signal.h b/mesa-build/orbis-compat/include/signal.h
+index 0000000..0000000 100644
+@@ -34,6 +34,46 @@
+ #define _ORBIS_COMPAT_SIGNAL_H
+ 
+ #include_next <signal.h>
++
++/* The SDK's Linux signal numbers disagree with the FreeBSD-derived kernel ABI.
++ * Keep the POSIX names used by Wine aligned with the kernel numbers so a
++ * SIGBUS fault cannot be mistaken for Wine's SIGUSR1 suspend signal. */
++#undef  SIGEMT
++#define SIGEMT    7
++#undef  SIGBUS
++#define SIGBUS    10
++#undef  SIGSYS
++#define SIGSYS    12
++#undef  SIGURG
++#define SIGURG    16
++#undef  SIGSTOP
++#define SIGSTOP   17
++#undef  SIGTSTP
++#define SIGTSTP   18
++#undef  SIGCONT
++#define SIGCONT   19
++#undef  SIGCHLD
++#define SIGCHLD   20
++#undef  SIGIO
++#define SIGIO     23
++#undef  SIGWINCH
++#define SIGWINCH  28
++#undef  SIGINFO
++#define SIGINFO   29
++#undef  SIGUSR1
++#define SIGUSR1   30
++#undef  SIGUSR2
++#define SIGUSR2   31
++#undef  SIGPOLL
++#define SIGPOLL   SIGIO
++#undef  SIGSTKFLT
++#undef  SIGPWR
++#undef  SIGUNUSED
++#define SIGUNUSED SIGSYS
++#undef  SIGIOT
++#define SIGIOT    SIGABRT
++#undef  SIGCLD
++#define SIGCLD    SIGCHLD
+ 
+ /* ⚠ sa_sigaction DOES NOT COMPILE AS THE SDK DEFINES IT, and this is a typo rather than a design.
+    signal.h:136 names the union member `__sa_sigaction`; signal.h:142 defines the macro as

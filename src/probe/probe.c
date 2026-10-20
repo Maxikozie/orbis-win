@@ -152,8 +152,9 @@ static void run_bench(VkPhysicalDevice phys, uint32_t qf)
     VkQueue q; vkGetDeviceQueue(dev, qf, 0, &q);
     say("bench: ok   vkCreateDevice + queue");
 
-    enum { WG_SIZE = 64, MAX_WG = 8192 };
-    const VkDeviceSize bytes = (VkDeviceSize)MAX_WG * WG_SIZE * sizeof(float);
+    enum { WG_SIZE = 256, MAX_WG = 8192, TOPOLOGY_WORDS = 4 };
+    const uint32_t topology_word_offset = MAX_WG * WG_SIZE;
+    const VkDeviceSize bytes = (VkDeviceSize)(topology_word_offset + TOPOLOGY_WORDS) * sizeof(uint32_t);
     say("bench: buffer %llu B for up to %u workgroups", (unsigned long long)bytes, (unsigned)MAX_WG);
 
     VkBufferCreateInfo bci = {
@@ -166,8 +167,21 @@ static void run_bench(VkPhysicalDevice phys, uint32_t qf)
         say("bench: vkCreateBuffer FAILED"); vkDestroyDevice(dev, NULL); return;
     }
     VkMemoryRequirements mr; vkGetBufferMemoryRequirements(dev, buf, &mr);
-    uint32_t mt = find_mem(phys, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (mt == UINT32_MAX) mt = find_mem(phys, mr.memoryTypeBits, 0);
+    uint32_t mt = find_mem(phys, mr.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkMemoryPropertyFlags mem_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    if (mt == UINT32_MAX) {
+        mt = find_mem(phys, mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+        mem_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    }
+    if (mt == UINT32_MAX) {
+        say("topology: no host-visible storage-buffer memory; cannot read bitmap");
+        mt = find_mem(phys, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (mt == UINT32_MAX) mt = find_mem(phys, mr.memoryTypeBits, 0);
+    }
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(phys, &mp);
+    mem_flags = mp.memoryTypes[mt].propertyFlags;
     VkMemoryAllocateInfo mai = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = mr.size, .memoryTypeIndex = mt,
@@ -178,6 +192,21 @@ static void run_bench(VkPhysicalDevice phys, uint32_t qf)
         vkDestroyBuffer(dev, buf, NULL); vkDestroyDevice(dev, NULL); return;
     }
     vkBindBufferMemory(dev, buf, mem, 0);
+
+    void *mapped = NULL;
+    if (mem_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+        if (vkMapMemory(dev, mem, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+            say("topology: vkMapMemory failed; cannot read bitmap");
+            mapped = NULL;
+        } else {
+            memset(mapped, 0, (size_t)bytes);
+            if (!(mem_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                VkMappedMemoryRange range = { .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+                                              .memory = mem, .offset = 0, .size = VK_WHOLE_SIZE };
+                vkFlushMappedMemoryRanges(dev, 1, &range);
+            }
+        }
+    }
 
     VkDescriptorSetLayoutBinding dslb = {
         .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -282,7 +311,7 @@ static void run_bench(VkPhysicalDevice phys, uint32_t qf)
      * previous run. */
     const uint32_t iters = 200;
 
-    say("bench: %u iters x 4 FMA per invocation, 64 threads per workgroup", iters);
+    say("bench: %u iters x 4 FMA per invocation, %u threads per workgroup", iters, WG_SIZE);
     say("bench: stopping at the first dispatch that does not return cleanly");
     say("   %-10s %-12s %-12s %s", "workgroups", "invocations", "time ms", "GFLOP/s");
 
@@ -477,7 +506,39 @@ static void run_bench(VkPhysicalDevice phys, uint32_t qf)
         }
         say("");
         say("   read it as: the last workgroup count whose GFLOP/s is still");
-        say("   meaningfully above the previous one. 1 workgroup = 1 wavefront.");
+        say("   meaningfully above the previous one. 1 workgroup = 4 wavefronts.");
+    }
+
+    if (mapped) {
+        if (!(mem_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            VkMappedMemoryRange range = { .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+                                          .memory = mem, .offset = 0, .size = VK_WHOLE_SIZE };
+            vkInvalidateMappedMemoryRanges(dev, 1, &range);
+        }
+        const uint32_t *map = (const uint32_t *)mapped + topology_word_offset;
+        unsigned pairs = 0, shader_engines = 0;
+        say("");
+        say("--- SQ_WAVE_HW_ID topology bitmap (SE x SH x CU) ------------");
+        for (unsigned i = 0; i < TOPOLOGY_WORDS; i++)
+            say("topology: bitmap[%u]=0x%08x", i, map[i]);
+        for (unsigned se = 0; se < 4; se++) {
+            unsigned se_seen = 0;
+            for (unsigned sh = 0; sh < 2; sh++) {
+                uint32_t cu_mask = 0;
+                for (unsigned cu = 0; cu < 16; cu++) {
+                    unsigned bit = (se * 2 + sh) * 16 + cu;
+                    if (map[bit >> 5] & (1u << (bit & 31))) {
+                        cu_mask |= 1u << cu;
+                        pairs++;
+                    }
+                }
+                if (cu_mask) se_seen = 1;
+                say("topology: SE%u SH%u CU bitmap=0x%04x", se, sh, cu_mask);
+            }
+            shader_engines += se_seen;
+        }
+        say("topology: observed_shader_engines=%u observed_SE_SH_CU_pairs=%u",
+            shader_engines, pairs);
     }
 
     say("");
@@ -507,6 +568,16 @@ int main(void)
         say("probe: no /data/orbis-env.txt (fine - nothing to override)");
     else
         say("probe: applied %d setting(s) from /data/orbis-env.txt", applied);
+
+    /* The probe's RADV build maps gl_SubgroupID to SQ_WAVE_HW_ID only when
+     * this process opts in. Never set this in the game's environment. */
+    setenv("ORBIS_PROBE_HW_ID", "1", 1);
+    say("probe: ORBIS_PROBE_HW_ID=1 (probe process only)");
+    setenv("RADV_DEBUG", "cs,nir,asm,nocache", 1);
+    say("probe: RADV_DEBUG=cs,nir,asm,nocache (dump NIR and compute assembly)");
+    setenv("MESA_LOG", "file", 1);
+    setenv("MESA_LOG_FILE", "/data/probe-radv.log", 1);
+    say("probe: Mesa shader diagnostics -> /data/probe-radv.log");
 
     /* ⚠ NEO MODE IS THE WHOLE QUESTION ON A PRO.
      *

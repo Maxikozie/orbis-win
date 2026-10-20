@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: log raw Prospero single-step guard state
+
+The relocatable 0941 build reaches Oblivion's PE32 image, but the syscall
+single-step still loops and the 0941 consume marker is absent. Snapshot and
+report the raw trap, flags, TEB, stack, syscall frame, and each guard result
+before diagnostic output can mutate Wine's current frame. Retain consumption
+when all predicates match.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 2a46de4765..ac275321aa 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2882,22 +2882,44 @@ static void __attribute__((used)) segv_handler( int signal, siginfo_t *siginfo,
+ #else
+ #define PROSPERO_SINGLE_STEP_TRAP TRAP_x86_TRCTRAP
+ #endif
+-    /* Do this before diagnostic logging: logging can replace the current
+-     * syscall-frame pointer, making is_inside_syscall() miss this #DB. */
+-    if (TRAP_sig(sigcontext) == PROSPERO_SINGLE_STEP_TRAP && data->teb &&
+-        (EFL_sig(sigcontext) & 0x100) && is_inside_syscall( data, RSP_sig(sigcontext) ))
+     {
+-        static unsigned int trace_count;
+-        unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
+-        if (n <= 8 || !(n & (n - 1)))
+-            ERR_(seh)( "Consuming Prospero single-step 0941 n=%u sig=%d trap=%ld wine_trap=%d rip=%016lx rsp=%016lx frame=%p frame_id=%08x frame_rip=%016lx\n",
+-                      n, signal, (long)TRAP_sig(sigcontext), TRAP_x86_TRCTRAP,
+-                      (unsigned long)RIP_sig(sigcontext), (unsigned long)RSP_sig(sigcontext),
+-                      get_syscall_frame( data ), get_syscall_frame( data )->syscall_id,
+-                      (unsigned long)get_syscall_frame( data )->rip );
+-        EFL_sig(sigcontext) &= ~0x100;
+-        leave_handler( data, sigcontext );
+-        return;
++        static unsigned int probe_count;
++        unsigned long raw_trap = TRAP_sig(sigcontext);
++        unsigned long raw_flags = EFL_sig(sigcontext);
++        ULONG_PTR raw_rip = RIP_sig(sigcontext), raw_rsp = RSP_sig(sigcontext);
++        BOOL has_teb = !!data->teb;
++        BOOL is_step = raw_trap == PROSPERO_SINGLE_STEP_TRAP && (raw_flags & 0x100);
++        BOOL inside = has_teb && is_inside_syscall( data, raw_rsp );
++        struct syscall_frame *frame = has_teb ? get_syscall_frame( data ) : NULL;
++        void *kernel_stack = has_teb ? get_kernel_stack( data ) : NULL;
++
++        /* Snapshot every predicate before logging: the log path may itself
++         * replace Wine's active syscall frame. This distinguishes a raw #DB
++         * that misses the consume guard from a signal that never is #DB. */
++        if (raw_trap == PROSPERO_SINGLE_STEP_TRAP || (raw_flags & 0x100) ||
++            signal == SIGILL || signal == SIGTRAP)
++        {
++            unsigned int n = __atomic_add_fetch( &probe_count, 1, __ATOMIC_RELAXED );
++            if (n <= 8)
++                ERR_(seh)( "Prospero step probe 0942 n=%u sig=%d trap=%ld wine_trap=%d flags=%016lx rip=%016lx rsp=%016lx teb=%p stack=%p frame=%p frame_id=%08x frame_rip=%016lx is_step=%d inside=%d\n",
++                          n, signal, (long)raw_trap, TRAP_x86_TRCTRAP, raw_flags,
++                          (unsigned long)raw_rip, (unsigned long)raw_rsp, data->teb,
++                          kernel_stack, frame, frame ? frame->syscall_id : 0,
++                          frame ? (unsigned long)frame->rip : 0, is_step, inside );
++        }
++        if (is_step && has_teb && inside)
++        {
++            static unsigned int trace_count;
++            unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++            if (n <= 8 || !(n & (n - 1)))
++                ERR_(seh)( "Consuming Prospero single-step 0942 n=%u sig=%d trap=%ld wine_trap=%d rip=%016lx rsp=%016lx frame=%p frame_id=%08x frame_rip=%016lx\n",
++                          n, signal, (long)raw_trap, TRAP_x86_TRCTRAP,
++                          (unsigned long)raw_rip, (unsigned long)raw_rsp, frame,
++                          frame ? frame->syscall_id : 0, frame ? (unsigned long)frame->rip : 0 );
++            EFL_sig(sigcontext) &= ~0x100;
++            leave_handler( data, sigcontext );
++            return;
++        }
+     }
+ #undef PROSPERO_SINGLE_STEP_TRAP
+ #endif

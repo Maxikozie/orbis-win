@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 12 Oct 2026 20:00:00 -0700
+Subject: [PATCH] wowprospero: dump FalloutNV lookup table on fault
+
+The manager is initialized but the referenced slot 0x15 is empty. Dump the
+first 32 table entries to determine whether the missing result is isolated or
+the whole lookup table is unpopulated.
+---
+ wine/wowprospero/cpu.c | 20 +++++++++++++++++---
+ 1 file changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
+--- a/wine/wowprospero/cpu.c
++++ b/wine/wowprospero/cpu.c
+@@ -413,13 +413,25 @@
+                     {
+-                        UINT manager, flags = 0, slot = 0;
++                        UINT manager, flags = 0, slots[32] = {0};
+                         if (read_guest_bytes( 0x132a80c, &manager, sizeof(manager) ))
+                         {
++                            BOOL slots_ok = FALSE;
+                             if (manager)
+                             {
+                                 read_guest_bytes( manager + 8, &flags, sizeof(flags) );
+-                                read_guest_bytes( manager + 0x6c, &slot, sizeof(slot) );
++                                slots_ok = read_guest_bytes( manager + 0x18, slots, sizeof(slots) );
+                             }
+-                            ERR( "guest frame2 lookup manager %08x flags %08x slot15 %08x\n",
+-                                 manager, flags, slot );
++                            ERR( "guest frame2 lookup manager %08x flags %08x slots %s\n",
++                                 manager, flags, slots_ok ? "readable" : "unavailable" );
++                            if (slots_ok)
++                            {
++                                ERR( "guest lookup slots 00-07: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++                                     slots[0], slots[1], slots[2], slots[3], slots[4], slots[5], slots[6], slots[7] );
++                                ERR( "guest lookup slots 08-0f: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++                                     slots[8], slots[9], slots[10], slots[11], slots[12], slots[13], slots[14], slots[15] );
++                                ERR( "guest lookup slots 10-17: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++                                     slots[16], slots[17], slots[18], slots[19], slots[20], slots[21], slots[22], slots[23] );
++                                ERR( "guest lookup slots 18-1f: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++                                     slots[24], slots[25], slots[26], slots[27], slots[28], slots[29], slots[30], slots[31] );
++                            }
+                         }
+                         else ERR( "guest frame2 lookup singleton unavailable\n" );
+-- 
+2.45.0

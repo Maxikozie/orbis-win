@@ -1,0 +1,93 @@
+diff --git a/server/request.c b/server/request.c
+index d9df8fb52e..707978696d 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -485,6 +485,9 @@ static void call_req_handler( struct thread *thread )
+                       handles[4], handles[5], handles[6], handles[7], ctx_count,
+                       ctx_machine, ctx_flags, ctx_rip );
+             sceKernelDebugOutText( 0, line );
++            if (select->timeout == 0 && !select->size && ctx_count &&
++                ctx_machine == 0x8664 && (n <= 32 || !(n & (n - 1))))
++                ps5_trace_guest_context( thread );
+         }
+     }
+ #endif
+diff --git a/server/thread.c b/server/thread.c
+index 1898a0a1de..979e4f7ccd 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -1138,6 +1138,49 @@ static int ps5_peek( int probe[2], uintptr_t address, void *out, size_t size )
+     return read( probe[0], out, size ) == (ssize_t)size;
+ }
+ 
++/* The server's timeout watchdog cannot run while the native WoW64 suspend
++ * path is spinning in repeated zero-timeout requests. Sample the guest TEB
++ * directly from that request path instead, using the same fault-tolerant
++ * pipe read so a stale CPU pointer cannot crash the title. */
++void ps5_trace_guest_context( struct thread *thread )
++{
++    extern int sceKernelDebugOutText( int channel, const char *text );
++    static int probe[2] = { -1, -1 };
++    uintptr_t teb = (uintptr_t)thread->teb, cpu = 0;
++    unsigned short machine = 0;
++    unsigned int eip = 0, esp = 0;
++    int slot_ok = 0, machine_ok = 0, context_ok = 0, i, used;
++    char line[256];
++
++    if (probe[0] == -1 && pipe( probe )) probe[0] = probe[1] = -1;
++    if (probe[1] != -1 && teb <= UINTPTR_MAX - 0x1488)
++        slot_ok = ps5_peek( probe, teb + 0x1488, &cpu, sizeof(cpu) );
++    if (slot_ok && cpu && cpu <= UINTPTR_MAX - (4 + 0xc8))
++        machine_ok = ps5_peek( probe, cpu + 2, &machine, sizeof(machine) ) &&
++                     machine == 0x14c /* IMAGE_FILE_MACHINE_I386 */;
++    if (machine_ok)
++        context_ok = ps5_peek( probe, cpu + 4 + 0xb8, &eip, sizeof(eip) ) &&
++                     ps5_peek( probe, cpu + 4 + 0xc4, &esp, sizeof(esp) );
++
++    used = snprintf( line, sizeof(line),
++                     "wineserver guest tid=%04x teb=%llx slot=%d cpu=%llx machine=%04x eip=%08x esp=%08x stack=",
++                     thread->id, (unsigned long long)teb, slot_ok,
++                     (unsigned long long)cpu, machine, eip, esp );
++    if (used < 0 || used >= sizeof(line)) return;
++    for (i = 0; context_ok && esp && i < 16; i++)
++    {
++        unsigned int word;
++        if ((uintptr_t)esp > UINTPTR_MAX - 4 * i ||
++            !ps5_peek( probe, (uintptr_t)esp + 4 * i, &word, sizeof(word) )) break;
++        used += snprintf( line + used, sizeof(line) - used, "%s%08x", i ? "," : "", word );
++        if (used < 0 || used >= sizeof(line)) return;
++    }
++    if (used + 2 >= sizeof(line)) return;
++    line[used++] = '\n';
++    line[used] = 0;
++    sceKernelDebugOutText( 0, line );
++}
++
+ static void wait_watchdog( void *arg )
+ {
+     struct thread *thread;
+diff --git a/server/thread.h b/server/thread.h
+index 4904aacbfb..ac643602f2 100644
+--- a/server/thread.h
++++ b/server/thread.h
+@@ -149,6 +149,9 @@ extern void init_thread_context( struct thread *thread );
+ extern void get_thread_context( struct thread *thread, struct context_data *context, unsigned int flags );
+ extern void set_thread_context( struct thread *thread, const struct context_data *context, unsigned int flags );
+ extern int send_thread_signal( struct thread *thread, int sig );
++#ifdef __PROSPERO__
++extern void ps5_trace_guest_context( struct thread *thread );
++#endif
+ 
+ extern unsigned int global_error;  /* global error code for when no thread is current */
+ 
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] server: sample WoW64 state on zero-timeout select loop
+
+The in-process server's wait watchdog is armed but its timeout callback does
+not run while the native suspend path spins through repeated zero-timeout
+select requests. Sample the associated thread's WoW64 CPU context at those
+request checkpoints, using fault-tolerant reads so a stale TEB slot remains
+diagnostic rather than fatal.
+
+---

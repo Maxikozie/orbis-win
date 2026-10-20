@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Subject: [PATCH] wowprospero: capture the host block at guest faults
+
+The cached block recorded after a chained execution can be the dispatcher
+entry rather than the host block containing the fault. Capture the owner entry
+and host instruction bytes in the signal redirect path, before unwinding.
+
+diff --git a/src/pw_x86_engine.h b/src/pw_x86_engine.h
+--- a/src/pw_x86_engine.h
++++ b/src/pw_x86_engine.h
+@@ -81,6 +81,11 @@
+     int8_t fault_block_map[8];
+     uint8_t fault_block_code[1024];
+     uint32_t fault_block_code_bytes;
++    uint32_t fault_site_guest_pc;
++    uint32_t fault_site_host_offset;
++    uint8_t fault_site_code[16];
++    uint8_t fault_site_code_bytes;
++    uint32_t fault_site_valid;
+     uint32_t quantum;
+     unsigned chaining_enabled;
+     unsigned residency_enabled;
+@@ -222,7 +227,7 @@
+  * must block the sampling signal; sampling allocates nothing and calls no
+  * platform functions. Overflow is explicit and never replaces older rows. */
+ void pw_x86_engine_sample(const PwX86Engine *, uintptr_t rip, PwX86HotspotProfile *);
+-uintptr_t pw_x86_engine_fault_redirect(const PwX86Engine *, uintptr_t rip);
++uintptr_t pw_x86_engine_fault_redirect(PwX86Engine *, uintptr_t rip);
+ /* Leave the statistics counters out of blocks translated from now on (they
+  * are on by default): a step then reports no retired instructions, and the
+  * transition and register totals stay zero. The chain budget, the link
+diff --git a/src/pw_x86_engine.c b/src/pw_x86_engine.c
+--- a/src/pw_x86_engine.c
++++ b/src/pw_x86_engine.c
+@@ -478,7 +478,7 @@
+     profile->overflow++;
+ }
+ 
+-uintptr_t pw_x86_engine_fault_redirect(const PwX86Engine *engine, uintptr_t rip)
++uintptr_t pw_x86_engine_fault_redirect(PwX86Engine *engine, uintptr_t rip)
+ {
+     const PwX86CacheEntry *e = pw_x86_engine_host_block(engine, rip);
+     uintptr_t start;
+@@ -487,6 +487,19 @@
+     if(!e || !e->fault_table_offset) return 0;
+     start = (uintptr_t)engine->code.exec_base + e->code_offset;
+     path = pw_x86_fault_table_path((const uint8_t *)start, e->fault_table_offset, rip - start);
++    if(path) {
++        size_t offset = rip - start;
++        size_t bytes = e->code_bytes - offset;
++        for(size_t i = 0; i < sizeof(engine->fault_site_code); i++)
++            engine->fault_site_code[i] = 0;
++        if(bytes > sizeof(engine->fault_site_code)) bytes = sizeof(engine->fault_site_code);
++        engine->fault_site_guest_pc = e->guest_pc;
++        engine->fault_site_host_offset = (uint32_t)offset;
++        engine->fault_site_code_bytes = (uint8_t)bytes;
++        for(size_t i = 0; i < bytes; i++)
++            engine->fault_site_code[i] = ((const uint8_t *)start)[offset + i];
++        __atomic_store_n(&engine->fault_site_valid, 1, __ATOMIC_RELEASE);
++    }
+     return path ? start + path : 0;
+ }
+ 
+@@ -875,6 +888,7 @@
+     state->call_stack_top = engine->call_stack_top;
+     state->verify_hops = PW_X86_REENCODE_VERIFY_HOPS;
+     state->stale_slot = 0;
++    __atomic_store_n(&engine->fault_site_valid, 0, __ATOMIC_RELAXED);
+     void *code_entry=(uint8_t *)engine->code.exec_base+entry->code_offset+entry->canonical_entry_offset;
+     int invoked;
+     uint64_t execution_begin=0;
+diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
+--- a/wine/wowprospero/unix.c
++++ b/wine/wowprospero/unix.c
+@@ -429,6 +429,17 @@
+     PW_WOW_NOTE( "wowprospero fault[%d]: translated+8 %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                  report, translated[8], translated[9], translated[10], translated[11],
+                  translated[12], translated[13], translated[14], translated[15] );
++    if (__atomic_load_n( &thread->engine.fault_site_valid, __ATOMIC_ACQUIRE ))
++    {
++        const uint8_t *site = thread->engine.fault_site_code;
++        PW_WOW_NOTE( "wowprospero fault[%d]: site guest=%08x hostoff=%08x bytes=%u\n",
++                     report, thread->engine.fault_site_guest_pc,
++                     thread->engine.fault_site_host_offset, thread->engine.fault_site_code_bytes );
++        PW_WOW_NOTE( "wowprospero fault[%d]: site-code %02x %02x %02x %02x %02x %02x %02x %02x\n",
++                     report, site[0], site[1], site[2], site[3], site[4], site[5], site[6], site[7] );
++        PW_WOW_NOTE( "wowprospero fault[%d]: site-code+8 %02x %02x %02x %02x %02x %02x %02x %02x\n",
++                     report, site[8], site[9], site[10], site[11], site[12], site[13], site[14], site[15] );
++    }
+ }
+ 
+ /* Zeroed memory above the guest's 4 GiB, from Wine's own virtual memory

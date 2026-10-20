@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Subject: [PATCH] cwd: keep the PS4 descriptor duplication fallback in the Orbis split
+
+The previous PS4 tree wrapped dup() in both ntdll and wineserver. Its fallback
+tries fcntl(F_DUPFD), then sceKernelRdup(), because the PS4 POSIX dup() path
+returns EPERM. The Orbis split copied the cwd/stat/getdents work but dropped
+this wrapper. On the first Pinball launch from that split, wineserver logged
+dup_fd_object failed with errno 1 on unnamed descriptors immediately before
+the process died. Restore the wrapper; build_wine_orbis_prx.sh already derives
+the --wrap list from this file and links it into both modules.
+---
+diff --git a/wine/ps5/pw_wine_cwd_libc.c b/wine/ps5/pw_wine_cwd_libc.c
+index 0000000..0000000 100644
+--- a/wine/ps5/pw_wine_cwd_libc.c
++++ b/wine/ps5/pw_wine_cwd_libc.c
+@@ -40,3 +40,27 @@
+ int __real_open(const char *path, int flags, ...);
+ int __real_close(int fd);
++#ifdef __ORBIS__
++int __real_dup(int fd);
++extern int sceKernelRdup(int fd);
++
++/* The PS4 kernel refuses POSIX dup() with EPERM. Try the standard fcntl
++ * duplicate first, then use libkernel's descriptor duplication primitive.
++ * This wrapper is linked into both ntdll and wineserver, where Wine duplicates
++ * descriptors while creating mappings and passing handles. */
++int __wrap_dup(int fd)
++{
++    int result;
++
++    if ((result = __real_dup(fd)) != -1) return result;
++    if ((result = fcntl(fd, F_DUPFD, 0)) != -1) return result;
++
++    result = sceKernelRdup(fd);
++    if ((unsigned)result >= 0x80000000u)
++    {
++        errno = ((unsigned)result >> 16) == 0x8002 ? (result & 0xffff) : EBADF;
++        return -1;
++    }
++    return result;
++}
++#endif
+ int __real_stat(const char *path, struct stat *st);

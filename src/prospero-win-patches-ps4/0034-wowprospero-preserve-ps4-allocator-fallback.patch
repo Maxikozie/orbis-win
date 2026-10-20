@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Subject: [PATCH] wowprospero: fall back to Wine heap for PS4 thread state
+
+The PS4 libc may reject the large translator thread-state allocation. Use
+ntdll's exported Wine heap as a fallback, return the block to the same allocator,
+and report which allocator supplied the state during startup.
+---
+diff --git a/wine/wowprospero/unix.c b/wine/wowprospero/unix.c
+index 01d21a5..ac65239 100644
+--- a/wine/wowprospero/unix.c
++++ b/wine/wowprospero/unix.c
+@@ -57,6 +57,11 @@ enum { CALL_STACK = 0x40000 };
+ 
+ struct pw_thread
+ {
++#ifdef __ORBIS__
++    /* Track the allocator because the Orbis libc may refuse this allocation
++     * size and the ntdll heap is the proven fallback. */
++    int state_from_wine_heap;
++#endif
+     PwVmBackend vm;
+     PwX86Engine engine;
+     PwX86State state;
+@@ -446,6 +451,21 @@ static void execution_report( struct pw_thread *thread )
+              (unsigned long long)thread->engine.execution_clock_errors );
+ }
+ 
++static void free_thread_state( struct pw_thread *thread )
++{
++    if (!thread) return;
++#ifdef __ORBIS__
++    if (thread->state_from_wine_heap)
++    {
++        extern void pw_wine_heap_free( void *ptr );
++
++        pw_wine_heap_free( thread );
++        return;
++    }
++#endif
++    free( thread );
++}
++
+ static struct pw_thread *get_thread(void)
+ {
+     struct pw_thread *thread = self;
+@@ -453,14 +473,42 @@ static struct pw_thread *get_thread(void)
+     int first, attempt;
+ 
+     if (thread) return thread;
+-    if (!(thread = calloc( 1, sizeof(*thread) ))) return NULL;
++    if (!(thread = calloc( 1, sizeof(*thread) )))
++    {
++#ifdef __ORBIS__
++        extern void *pw_wine_heap_malloc( size_t bytes );
++        extern void pw_wow_log( const char *format, ... );
++
++        if ((thread = pw_wine_heap_malloc( sizeof(*thread) )))
++        {
++            memset( thread, 0, sizeof(*thread) );
++            thread->state_from_wine_heap = 1;
++            pw_wow_log( "wowprospero: thread state allocated by Wine heap bytes=%zu\\n", sizeof(*thread) );
++        }
++#endif
++        if (!thread)
++        {
++#ifdef __ORBIS__
++            extern void pw_wow_log( const char *format, ... );
++            pw_wow_log( "wowprospero: no memory for %zu bytes of thread state\n", sizeof(*thread) );
++#endif
++            return NULL;
++        }
++    }
++#ifdef __ORBIS__
++    else
++    {
++        extern void pw_wow_log( const char *format, ... );
++        pw_wow_log( "wowprospero: thread state allocated by libc bytes=%zu\\n", sizeof(*thread) );
++    }
++#endif
+     first = !__atomic_load_n( &first_thread_ready, __ATOMIC_ACQUIRE );
+     if (pw_wow_host_backend( &thread->vm, &host_memory ) != PW_OK ||
+         (attempt = pw_wow_thread_fit( first, setup_thread, thread, &budget )) < 0)
+     {
+         fprintf( stderr, "wowprospero: no memory for a %s thread's translator\n",
+                  first ? "first" : "further" );
+-        free( thread );
++        free_thread_state( thread );
+         return NULL;
+     }
+     if (attempt)
+@@ -1795,7 +1843,7 @@ static NTSTATUS thread_term( void *args )
+     pw_x86_engine_destroy( &thread->engine );
+     release( thread->entries, 0 );
+     if (thread->call_stack) release( thread->call_stack, 0 );
+-    free( thread );
++    free_thread_state( thread );
+     return STATUS_SUCCESS;
+ }
+ 

@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: query the PS4 guest fault page protection
+
+Native WoW64 now reaches Oblivion's PE32 code, but the title faults at
+0x004a8330, inside its executable .text section. Record Wine's view of the
+faulting page before exception dispatch continues so the next run can tell
+whether the page is mapped and executable.
+
+---
+diff --git a/dlls/ntdll/exception.c b/dlls/ntdll/exception.c
+index 1802244dac..2552208089 100644
+--- a/dlls/ntdll/exception.c
++++ b/dlls/ntdll/exception.c
+@@ -293,6 +293,30 @@ NTSTATUS WINAPI dispatch_exception( EXCEPTION_RECORD *rec, CONTEXT *context )
+         TRACE( " info[%ld]=%p\n", i, (void *)rec->ExceptionInformation[i] );
+     TRACE_CONTEXT( context );
+ 
++#ifdef __i386__
++    /* Report the Wine view protecting the PE32 page that faulted. This is
++     * useful on PS4 native WoW64, where a fetch from a valid image address
++     * may fail if the image page lost execute permission. */
++    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2 &&
++        rec->ExceptionInformation[1] >= 0x00400000 && rec->ExceptionInformation[1] < 0x01000000)
++    {
++        MEMORY_BASIC_INFORMATION info;
++        NTSTATUS query_status;
++
++        query_status = NtQueryVirtualMemory( NtCurrentProcess(),
++                                             (void *)(ULONG_PTR)rec->ExceptionInformation[1],
++                                             MemoryBasicInformation, &info, sizeof(info), NULL );
++        if (query_status == STATUS_SUCCESS)
++            ERR( "ps4 guest fault map addr=%08lx eip=%08lx query=%08lx base=%p alloc=%p size=%Ix state=%lx protect=%lx alloc_protect=%lx type=%lx\n",
++                 (ULONG)rec->ExceptionInformation[1], context->Eip, query_status,
++                 info.BaseAddress, info.AllocationBase, info.RegionSize, info.State,
++                 info.Protect, info.AllocationProtect, info.Type );
++        else
++            ERR( "ps4 guest fault map addr=%08lx eip=%08lx query=%08lx\n",
++                 (ULONG)rec->ExceptionInformation[1], context->Eip, query_status );
++    }
++#endif
++
+     if (call_vectored_handlers( rec, context ) == EXCEPTION_CONTINUE_EXECUTION)
+         NtContinue( context, FALSE );
+ 
+-- 
+2.43.0

@@ -1,0 +1,33 @@
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -2086,6 +2086,30 @@
+             {
+                const uint32_t *const q = (const uint32_t *)(uintptr_t)va;
+ 
++               /* SQ_IMG_RSRC_WORD0/1 encode the image base in 256-byte units,
++                * unlike the V# buffer-descriptor decoder below. The generic
++                * V# candidates are not meaningful for image descriptors.
++                * Check the actual GFX7 image address for the set-0 pixel
++                * shader pointer that has been recurring in the GTA hang. */
++               if (reg == 0x00e) {
++                  static unsigned said_image_base;
++                  if (orbis_budget(&said_image_base, 16)) {
++                     const uint64_t image_base = ((uint64_t)q[0] << 8) | ((uint64_t)(q[1] & 0xffu) << 40);
++                     uint64_t image_lo = 0, image_hi = 0;
++                     uint32_t image_bo = 0;
++                     if (orbis_va_mapping_of(image_base, &image_lo, &image_hi, &image_bo))
++                        mesa_logi("orbis-drm: SQ_IMG_BASE SH 0x%03x descriptor 0x%" PRIx64
++                                  " words=%08x/%08x -> 0x%" PRIx64 " live BO %u offset 0x%" PRIx64
++                                  " (0x%" PRIx64 " bytes remain)",
++                                  reg, va, q[0], q[1], image_base, image_bo, image_base - image_lo,
++                                  image_hi - image_base);
++                     else
++                        mesa_logi("orbis-drm: SQ_IMG_BASE SH 0x%03x descriptor 0x%" PRIx64
++                                  " words=%08x/%08x -> 0x%" PRIx64 " NOT IN A LIVE BO",
++                                  reg, va, q[0], q[1], image_base);
++                  }
++               }
++
+                for (unsigned d = 0; d < 4; ++d) {
+                   const uint64_t base = (uint64_t)q[d * 4] | ((uint64_t)(q[d * 4 + 1] & 0xFFFFu) << 32);
+                   uint64_t blo = 0, bhi = 0;

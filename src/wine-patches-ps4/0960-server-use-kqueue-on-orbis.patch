@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Prospero Win contributors <prospero-win@localhost>
+Subject: [PATCH] server: prefer kqueue over epoll on Orbis
+
+The PS4 target configuration exposes epoll declarations, but timed Wine waits
+expire roughly 600 times sooner than requested. Keep the existing kqueue path
+available and use it on Orbis, where kqueue is the native event mechanism.
+This is an A/B fix for the measured DirectSound wait loop; retain only if the
+console confirms that timed waits now honor their requested duration.
+---
+ server/fd.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/server/fd.c b/server/fd.c
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -73,5 +73,8 @@
+ #undef LIST_ENTRY
+ #endif
++#if defined(__ORBIS__) && !defined(NOTE_LOWAT)
++#define NOTE_LOWAT 0
++#endif
+ #include <sys/stat.h>
+ #include <sys/time.h>
+ #ifdef MAJOR_IN_MKDEV
+@@ -109,7 +109,7 @@
+ #include "ddk/ntifs.h"
+ #include "ddk/wdm.h"
+ 
+-#if defined(HAVE_SYS_EPOLL_H) && defined(HAVE_EPOLL_CREATE)
++#if defined(HAVE_SYS_EPOLL_H) && defined(HAVE_EPOLL_CREATE) && !defined(__ORBIS__)
+ # include <sys/epoll.h>
+ # define USE_EPOLL
+ #endif /* HAVE_SYS_EPOLL_H && HAVE_EPOLL_CREATE */

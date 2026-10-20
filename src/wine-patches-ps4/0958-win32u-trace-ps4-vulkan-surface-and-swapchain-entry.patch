@@ -1,0 +1,201 @@
+From 38de1c70655f5873c12a83d0adcbd4f0a1cf5411 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Mon, 19 Oct 2026 07:02:09 -0700
+Subject: [PATCH] win32u: trace PS4 Vulkan surface and swapchain entry
+
+---
+ dlls/win32u/vulkan.c | 107 +++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 94 insertions(+), 13 deletions(-)
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 2b15ec2..740fbc3 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -1521,11 +1521,21 @@ static VkResult win32u_vkGetPhysicalDeviceImageFormatProperties2KHR( VkPhysicalD
+     return get_physical_device_image_format_properties( physical_device, format_info, format_properties, instance->p_vkGetPhysicalDeviceImageFormatProperties2KHR );
+ }
+ 
++#ifdef __PROSPERO__
++/* vk_shown counts only the fallback spinner/GDI presenter, not title presents.
++ * Keep this trace bounded while measuring the actual Vulkan swapchain path. */
++static unsigned int ps4_surface_create_count;
++static unsigned int ps4_swapchain_attempt_count;
++static unsigned int ps4_swapchain_create_count;
++static unsigned int ps4_queue_present_count;
++static unsigned int ps4_queue_present_entry_count;
++#endif
++
+ static VkResult win32u_vkCreateWin32SurfaceKHR( VkInstance client_instance, const VkWin32SurfaceCreateInfoKHR *create_info,
+                                                 const VkAllocationCallbacks *allocator, VkSurfaceKHR *ret )
+ {
+     struct vulkan_instance *instance = vulkan_instance_from_handle( client_instance );
+-    VkSurfaceKHR host_surface;
++    VkSurfaceKHR host_surface = VK_NULL_HANDLE;
+     struct surface *surface;
+     HWND dummy = NULL;
+     VkResult res;
+@@ -1533,7 +1543,22 @@ static VkResult win32u_vkCreateWin32SurfaceKHR( VkInstance client_instance, cons
+     TRACE( "client_instance %p, create_info %p, allocator %p, ret %p\n", client_instance, create_info, allocator, ret );
+     if (allocator) FIXME( "Support for allocation callbacks not implemented yet\n" );
+ 
+-    if (!(surface = calloc( 1, sizeof(*surface) ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
++#ifdef __PROSPERO__
++    {
++        unsigned int count = __atomic_add_fetch( &ps4_surface_create_count, 1, __ATOMIC_RELAXED );
++        if (count <= 8)
++            WARN( "PS4 Vulkan surface create enter #%u hwnd=%p instance=%p\n",
++                  count, create_info->hwnd, instance );
++    }
++#endif
++
++    if (!(surface = calloc( 1, sizeof(*surface) )))
++    {
++#ifdef __PROSPERO__
++        WARN( "PS4 Vulkan surface create result=out-of-host-memory\n" );
++#endif
++        return VK_ERROR_OUT_OF_HOST_MEMORY;
++    }
+ 
+     /* Windows allows surfaces to be created with no HWND, they return VK_ERROR_SURFACE_LOST_KHR later */
+     if (!(surface->hwnd = create_info->hwnd))
+@@ -1552,6 +1577,13 @@ static VkResult win32u_vkCreateWin32SurfaceKHR( VkInstance client_instance, cons
+         res = driver_funcs->p_vulkan_surface_create( surface->client, instance, &host_surface );
+         use_window_client_surface( surface->client, !res );
+     }
++
++#ifdef __PROSPERO__
++    if (ps4_surface_create_count <= 8)
++        WARN( "PS4 Vulkan surface host result=%d hwnd=%p client=%p host=%p\n",
++              res, surface->hwnd, surface->client, host_surface );
++#endif
++
+     if (res)
+     {
+         if (surface->client) client_surface_release( surface->client );
+@@ -1568,6 +1600,10 @@ static VkResult win32u_vkCreateWin32SurfaceKHR( VkInstance client_instance, cons
+     if (dummy) NtUserDestroyWindow( dummy );
+ 
+     *ret = surface->obj.client.surface;
++#ifdef __PROSPERO__
++    if (ps4_surface_create_count <= 8)
++        WARN( "PS4 Vulkan surface create success client=%p\n", *ret );
++#endif
+     return VK_SUCCESS;
+ }
+ 
+@@ -1889,13 +1925,6 @@ static BOOL extents_equals( const VkExtent2D *extents, const RECT *rect )
+     return extents->width == rect->right - rect->left && extents->height == rect->bottom - rect->top;
+ }
+ 
+-#ifdef __PROSPERO__
+-/* vk_shown counts only the fallback spinner/GDI presenter, not title presents.
+- * Keep this trace bounded while measuring the actual Vulkan swapchain path. */
+-static unsigned int ps4_swapchain_create_count;
+-static unsigned int ps4_queue_present_count;
+-#endif
+-
+ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwapchainCreateInfoKHR *create_info,
+                                              const VkAllocationCallbacks *allocator, VkSwapchainKHR *ret )
+ {
+@@ -1906,15 +1935,28 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
+     struct vulkan_physical_device *physical_device = device->physical_device;
+     struct vulkan_instance *instance = physical_device->instance;
+     VkSwapchainCreateInfoKHR create_info_host = *create_info;
+-    VkSurfaceCapabilitiesKHR capabilities;
+-    VkSwapchainKHR host_swapchain;
++    VkSurfaceCapabilitiesKHR capabilities = {0};
++    VkSwapchainKHR host_swapchain = VK_NULL_HANDLE;
+     struct ratio raw_dpi;
+     RECT client_rect;
+     VkResult res;
+ 
++#ifdef __PROSPERO__
++    {
++        unsigned int count = __atomic_add_fetch( &ps4_swapchain_attempt_count, 1, __ATOMIC_RELAXED );
++        if (count <= 8)
++            WARN( "PS4 Vulkan swapchain enter #%u hwnd=%p client=%ux%u format=%u mode=%u images=%u\n",
++                  count, surface->hwnd, create_info->imageExtent.width, create_info->imageExtent.height,
++                  create_info->imageFormat, create_info->presentMode, create_info->minImageCount );
++    }
++#endif
++
+     if (!NtUserIsWindow( surface->hwnd ))
+     {
+         ERR( "surface %p, hwnd %p is invalid!\n", surface, surface->hwnd );
++#ifdef __PROSPERO__
++        WARN( "PS4 Vulkan swapchain surface-invalid hwnd=%p\n", surface->hwnd );
++#endif
+         return VK_ERROR_INITIALIZATION_FAILED;
+     }
+ 
+@@ -1923,6 +1965,14 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
+ 
+     /* Windows allows client rect to be empty, but host Vulkan often doesn't, adjust extents back to the host capabilities */
+     res = instance->p_vkGetPhysicalDeviceSurfaceCapabilitiesKHR( physical_device->host.physical_device, surface->obj.host.surface, &capabilities );
++#ifdef __PROSPERO__
++    if (ps4_swapchain_attempt_count <= 8)
++        WARN( "PS4 Vulkan swapchain capabilities result=%d host=%ux%u extent=%ux%u..%ux%u images=%u..%u\n",
++              res, capabilities.currentExtent.width, capabilities.currentExtent.height,
++              capabilities.minImageExtent.width, capabilities.minImageExtent.height,
++              capabilities.maxImageExtent.width, capabilities.maxImageExtent.height,
++              capabilities.minImageCount, capabilities.maxImageCount );
++#endif
+     if (res) return res;
+ 
+     create_info_host.imageExtent.width = max( create_info_host.imageExtent.width, capabilities.minImageExtent.width );
+@@ -1951,9 +2001,26 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
+         create_info_host.pNext = &scaling;
+     }
+ 
+-    if (!(swapchain = calloc( 1, sizeof(*swapchain) ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
++    if (!(swapchain = calloc( 1, sizeof(*swapchain) )))
++    {
++#ifdef __PROSPERO__
++        WARN( "PS4 Vulkan swapchain allocation failed\n" );
++#endif
++        return VK_ERROR_OUT_OF_HOST_MEMORY;
++    }
+ 
+-    if ((res = device->p_vkCreateSwapchainKHR( device->host.device, &create_info_host, NULL, &host_swapchain )))
++#ifdef __PROSPERO__
++    if (ps4_swapchain_attempt_count <= 8)
++        WARN( "PS4 Vulkan swapchain host-create begin extent=%ux%u images=%u format=%u mode=%u\n",
++              create_info_host.imageExtent.width, create_info_host.imageExtent.height,
++              create_info_host.minImageCount, create_info_host.imageFormat, create_info_host.presentMode );
++#endif
++    res = device->p_vkCreateSwapchainKHR( device->host.device, &create_info_host, NULL, &host_swapchain );
++#ifdef __PROSPERO__
++    if (ps4_swapchain_attempt_count <= 8)
++        WARN( "PS4 Vulkan swapchain host-create result=%d host=%p\n", res, host_swapchain );
++#endif
++    if (res)
+     {
+         /* ⚠ Say what was asked for. A host WSI that refuses a swapchain here
+          * reports nothing through any channel this console delivers -- RADV's
+@@ -2082,9 +2149,23 @@ static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentI
+ 
+     TRACE( "queue %p, present_info %p\n", queue, present_info );
+ 
++#ifdef __PROSPERO__
++    {
++        unsigned int count = __atomic_add_fetch( &ps4_queue_present_entry_count, 1, __ATOMIC_RELAXED );
++        if (count <= 8)
++            WARN( "PS4 Vulkan present enter #%u queue=%p swapchains=%u waits=%u\n",
++                  count, queue, present_info->swapchainCount, present_info->waitSemaphoreCount );
++    }
++#endif
++
+     if (present_info->swapchainCount > ARRAY_SIZE(swapchains_buffer) &&
+         !(swapchains = malloc( present_info->swapchainCount * sizeof(*swapchains) )))
++    {
++#ifdef __PROSPERO__
++        WARN( "PS4 Vulkan present allocation failed swapchains=%u\n", present_info->swapchainCount );
++#endif
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
++    }
+ 
+     for (uint32_t i = 0; i < present_info->waitSemaphoreCount; i++)
+     {
+-- 
+2.47.3
+

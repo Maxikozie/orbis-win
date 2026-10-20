@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Subject: [PATCH] wowprospero: log translated bytes at guest fault
+
+The guest bytes at FalloutNV's faulting address differ from the exact
+executable on disk. Record the cached translated block bytes alongside the
+live source bytes so the next run can tell whether the DBT translated the
+modified instructions or kept a stale translation.
+
+--- a/wine/wowprospero/unix.c
++++ b/wine/wowprospero/unix.c
+@@ -392,9 +392,13 @@
+     PwX86State *state = &thread->state;
+     const uint8_t *source = NULL;
+     uint8_t instruction[8] = {0};
++    uint8_t translated[32] = {0};
+     size_t bytes = 0, available = 0;
++    size_t translated_bytes = thread->engine.fault_block_code_bytes;
+     int report = __atomic_add_fetch( &reports, 1, __ATOMIC_RELAXED );
+ 
++    if (translated_bytes > sizeof(translated)) translated_bytes = sizeof(translated);
++    memcpy( translated, thread->engine.fault_block_code, translated_bytes );
+     if (report > 8) return;
+     if (source_view( NULL, state->eip, &source, &available ) == PW_OK)
+     {
+@@ -419,6 +423,12 @@
+     PW_WOW_NOTE( "wowprospero fault[%d]: bytes=%zu %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                  report, bytes, instruction[0], instruction[1], instruction[2], instruction[3],
+                  instruction[4], instruction[5], instruction[6], instruction[7] );
++    PW_WOW_NOTE( "wowprospero fault[%d]: translated=%zu %02x %02x %02x %02x %02x %02x %02x %02x\n",
++                 report, translated_bytes, translated[0], translated[1], translated[2], translated[3],
++                 translated[4], translated[5], translated[6], translated[7] );
++    PW_WOW_NOTE( "wowprospero fault[%d]: translated+8 %02x %02x %02x %02x %02x %02x %02x %02x\n",
++                 report, translated[8], translated[9], translated[10], translated[11],
++                 translated[12], translated[13], translated[14], translated[15] );
+ }
+ 
+ /* Zeroed memory above the guest's 4 GiB, from Wine's own virtual memory
+-- 
+2.43.0

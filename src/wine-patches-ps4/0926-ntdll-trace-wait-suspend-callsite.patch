@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace PS4 wait_suspend call sites
+
+The native startup loop repeatedly submits zero-timeout REQ_select, but the
+SIGUSR1 handler trace remains silent. Trace the actual wait_suspend entry and
+return, including its caller, AMD64 context, and WOW64 guest registers, to
+identify which path is polling and whether the server round trip changes state.
+
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1586,10 +1586,52 @@ void wait_suspend( CONTEXT *context )
+ {
+     int saved_errno = errno;
+     struct context_data server_contexts[2];
++#ifdef __PROSPERO__
++    static unsigned int trace_count;
++    unsigned int trace_n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++    int trace = trace_n <= 8 || !(trace_n & (trace_n - 1));
++    unsigned int status;
++    struct thread_data *data = get_thread_data();
++    I386_CONTEXT *wow_context = get_cpu_area( data, IMAGE_FILE_MACHINE_I386 );
++    void *caller = __builtin_return_address( 0 );
++
++    if (trace)
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        char line[320];
++        snprintf( line, sizeof(line),
++                  "ntdll wait-suspend enter n=%u tid=%04x teb=%p caller=%p flags=%08x rip=%llx rsp=%llx wow=%p eip=%08x esp=%08x eax=%08x ebx=%08x\n",
++                  trace_n, data->tid, data->teb, caller, context->ContextFlags,
++                  (unsigned long long)context->Rip, (unsigned long long)context->Rsp,
++                  wow_context, wow_context ? wow_context->Eip : 0,
++                  wow_context ? wow_context->Esp : 0, wow_context ? wow_context->Eax : 0,
++                  wow_context ? wow_context->Ebx : 0 );
++        sceKernelDebugOutText( 0, line );
++    }
++#endif
+ 
+     contexts_to_server( server_contexts, context );
+     /* wait with 0 timeout, will only return once the thread is no longer suspended */
+-    server_select( NULL, 0, SELECT_INTERRUPTIBLE, 0, server_contexts, NULL );
++#ifdef __PROSPERO__
++    status = server_select( NULL, 0, SELECT_INTERRUPTIBLE, 0, server_contexts, NULL );
++#else
++    server_select( NULL, 0, SELECT_INTERRUPTIBLE, 0, server_contexts, NULL );
++#endif
+     contexts_from_server( context, server_contexts );
++#ifdef __PROSPERO__
++    if (trace)
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        char line[320];
++        snprintf( line, sizeof(line),
++                  "ntdll wait-suspend return n=%u tid=%04x status=%08x flags=%08x rip=%llx rsp=%llx wow=%p eip=%08x esp=%08x eax=%08x ebx=%08x\n",
++                  trace_n, data->tid, status, context->ContextFlags,
++                  (unsigned long long)context->Rip, (unsigned long long)context->Rsp,
++                  wow_context, wow_context ? wow_context->Eip : 0,
++                  wow_context ? wow_context->Esp : 0, wow_context ? wow_context->Eax : 0,
++                  wow_context ? wow_context->Ebx : 0 );
++        sceKernelDebugOutText( 0, line );
++    }
++#endif
+     errno = saved_errno;
+ }

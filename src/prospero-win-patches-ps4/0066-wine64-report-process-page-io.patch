@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Subject: [PATCH] native: report process page-fault and block-input counters
+
+Add kernel resource counters to the once-per-second runtime heartbeat so a
+slow startup can be distinguished between demand-page I/O and CPU-side work.
+
+---
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -735,13 +735,18 @@
+     PS5LOG_LOG("PW_WINE64 hid %s", line);
+ }
+ 
+-/* The process's CPU time, user and system, in milliseconds: a stall that
+- * waits shows no growth, one that spins grows by a core a second. */
+-static unsigned long long cpu_ms(void)
++/* Process CPU time and resource counters. A stall that waits shows little
++ * CPU growth; major faults and block input show demand-paged/storage work. */
++static unsigned long long process_usage_ms(unsigned long *minor_faults,
++                                           unsigned long *major_faults,
++                                           long *input_blocks)
+ {
+     struct rusage usage;
+ 
+     if (getrusage(RUSAGE_SELF, &usage)) return 0;
++    if (minor_faults) *minor_faults = usage.ru_minflt;
++    if (major_faults) *major_faults = usage.ru_majflt;
++    if (input_blocks) *input_blocks = usage.ru_inblock;
+     return (unsigned long long)(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000u +
+            (unsigned long long)(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1000u;
+ }
+@@ -1472,16 +1477,22 @@
+         }
+         if (tick % 60 == 0) {
+             uint64_t v[16] = { 0 };
++            unsigned long minor_faults = 0, major_faults = 0;
++            long input_blocks = 0;
++            unsigned long long process_ms = process_usage_ms(&minor_faults, &major_faults,
++                                                              &input_blocks);
+ 
+             PS5LOG_LOG("PW_WINE64 alive tick=%llu sink_calls=%lu frames_put=%llu shown=%llu "
+                        "rejected=%llu last=%ux%u inputs=%llu refused=%llu vk_shown=%llu vk_busy=%llu "
+-                       "cpu_ms=%llu audio=%lu audible=%lu pad_rc=%d pad_buttons=%#x "
++                       "cpu_ms=%llu minflt=%lu majflt=%lu inblock=%ld "
++                       "audio=%lu audible=%lu pad_rc=%d pad_buttons=%#x "
+                        "pad_stick=%u,%u,%u,%u",
+                        (unsigned long long)tick, sink_calls, (unsigned long long)frames.sequence,
+                        (unsigned long long)shown, (unsigned long long)frames.rejected,
+                        frames.width, frames.height, (unsigned long long)posted,
+                        (unsigned long long)refused, (unsigned long long)vulkan_frames.shown,
+-                       (unsigned long long)vulkan_frames.busy, cpu_ms(), audio_grains, audio_audible,
++                       (unsigned long long)vulkan_frames.busy, process_ms,
++                       minor_faults, major_faults, input_blocks, audio_grains, audio_audible,
+                        pad_status == PW_OK ? pad.last_read_rc : -1,
+                        (unsigned)(pad_status == PW_OK ? pad.core.previous_buttons : 0),
+                        (unsigned)(pad_status == PW_OK ? pad.left_stick.x : 0),

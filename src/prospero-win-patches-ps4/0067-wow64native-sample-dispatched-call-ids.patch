@@ -1,0 +1,122 @@
+From: Codex <codex@local>
+Subject: [PATCH] wow64native: sample dispatched IDs during slow native startup
+
+Sample every 1024th Windows syscall and Wine Unix-call ID in a per-thread
+rolling buffer. Report the last 16 IDs with existing transition snapshots,
+without asynchronous signals or per-call logging. Unix samples pack the
+module handle and call ordinal into one word.
+
+---
+--- a/wine/wow64native/cpu.c
++++ b/wine/wow64native/cpu.c
+@@ -128,17 +128,31 @@
+ C_ASSERT(offsetof(struct pw_native_profile, syscall_calls) == 40);
+ C_ASSERT(offsetof(struct pw_native_profile, last_tsc) == 48);
+ C_ASSERT(offsetof(struct pw_native_profile, report_proc) == 64);
+-C_ASSERT(sizeof(struct pw_native_profile) == 72);
++C_ASSERT(offsetof(struct pw_native_profile, syscall_samples) == 72);
++C_ASSERT(offsetof(struct pw_native_profile, unix_samples) == 328);
++C_ASSERT(sizeof(struct pw_native_profile) == 584);
+ 
+ /* No C or TLS lookup before host FS. Preserve guest flags/registers; the
+  * profile pointer is checked on every entry and is NULL by default. */
+-#define PW_PROFILE_ENTRY(offset) \
++#define PW_PROFILE_ENTRY(offset, samples, sample_id) \
+     "pushfq\n\t" \
+     "pushq %rax\n\t" \
++    "pushq %rdx\n\t" \
++    "pushq %rcx\n\t" \
+     "movq 24(%r15),%rax\n\t" \
+     "testq %rax,%rax\n\t" \
+     "jz 9f\n\t" \
+-    "incq " offset "(%rax)\n\t9:\n\t" \
++    "incq " offset "(%rax)\n\t" \
++    "movq " offset "(%rax),%rdx\n\t" \
++    "testl $0x3ff,%edx\n\t" \
++    "jnz 9f\n\t" \
++    "shrq $10,%rdx\n\t" \
++    "andl $63,%edx\n\t" \
++    sample_id \
++    "movl %ecx," samples "(%rax,%rdx,4)\n\t" \
++    "9:\n\t" \
++    "popq %rcx\n\t" \
++    "popq %rdx\n\t" \
+     "popq %rax\n\t" \
+     "popfq\n\t"
+ 
+@@ -389,7 +403,7 @@
+                    "movl %edx,0xc0(%r13)\n\t"   /* context->EFlags */
+                    "leaq 4(%r14),%rdx\n\t"
+                    "movl %edx,0xc4(%r13)\n\t"   /* context->Esp */
+-                   PW_PROFILE_ENTRY("40")
++                   PW_PROFILE_ENTRY("40", "72", "movl 16(%rsp),%ecx\n\t")
+                    "call pw_native_restore_host_fs\n\t"
+                    "movq %rax,%rcx\n\t"         /* syscall number */
+                    "leaq 8(%r14),%rdx\n\t"      /* parameters */
+@@ -459,7 +473,7 @@
+                    "movl %edx,0xbc(%r13)\n\t"   /* context->SegCs */
+                    "leaq 20(%r14),%rdx\n\t"
+                    "movl %edx,0xc4(%r13)\n\t"   /* context->Esp */
+-                   PW_PROFILE_ENTRY("32")
++                   PW_PROFILE_ENTRY("32", "328", "movl 4(%r14),%ecx\n\tshll $16,%ecx\n\torl 12(%r14),%ecx\n\t")
+                    "call pw_native_restore_host_fs\n\t"
+                    "movq 4(%r14),%rcx\n\t"      /* handle */
+                    "movl 12(%r14),%edx\n\t"     /* code */
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -87,11 +87,34 @@
+     const struct pw_native_thread_state *state = arg;
+     unsigned long long host_calls = 0, guest_calls = 0, host_ticks = 0, guest_ticks = 0;
+     unsigned long long unix_calls = 0, syscall_calls = 0, last_tsc = 0;
++    const struct pw_native_profile *p = (void *)state->profile;
++    unsigned int sys_end, unix_end;
+     profile_read(state, &host_calls, &guest_calls, &host_ticks, &guest_ticks,
+                  &unix_calls, &syscall_calls, &last_tsc);
+     WINE_MESSAGE("PW_NATIVE_PROFILE version=2 teb=%llx tsc=%llu host_calls=%llu guest_calls=%llu host_sysarch_ticks=%llu guest_sysarch_ticks=%llu unix_calls=%llu syscall_calls=%llu\n",
+                  state->guest_fs, last_tsc, host_calls, guest_calls,
+                  host_ticks, guest_ticks, unix_calls, syscall_calls);
++    if (!p) return;
++    sys_end = (unsigned int)(syscall_calls >> PW_NATIVE_PROFILE_SAMPLE_SHIFT);
++    unix_end = (unsigned int)(unix_calls >> PW_NATIVE_PROFILE_SAMPLE_SHIFT);
++    WINE_MESSAGE("PW_NATIVE_CALL_IDS teb=%llx syscall=%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x unix=%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x\n",
++                 state->guest_fs,
++                 p->syscall_samples[(sys_end - 0) & 63], p->syscall_samples[(sys_end - 1) & 63],
++                 p->syscall_samples[(sys_end - 2) & 63], p->syscall_samples[(sys_end - 3) & 63],
++                 p->syscall_samples[(sys_end - 4) & 63], p->syscall_samples[(sys_end - 5) & 63],
++                 p->syscall_samples[(sys_end - 6) & 63], p->syscall_samples[(sys_end - 7) & 63],
++                 p->syscall_samples[(sys_end - 8) & 63], p->syscall_samples[(sys_end - 9) & 63],
++                 p->syscall_samples[(sys_end - 10) & 63], p->syscall_samples[(sys_end - 11) & 63],
++                 p->syscall_samples[(sys_end - 12) & 63], p->syscall_samples[(sys_end - 13) & 63],
++                 p->syscall_samples[(sys_end - 14) & 63], p->syscall_samples[(sys_end - 15) & 63],
++                 p->unix_samples[(unix_end - 0) & 63], p->unix_samples[(unix_end - 1) & 63],
++                 p->unix_samples[(unix_end - 2) & 63], p->unix_samples[(unix_end - 3) & 63],
++                 p->unix_samples[(unix_end - 4) & 63], p->unix_samples[(unix_end - 5) & 63],
++                 p->unix_samples[(unix_end - 6) & 63], p->unix_samples[(unix_end - 7) & 63],
++                 p->unix_samples[(unix_end - 8) & 63], p->unix_samples[(unix_end - 9) & 63],
++                 p->unix_samples[(unix_end - 10) & 63], p->unix_samples[(unix_end - 11) & 63],
++                 p->unix_samples[(unix_end - 12) & 63], p->unix_samples[(unix_end - 13) & 63],
++                 p->unix_samples[(unix_end - 14) & 63], p->unix_samples[(unix_end - 15) & 63]);
+ }
+ 
+ #ifdef __PROSPERO__
+--- a/wine/wow64native/wow64native.h
++++ b/wine/wow64native/wow64native.h
+@@ -6,6 +6,8 @@
+ #define PW_NATIVE_CS32 0x33
+ #define PW_NATIVE_SS32 0x3b
+ #define PW_NATIVE_CS64 0x43
++#define PW_NATIVE_PROFILE_SAMPLE_COUNT 64
++#define PW_NATIVE_PROFILE_SAMPLE_SHIFT 10
+ 
+ /* ntdll owns the signal protocol. Its optional Unix export accepts this
+  * version and returns zero for an unsupported protocol. Each bit describes
+@@ -41,6 +43,9 @@
+     unsigned long long host_sysarch_ticks, guest_sysarch_ticks;
+     unsigned long long unix_calls, syscall_calls, last_tsc;
+     unsigned long long reserved, report_proc;
++    /* A 64-entry rolling sample of every 1024th dispatched call. */
++    unsigned int syscall_samples[PW_NATIVE_PROFILE_SAMPLE_COUNT];
++    unsigned int unix_samples[PW_NATIVE_PROFILE_SAMPLE_COUNT];
+ };
+ /* Unix-owned thread state; accessing Unix TLS requires host FS. */
+ struct pw_native_thread_state

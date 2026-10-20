@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 12 Oct 2026 19:15:00 -0700
+Subject: [PATCH] wowprospero: log FalloutNV RTTI source object on fault
+
+The exception's validated frame chain points through FalloutNV's RTTI helper
+to a null result consumed by a getter. Record the caller's source-object local
+and its first eight words during the exception, without probing uncommitted
+guest memory.
+---
+ wine/wowprospero/cpu.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
+--- a/wine/wowprospero/cpu.c
++++ b/wine/wowprospero/cpu.c
+@@ -393,3 +393,20 @@ static void raise_guest_exception( I386_CONTEXT *ctx, DWORD code, UINT address, UINT write )
+                          callsite[6], callsite[7] );
++                /* In the observed FalloutNV chain, frame 2 is the caller at
++                 * 0x7da970 and its local -0x20 is the source object passed to
++                 * the RTTI conversion immediately before the null deref. */
++                if (i == 2 && frame >= 0x20)
++                {
++                    UINT object, words[8];
++
++                    if (read_guest_bytes( frame - 0x20, &object, sizeof(object) ))
++                    {
++                        ERR( "guest frame2 local -20 %08x: %08x\n", frame - 0x20, object );
++                        if (object && read_guest_bytes( object, words, sizeof(words) ))
++                            ERR( "guest frame2 object %08x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++                                 object, words[0], words[1], words[2], words[3], words[4],
++                                 words[5], words[6], words[7] );
++                        else ERR( "guest frame2 object %08x: bytes unavailable\n", object );
++                    }
++                }
+                 if (pair[0] <= frame || pair[0] - frame > 0x100000) break;
+                 frame = pair[0];
+-- 
+2.45.0

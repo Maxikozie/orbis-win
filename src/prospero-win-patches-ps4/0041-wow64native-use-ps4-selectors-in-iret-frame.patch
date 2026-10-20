@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] wow64native: use PS4 selectors in native return frame
+
+The PS4 IRET diagnostic shows a #GP with error 0x20 while returning to a
+32-bit frame whose CS is 0x23. Native initialization reports the PS4
+compatibility selectors as CS=0x33 and SS=0x3b. Build the IRET frame from
+those host selectors instead of the guest CONTEXT fields, which may contain
+the generic Windows WOW64 selectors.
+
+diff --git a/wine/wow64native/cpu.c b/wine/wow64native/cpu.c
+index d2ae329..0000000 100644
+--- a/wine/wow64native/cpu.c
++++ b/wine/wow64native/cpu.c
+@@ -416,5 +416,5 @@ syscall_32to64_return:
+                    "movl 0xac(%r13),%ecx\n\t"   /* context->Ecx */
+-                   "movl 0xc8(%r13),%eax\n\t"   /* context->SegSs */
++                   "movl $0x3b,%eax\n\t"          /* PS4 compatibility stack selector */
+                    "movq %rax,0x20(%rsp)\n\t"
+                    "mov %ax,%ds\n\t"
+                    "mov %ax,%es\n\t"
+@@ -425,6 +425,6 @@ syscall_32to64_return:
+                    "movl 0xc0(%r13),%eax\n\t"   /* context->EFlags */
+                    "movq %rax,0x10(%rsp)\n\t"
+-                   "movl 0xbc(%r13),%eax\n\t"   /* context->SegCs */
++                   "movl $0x33,%eax\n\t"          /* PS4 compatibility code selector */
+                    "movq %rax,0x8(%rsp)\n\t"
+                    "movl 0xb8(%r13),%eax\n\t"   /* context->Eip */
+                    "movq %rax,(%rsp)\n\t"
+--
+2.43.0

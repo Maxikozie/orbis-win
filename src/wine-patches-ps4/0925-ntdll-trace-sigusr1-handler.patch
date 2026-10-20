@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace PS4 SIGUSR1 handler entry
+
+The wineserver trace shows no SIGUSR1 send even as the target repeatedly
+enters wait_suspend. Log bounded handler entries with siginfo and the
+interrupted native PC to identify the signal source and execution path.
+
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -3100,6 +3100,26 @@
+ {
+     ucontext_t *sigcontext = _sigcontext;
+     struct thread_data *data = init_handler( sigcontext );
++
++#ifdef __PROSPERO__
++    {
++        static unsigned int trace_count;
++        unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++        if (n <= 8 || !(n & (n - 1)))
++        {
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            char line[176];
++            snprintf( line, sizeof(line),
++                      "ntdll usr1-handler n=%u sig=%d pid=%d uid=%u code=%d tid=%04x teb=%p rip=%llx rsp=%llx syscall=%d\n",
++                      n, signal, siginfo ? siginfo->si_pid : -1,
++                      siginfo ? siginfo->si_uid : 0, siginfo ? siginfo->si_code : 0,
++                      data->tid, data->teb, (unsigned long long)RIP_sig(sigcontext),
++                      (unsigned long long)RSP_sig(sigcontext),
++                      data->teb ? is_inside_syscall( data, RSP_sig(sigcontext) ) : 0 );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
++#endif
+ 
+     if (!data->teb)
+     {

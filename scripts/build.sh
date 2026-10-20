@@ -23,9 +23,33 @@ filter_gate_warning() {
 }
 
 TARGET="${1:-}"; shift || true
+TARGET_BIN="$TARGET"
 case "$TARGET" in
   hello)    TITLE_ID=GLDS10000; TITLE="Gladius Hello";    SRC="$BUNDLE/examples/hello" ;;
   triangle) TITLE_ID=GLDS10001; TITLE="Gladius Triangle"; SRC="$BUNDLE/examples/triangle" ;;
+  triangle-neo) TITLE_ID=GLDS10018; TITLE="Gladius Triangle Neo"; SRC="$BUNDLE/examples/triangle"; TARGET_BIN=triangle ;;
+  gfxrepeat-neo-solid) TITLE_ID=GLDS10019; TITLE="Gladius GFX Repeated Neo Solid Fragment"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-vbo) TITLE_ID=GLDS10020; TITLE="Gladius GFX Repeated Neo Vertex Buffer"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index3) TITLE_ID=GLDS10021; TITLE="Gladius GFX Repeated Neo Three Index"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-lowidx) TITLE_ID=GLDS10022; TITLE="Gladius GFX Repeated Neo Low Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index300) TITLE_ID=GLDS10023; TITLE="Gladius GFX Repeated Neo 300 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index1266) TITLE_ID=GLDS10024; TITLE="Gladius GFX Repeated Neo 1266 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index783) TITLE_ID=GLDS10025; TITLE="Gladius GFX Repeated Neo 783 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index541) TITLE_ID=GLDS10026; TITLE="Gladius GFX Repeated Neo 541 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index662) TITLE_ID=GLDS10027; TITLE="Gladius GFX Repeated Neo 662 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index723) TITLE_ID=GLDS10028; TITLE="Gladius GFX Repeated Neo 723 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index753) TITLE_ID=GLDS10029; TITLE="Gladius GFX Repeated Neo 753 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index768) TITLE_ID=GLDS10030; TITLE="Gladius GFX Repeated Neo 768 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index776) TITLE_ID=GLDS10031; TITLE="Gladius GFX Repeated Neo 776 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index772) TITLE_ID=GLDS10032; TITLE="Gladius GFX Repeated Neo 772 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index770) TITLE_ID=GLDS10033; TITLE="Gladius GFX Repeated Neo 770 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-index769) TITLE_ID=GLDS10034; TITLE="Gladius GFX Repeated Neo 769 Indices"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-points257) TITLE_ID=GLDS10035; TITLE="Gladius GFX Repeated Neo 257 Points"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-points256) TITLE_ID=GLDS10036; TITLE="Gladius GFX Repeated Neo 256 Points"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-base-points257) TITLE_ID=GLDS10037; TITLE="Gladius GFX Repeated Base 257 Points"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-wd-eop-points257) TITLE_ID=GLDS10038; TITLE="Gladius Neo WD EOP 257 Points"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-no-ia-eoi-points257) TITLE_ID=GLDS10039; TITLE="Gladius Neo No IA EOI 257 Points"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo-wd-eop-index769) TITLE_ID=GLDS10040; TITLE="Gladius Neo WD EOP 769 Index"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
   probe)    TITLE_ID=GLDS10002; TITLE="Gladius Probe";    SRC="$ROOT/src/probe" ;;
   present)  TITLE_ID=GLDS10003; TITLE="Prospero Presenter"; SRC="$ROOT/src/present-test" ;;
   fault)    TITLE_ID=GLDS10004; TITLE="Gladius Fault Probe"; SRC="$ROOT/src/fault-probe" ;;
@@ -33,9 +57,17 @@ case "$TARGET" in
   statprobe) TITLE_ID=GLDS10007; TITLE="Gladius Stat Probe"; SRC="$ROOT/src/stat-probe" ;;
   dupprobe) TITLE_ID=GLDS10008; TITLE="Gladius Dup Probe"; SRC="$ROOT/src/dup-probe" ;;
   vkmapprobe) TITLE_ID=GLDS10011; TITLE="Gladius Vulkan Mapping Probe"; SRC="$ROOT/src/vk-map-probe" ;;
+  gfxhang) TITLE_ID=GLDS10012; TITLE="Gladius GFX Hang Probe"; SRC="$ROOT/src/gfx-hang-probe" ;;
+  gfxhang-base) TITLE_ID=GLDS10013; TITLE="Gladius GFX Hang Probe Base"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxonce) TITLE_ID=GLDS10014; TITLE="Gladius GFX Single Draw Neo"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxonce-base) TITLE_ID=GLDS10015; TITLE="Gladius GFX Single Draw Base"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-base) TITLE_ID=GLDS10016; TITLE="Gladius GFX Repeated Single Draw Base"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
+  gfxrepeat-neo) TITLE_ID=GLDS10017; TITLE="Gladius GFX Repeated Single Draw Neo"; SRC="$ROOT/src/gfx-hang-probe"; TARGET_BIN=gfxhang ;;
   mapprobe) TITLE_ID=GLDS10010; TITLE="Gladius Mapping Probe"; SRC="$ROOT/src/map-probe" ;;
   threadprobe) TITLE_ID=GLDS10009; TITLE="Gladius Thread Probe"; SRC="$ROOT/src/thread-probe" ;;
-  *) die "usage: build.sh {hello|triangle|probe|present|fault|modprobe|statprobe|dupprobe|threadprobe|mapprobe|vkmapprobe} [--pkg] [--deploy] [--neo] [--dev-mesa]" ;;
+  lowbaseprobe) TITLE_ID=GLDS10042; TITLE="Gladius Low Base Probe"; SRC="$ROOT/src/lowbase-probe" ;;
+  controller-map) TITLE_ID=GLDS10048; TITLE="Gladius Controller Map"; SRC="$ROOT/src/controller-map" ;;
+  *) die "usage: build.sh {hello|triangle|triangle-neo|probe|present|fault|modprobe|statprobe|dupprobe|threadprobe|lowbaseprobe|controller-map|mapprobe|vkmapprobe|gfxhang|gfxhang-base|gfxonce|gfxonce-base|gfxrepeat-base|gfxrepeat-neo|gfxrepeat-neo-solid|gfxrepeat-neo-vbo} [--pkg] [--deploy] [--neo] [--dev-mesa]" ;;
 esac
 
 PKG=0; DEPLOY=0; NEO=0; DEVMESA=0
@@ -59,8 +91,33 @@ source "$BUNDLE/env.sh" >/dev/null
 # orbis-compat/vkloader, so point it there. Without this the configure fails
 # with "holds no vkloader/".
 EXTRA=()
-[[ $TARGET == triangle || $TARGET == probe ]] &&
+[[ $TARGET == triangle || $TARGET == triangle-neo || $TARGET == probe || $TARGET == gfxhang || $TARGET == gfxhang-base || $TARGET == gfxonce || $TARGET == gfxonce-base || $TARGET == gfxrepeat-base || $TARGET == gfxrepeat-neo || $TARGET == gfxrepeat-neo-solid || $TARGET == gfxrepeat-neo-vbo || $TARGET == gfxrepeat-neo-index3 || $TARGET == gfxrepeat-neo-lowidx || $TARGET == gfxrepeat-neo-index300 || $TARGET == gfxrepeat-neo-index1266 || $TARGET == gfxrepeat-neo-index783 || $TARGET == gfxrepeat-neo-index541 || $TARGET == gfxrepeat-neo-index662 || $TARGET == gfxrepeat-neo-index723 || $TARGET == gfxrepeat-neo-index753 || $TARGET == gfxrepeat-neo-index768 || $TARGET == gfxrepeat-neo-index776 || $TARGET == gfxrepeat-neo-index772 || $TARGET == gfxrepeat-neo-index770 || $TARGET == gfxrepeat-neo-index769 || $TARGET == gfxrepeat-neo-points257 || $TARGET == gfxrepeat-neo-points256 || $TARGET == gfxrepeat-base-points257 || $TARGET == gfxrepeat-neo-wd-eop-points257 || $TARGET == gfxrepeat-neo-no-ia-eoi-points257 || $TARGET == gfxrepeat-neo-wd-eop-index769 ]] &&
   EXTRA+=(-DORBIS_KIT_DIR="$BUNDLE/orbis-compat")
+[[ $TARGET == gfxonce || $TARGET == gfxonce-base ]] && EXTRA+=(-DGFXHANG_SINGLE_SHOT=ON)
+[[ $TARGET == gfxrepeat-base ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON)
+[[ $TARGET == gfxrepeat-neo ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON)
+[[ $TARGET == gfxrepeat-neo-solid ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON)
+[[ $TARGET == gfxrepeat-neo-vbo ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_UNINDEXED_DRAW=ON)
+[[ $TARGET == gfxrepeat-neo-index3 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_DRAW_INDEX_COUNT=3)
+[[ $TARGET == gfxrepeat-neo-lowidx ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON)
+[[ $TARGET == gfxrepeat-neo-index300 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=300)
+[[ $TARGET == gfxrepeat-neo-index1266 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=1266)
+[[ $TARGET == gfxrepeat-neo-index783 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=783)
+[[ $TARGET == gfxrepeat-neo-index541 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=541)
+[[ $TARGET == gfxrepeat-neo-index662 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=662)
+[[ $TARGET == gfxrepeat-neo-index723 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=723)
+[[ $TARGET == gfxrepeat-neo-index753 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=753)
+[[ $TARGET == gfxrepeat-neo-index768 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=768)
+[[ $TARGET == gfxrepeat-neo-index776 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=776)
+[[ $TARGET == gfxrepeat-neo-index772 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=772)
+[[ $TARGET == gfxrepeat-neo-index770 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=770)
+[[ $TARGET == gfxrepeat-neo-index769 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=769)
+[[ $TARGET == gfxrepeat-neo-points257 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_POINT_LIST=ON -DGFXHANG_DRAW_INDEX_COUNT=257)
+[[ $TARGET == gfxrepeat-neo-points256 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_POINT_LIST=ON -DGFXHANG_DRAW_INDEX_COUNT=256)
+[[ $TARGET == gfxrepeat-base-points257 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_POINT_LIST=ON -DGFXHANG_DRAW_INDEX_COUNT=257)
+[[ $TARGET == gfxrepeat-neo-wd-eop-points257 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_POINT_LIST=ON -DGFXHANG_DRAW_INDEX_COUNT=257 -DGFXHANG_FORCE_WD_SWITCH_ON_EOP=ON)
+[[ $TARGET == gfxrepeat-neo-no-ia-eoi-points257 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_POINT_LIST=ON -DGFXHANG_DRAW_INDEX_COUNT=257 -DGFXHANG_DISABLE_IA_SWITCH_ON_EOI=ON)
+[[ $TARGET == gfxrepeat-neo-wd-eop-index769 ]] && EXTRA+=(-DGFXHANG_REPEAT_ONE_DRAW=ON -DGFXHANG_SOLID_FRAGMENT=ON -DGFXHANG_LOW_INDEX_VALUES=ON -DGFXHANG_DRAW_INDEX_COUNT=769 -DGFXHANG_FORCE_WD_SWITCH_ON_EOP=ON)
 
 # --dev-mesa: link against the locally built mesa-ps4 instead of the bundle's
 # prebuilt archive, for the Gladius work.
@@ -106,8 +163,8 @@ cmake --build "$BUILD"
 # Under `set -o pipefail`, grep -q exits on the first match, llvm-nm takes
 # SIGPIPE, and the pipeline reports failure on a check that actually PASSED.
 say "checking the image"
-syms=$(llvm-nm "$BUILD/$TARGET")
-entry=$(llvm-readelf -h "$BUILD/$TARGET" | sed -n 's/.*Entry point address: *//p')
+syms=$(llvm-nm "$BUILD/$TARGET_BIN")
+entry=$(llvm-readelf -h "$BUILD/$TARGET_BIN" | sed -n 's/.*Entry point address: *//p')
 start=0x$(printf '%s\n' "$syms" | sed -n 's/^0*\([0-9a-f]*\) [Tt] _start$/\1/p' | head -1)
 
 [[ ${entry,,} == "${start,,}" ]] || die "e_entry $entry is not _start $start"
@@ -119,12 +176,12 @@ printf '%s\n' "$syms" | grep -F _sceProcessParam >/dev/null ||
 bad=0
 while read -r v; do
   (( (16#${v#0x}) % 16384 == 0 )) || { echo "!! unaligned PT_LOAD $v" >&2; bad=1; }
-done < <(llvm-readelf -lW "$BUILD/$TARGET" | awk '/LOAD/{print $3}')
+done < <(llvm-readelf -lW "$BUILD/$TARGET_BIN" | awk '/LOAD/{print $3}')
 (( bad == 0 )) || die "PT_LOAD alignment"
 
 printf '   entry %s == _start, _sceProcessParam present, PT_LOADs 0x4000-aligned\n' "$entry"
 printf '   eboot.bin %s\n' "$(du -h "$BUILD/eboot.bin" | cut -f1)"
-[[ $TARGET == triangle || $TARGET == probe ]] &&
+[[ $TARGET == triangle || $TARGET == triangle-neo || $TARGET == probe || $TARGET == gfxhang || $TARGET == gfxhang-base || $TARGET == gfxonce || $TARGET == gfxonce-base || $TARGET == gfxrepeat-base || $TARGET == gfxrepeat-neo || $TARGET == gfxrepeat-neo-solid || $TARGET == gfxrepeat-neo-vbo || $TARGET == gfxrepeat-neo-index3 || $TARGET == gfxrepeat-neo-lowidx || $TARGET == gfxrepeat-neo-index300 || $TARGET == gfxrepeat-neo-index1266 || $TARGET == gfxrepeat-neo-index783 || $TARGET == gfxrepeat-neo-index541 || $TARGET == gfxrepeat-neo-index662 || $TARGET == gfxrepeat-neo-index723 || $TARGET == gfxrepeat-neo-index753 || $TARGET == gfxrepeat-neo-index768 || $TARGET == gfxrepeat-neo-index776 || $TARGET == gfxrepeat-neo-index772 || $TARGET == gfxrepeat-neo-index770 || $TARGET == gfxrepeat-neo-index769 || $TARGET == gfxrepeat-neo-points257 || $TARGET == gfxrepeat-neo-points256 || $TARGET == gfxrepeat-base-points257 || $TARGET == gfxrepeat-neo-wd-eop-points257 || $TARGET == gfxrepeat-neo-no-ia-eoi-points257 || $TARGET == gfxrepeat-neo-wd-eop-index769 ]] &&
   printf '   RADV/ACO symbols linked in: %s\n' "$(printf '%s\n' "$syms" | grep -cE ' (radv_|ac_drm_|aco_)')"
 
 if (( PKG )); then
@@ -142,6 +199,33 @@ if (( PKG )); then
   # this repository — see sce_module/README.md for taking them off your own
   # console. They are gitignored.
   EXTRA_FILES=()
+  if [[ $TARGET == lowbaseprobe ]]; then
+    say "build low-base handoff PRX"
+    PRX_OUT="$ROOT/build/lowbaseprobe/lowbase_handoff.prx"
+    PRX_OBJ="$ROOT/build/lowbaseprobe/prx"
+    CC="$ROOT/build/ps4-wine-sdk/bin/prospero-clang"
+    OO="$BUNDLE/sdk"
+    mkdir -p "$PRX_OBJ"
+    "$CC" -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC \
+      -I"$ROOT/prospero-win/wine/ps5" \
+      -c "$ROOT/src/lowbase-probe/handoff_prx.c" -o "$PRX_OBJ/handoff_prx.o"
+    python3 "$ROOT/prospero-win/tools/gen_prx_descriptor.py" \
+      "$PRX_OBJ/descriptor.c" lowbase_probe_handoff
+    "$CC" -std=gnu11 -O2 -fPIC -I"$ROOT/prospero-win/wine/ps5" \
+      -c "$PRX_OBJ/descriptor.c" -o "$PRX_OBJ/descriptor.o"
+    PW_PRX_LINK=1 \
+      "$CC" -shared -Wl,-Bsymbolic -Wl,-soname,lowbase_handoff.prx \
+      -Wl,--warn-unresolved-symbols -o "$PRX_OBJ/handoff.shared.elf" \
+      "$PRX_OBJ/handoff_prx.o" "$PRX_OBJ/descriptor.o"
+    "$OO/bin/linux/create-fself" -in "$PRX_OBJ/handoff.shared.elf" \
+      -out "$PRX_OBJ/handoff.oelf" -lib "$PRX_OUT" -libname lowbase_handoff.prx \
+      -ptype fake -library-path "$PRX_OBJ:$ROOT/build/ps4-wine-sdk:$OO/lib" \
+      > "$PRX_OBJ/create-fself.log" 2>&1 || {
+        cat "$PRX_OBJ/create-fself.log" >&2
+        die "could not package low-base handoff PRX"
+      }
+    EXTRA_FILES+=(--extra "$PRX_OUT:sce_module/lowbase_handoff.prx")
+  fi
   # The module probe ships every PRX variant it tries, plus one copy in
   # sce_module and one at the runtime path, so the program type and the
   # directory are tested independently in a single run.

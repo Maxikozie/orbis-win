@@ -1,0 +1,23 @@
+Subject: mmdevapi: sample the caller of GetCurrentPadding on PS4
+
+The PS4 startup diagnostic shows a high rate of GetCurrentPadding calls, but
+the backend counter does not identify which Windows module is issuing them.
+Sample the Windows TEB and caller return address every 262144 calls so the next
+run can distinguish the game from Wine's DirectSound mixer without per-call
+logging.
+
+--- a/dlls/mmdevapi/client.c
++++ b/dlls/mmdevapi/client.c
+@@ -772,6 +772,12 @@
+ static HRESULT WINAPI client_GetCurrentPadding(IAudioClient3 *iface, UINT32 *out)
+ {
++    static volatile LONG diagnostic_calls;
+     struct audio_client *This = impl_from_IAudioClient3(iface);
+     struct get_current_padding_params params;
++    LONG calls = InterlockedIncrement(&diagnostic_calls);
++
++    if (calls == 1 || !(calls & 0x3ffff))
++        WINE_MESSAGE("PW_AUDIO_PADDING_CALL calls=%lu teb=%p caller=%p stream=%llx\n",
++                     (unsigned long)calls, NtCurrentTeb(), __builtin_return_address(0), (unsigned long long)This->stream);
+ 
+     TRACE("(%p)->(%p)\n", This, out);

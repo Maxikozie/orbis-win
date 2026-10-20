@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Subject: [PATCH] server: trace PS4 startup select wait payloads
+
+Boundedly log select flags, timeout, opcode, and up to eight wait handles.
+This identifies whether the repeated startup selects are polling or waiting
+on a particular object without flooding the console log.
+
+---
+--- a/server/request.c
++++ b/server/request.c
+@@ -427,5 +427,49 @@
+     }
+ #endif
++
++#ifdef __PROSPERO__
++    /* Bounded trace for the repeated REQ_select observed during PS4 startup.
++     * Include the wait operation and a few handles so a poll loop can be
++     * distinguished from a blocking wait on a live object. */
++    if (req == REQ_select)
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        static unsigned int seq;
++        const struct select_request *select = &thread->req.select_request;
++        const union apc_result *result = thread->req_data;
++        unsigned int n = __atomic_add_fetch( &seq, 1, __ATOMIC_RELAXED );
++
++        if (n <= 32 || !(n & (n - 1)))
++        {
++            unsigned int op = 0xffffffff, count = 0, handles[8] = {0};
++            data_size_t data_size = thread->req.request_header.request_size;
++            char line[256];
++
++            if (result && data_size >= sizeof(*result) + sizeof(op))
++            {
++                const union select_op *select_op = (const union select_op *)(result + 1);
++                op = select_op->op;
++                if ((op == SELECT_WAIT || op == SELECT_WAIT_ALL) &&
++                    select->size >= offsetof( union select_op, wait.handles ) &&
++                    data_size >= sizeof(*result) + select->size)
++                {
++                    count = (select->size - offsetof( union select_op, wait.handles )) /
++                            sizeof(select_op->wait.handles[0]);
++                    if (count > 8) count = 8;
++                    memcpy( handles, select_op->wait.handles, count * sizeof(handles[0]) );
++                }
++            }
++
++            snprintf( line, sizeof(line),
++                      "wineserver select n=%u tid=%04x flags=%08x cookie=%llx timeout=%llx size=%u prev=%04x op=%u handles=%u:%04x,%04x,%04x,%04x,%04x,%04x,%04x,%04x\n",
++                      n, thread->id, select->flags, (unsigned long long)select->cookie,
++                      (unsigned long long)select->timeout, select->size, select->prev_apc,
++                      op, count, handles[0], handles[1], handles[2], handles[3],
++                      handles[4], handles[5], handles[6], handles[7] );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
++#endif
+ 
+     current = thread;
+     current->ps5_last_req = req;
+-- 
+2.43.0

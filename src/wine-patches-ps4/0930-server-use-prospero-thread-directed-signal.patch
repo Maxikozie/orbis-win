@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] server: use Prospero's registered thread signal shim
+
+Prospero builds do not define __FreeBSD__ and the PS4 SDK does not expose
+thr_kill2. The PS4 platform layer supplies thr_kill2 over Wine's registered
+pthread table, but this condition misses it and falls through to kill(pid),
+which sends SIGUSR1 to an arbitrary thread in the process. Select the shim on
+Prospero so suspend signals target the requested Wine thread.
+
+--- a/server/ptrace.c
++++ b/server/ptrace.c
+@@ -213,4 +213,7 @@
+     stop_watchdog();
+     return (thread->unix_pid != -1);
+ }
++
++/* Defined by the PS4 platform shim in the wineserver PRX. */
++extern int thr_kill2( int tgid, int pid, int sig );
+ 
+@@ -220,10 +220,12 @@ static inline int tkill( int tgid, int pid, int sig )
+     int ret = syscall( __NR_tgkill, tgid, pid, sig );
+     if (ret < 0 && errno == ENOSYS) ret = syscall( __NR_tkill, pid, sig );
+     return ret;
++#elif defined(__PROSPERO__)
++    return thr_kill2( tgid, pid, sig );
+ #elif (defined(__FreeBSD__) || defined (__FreeBSD_kernel__)) && defined(HAVE_THR_KILL2)
+     return thr_kill2( tgid, pid, sig );
+ #else
+     errno = ENOSYS;
+     return -1;
+ #endif
+ }

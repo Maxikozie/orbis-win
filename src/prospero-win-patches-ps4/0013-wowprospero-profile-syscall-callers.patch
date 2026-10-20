@@ -1,0 +1,108 @@
+--- a/wine/wowprospero/unix.c
++++ b/wine/wowprospero/unix.c
+@@ -1047,7 +1047,10 @@
+  * without a lock, TLS, or access to another thread's cache. */
+ enum { PROFILE_NATIVE_SLOTS = 4096 };
+ static struct profile_native { uintptr_t pc; uint64_t samples; } profile_native[PROFILE_NATIVE_SLOTS];
++static struct profile_native profile_syscall_callers[PROFILE_NATIVE_SLOTS];
+ static uint64_t profile_native_overflow, profile_native_last_dump;
++static uint64_t profile_syscall_caller_overflow;
++static uintptr_t profile_libkernel_low, profile_libkernel_high;
+ static void profile_native_sample(uintptr_t pc)
+ {
+     unsigned bucket = (unsigned)((pc >> 4) * 2654435761u) & (PROFILE_NATIVE_SLOTS - 1);
+@@ -1068,6 +1071,30 @@
+     }
+     __atomic_fetch_add(&profile_native_overflow, 1, __ATOMIC_RELAXED);
+ }
++
++/* If SIGPROF lands in a libkernel syscall wrapper, RSP points at that
++ * wrapper's caller return address. Keep caller PCs separate from syscall-stub
++ * PCs: the former identify the Wine module doing the polling. */
++static void profile_syscall_caller_sample(uintptr_t pc)
++{
++    unsigned bucket = (unsigned)((pc >> 4) * 2654435761u) & (PROFILE_NATIVE_SLOTS - 1);
++    if(!pc) return;
++    for(unsigned i = 0; i < PROFILE_NATIVE_SLOTS; i++) {
++        uintptr_t key = __atomic_load_n(&profile_syscall_callers[bucket].pc, __ATOMIC_ACQUIRE);
++        if(!key) {
++            uintptr_t empty = 0;
++            if(__atomic_compare_exchange_n(&profile_syscall_callers[bucket].pc, &empty, pc, 0,
++                                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) key = pc;
++            else key = empty;
++        }
++        if(key == pc) {
++            __atomic_fetch_add(&profile_syscall_callers[bucket].samples, 1, __ATOMIC_RELAXED);
++            return;
++        }
++        bucket = (bucket + 1) & (PROFILE_NATIVE_SLOTS - 1);
++    }
++    __atomic_fetch_add(&profile_syscall_caller_overflow, 1, __ATOMIC_RELAXED);
++}
+ /* ⚠ A thread that never leaves translated code never reports.
+  *
+  * profile_maybe_dump() runs where run() returns -- at a system call, a Unix
+@@ -1127,6 +1154,11 @@
+         info.size = sizeof(info);
+         if(sceKernelGetModuleInfo(handles[i], &info)) continue;
+         info.name[sizeof(info.name) - 1] = 0;
++        if(strstr(info.name, "libkernel") && info.segments && info.segment[0].address) {
++            uintptr_t low = (uintptr_t)info.segment[0].address;
++            __atomic_store_n(&profile_libkernel_high, low + info.segment[0].size, __ATOMIC_RELAXED);
++            __atomic_store_n(&profile_libkernel_low, low, __ATOMIC_RELEASE);
++        }
+         PW_WOW_NOTE("wowprospero module: %s text=%p+%x\n", info.name,
+                    info.segments ? info.segment[0].address : (void *)0,
+                    info.segments ? info.segment[0].size : 0u);
+@@ -1179,6 +1211,34 @@
+     }
+ }
+ 
++static uint64_t profile_syscall_caller_report_tsc;
++static void profile_syscall_caller_line(uint64_t tsc)
++{
++    uint64_t ceiling = ~0ull;
++
++    if(!profile_sample_period) return;
++    if(profile_syscall_caller_report_tsc &&
++       tsc - profile_syscall_caller_report_tsc < profile_sample_period) return;
++    profile_syscall_caller_report_tsc = tsc;
++    for(unsigned rank = 0; rank < 4; rank++) {
++        uintptr_t pc = 0;
++        uint64_t best = 0;
++
++        for(unsigned i = 0; i < PROFILE_NATIVE_SLOTS; i++) {
++            uint64_t samples = __atomic_load_n(&profile_syscall_callers[i].samples, __ATOMIC_RELAXED);
++            if(samples > best && samples < ceiling) {
++                best = samples;
++                pc = __atomic_load_n(&profile_syscall_callers[i].pc, __ATOMIC_ACQUIRE);
++            }
++        }
++        if(!best) return;
++        PW_WOW_NOTE("wowprospero syscall_caller: rank=%u pc=%#lx samples=%llu overflow=%llu\n",
++                    rank, (unsigned long)pc, (unsigned long long)best,
++                    (unsigned long long)__atomic_load_n(&profile_syscall_caller_overflow, __ATOMIC_RELAXED));
++        ceiling = best;
++    }
++}
++
+ static void profile_handler(int signal, siginfo_t *info, void *context)
+ {
+     const uintptr_t rip = *context_rip(context);
+@@ -1201,7 +1261,15 @@
+     }
+     __atomic_fetch_add(&profile_unattributed, 1, __ATOMIC_RELAXED);
+     profile_native_sample(rip);
+-    profile_native_line(__rdtsc());
++    uintptr_t low = __atomic_load_n(&profile_libkernel_low, __ATOMIC_ACQUIRE);
++    uintptr_t high = __atomic_load_n(&profile_libkernel_high, __ATOMIC_RELAXED);
++    if(low && rip >= low && rip < high) {
++        uintptr_t *rsp = context_rsp(context);
++        if(rsp) profile_syscall_caller_sample(*rsp);
++    }
++    uint64_t tsc = __rdtsc();
++    profile_native_line(tsc);
++    profile_syscall_caller_line(tsc);
+ }
+ 
+ static uint64_t profile_monotonic_ns(void)

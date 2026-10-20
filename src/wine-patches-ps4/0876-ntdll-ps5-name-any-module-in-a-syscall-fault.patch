@@ -86,7 +86,7 @@ index 2956c64e1c..491f702643 100644
  /***********************************************************************
   *           handle_syscall_fault
   *
-@@ -2183,18 +2233,97 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *sigconte
+@@ -2183,18 +2233,60 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *sigconte
           * success: user32 took STATUS_ACCESS_VIOLATION for a class atom. */
          void *where = context->Rip ? (void *)context->Rip : context->Rsp ? *(void **)context->Rsp : NULL;
          Dl_info info;
@@ -141,44 +141,7 @@ index 2956c64e1c..491f702643 100644
 +               context->R9, context->R10, context->R11, context->R12, context->R13 );
 +    ERR_(seh)( "fault regs r14=%016lx r15=%016lx\n", context->R14, context->R15 );
 +
-+    /* ⚠ The faulting module is Sony's libc, which tells us nothing on its own:
-+     * every caller in Wine reaches it eventually. What matters is who called
-+     * in. Walk the stack for the first return addresses that land in a
-+     * different module and name those -- bounded, and reading only the stack
-+     * the handler was already given. */
-+    {
-+        const ULONG64 *slot = (const ULONG64 *)context->Rsp;
-+        const void *faulted = (const void *)context->Rip;
-+        char callername[256], faulting[256];
-+        unsigned long calleroff, faultoff;
-+        int shown = 0, i;
-+
-+        if (!faulted || !pw_module_at( faulted, faulting, sizeof(faulting), &faultoff ))
-+            faulting[0] = 0;
-+        /* Report a module the first time it appears and then stay quiet until it
-+         * changes: the frames below the fault are a long run inside Sony's own
-+         * libkernel -- pthread_once among them, which is how win32u's init_user
-+         * is entered -- and printing each of those crowds out the Wine frame
-+         * above them, which is the one worth having. */
-+        if (slot && !((ULONG_PTR)slot & 7))
-+        {
-+            char previous[256];
-+
-+            previous[0] = 0;
-+            for (i = 0; i < 512 && shown < 8; i++)
-+            {
-+                const void *candidate = (const void *)slot[i];
-+
-+                if ((ULONG_PTR)candidate < 0x10000) continue;
-+                if (!pw_module_at( candidate, callername, sizeof(callername), &calleroff )) continue;
-+                if (faulting[0] && !strcmp( callername, faulting )) continue;
-+                if (!strcmp( callername, previous )) continue;
-+                snprintf( previous, sizeof(previous), "%s", callername );
-+                shown++;
-+                ERR_(seh)( "syscall fault called from %s+%#lx\n", callername, calleroff );
-+            }
-+        }
-+    }
++    /* Context.Rsp can be an unmapped WoW64 stack address. */
 +#endif
 +
      if (data->jmp_buf)

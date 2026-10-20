@@ -85,6 +85,7 @@ target_link_libraries(pw_native_ps4 PUBLIC
   "-Wl,--wrap=chdir"
   "-Wl,--wrap=chmod"
   "-Wl,--wrap=close"
+  "-Wl,--wrap=dup"
   "-Wl,--wrap=fchdir"
   "-Wl,--wrap=fopen"
   "-Wl,--wrap=fstatat"

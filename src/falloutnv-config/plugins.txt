@@ -1,0 +1,13 @@
+# This file is used by Fallout NV to keep track of your downloaded content.
+# Please do not modify this file.
+CaravanPack.esm
+ClassicPack.esm
+DeadMoney.esm
+FalloutNV.esm
+FalloutNV_lang.esp
+GunRunnersArsenal.esm
+HonestHearts.esm
+LonesomeRoad.esm
+MercenaryPack.esm
+OldWorldBlues.esm
+TribalPack.esm

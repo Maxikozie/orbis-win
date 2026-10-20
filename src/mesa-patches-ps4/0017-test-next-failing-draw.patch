@@ -1,0 +1,16 @@
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -1485,8 +1485,7 @@
+       memcpy(dst, src + i, (size_t)words * 4);
+-      /* Diagnostic A/B: the fatal Neo stream repeatedly stops inside one indexed
+-       * draw (4770 UINT16 indices, 6144-index bound). Keep the packet shape and
+-       * state intact, but allow that exact draw to be reduced to one triangle.
+-       * This is opt-in and deliberately constrained by count and allocation
+-       * bound so it cannot silently affect ordinary draws. */
++      /* Diagnostic A/B: the fatal Neo stream stopped inside indexed draws with
++       * 4770 and 5961 UINT16 indices, both with a 6144-index bound. Keep the
++       * packet shape and state intact, but allow those exact counts to be
++       * reduced to one triangle. This is opt-in and tightly constrained. */
+       if (getenv("ORBIS_SHRINK_DRAW") != NULL && op == 0x27 /* DRAW_INDEX_2 */ &&
+-          words >= 6 && src[i + 1] == 6144 && src[i + 4] == 4770) {
++          words >= 6 && src[i + 1] == 6144 && (src[i + 4] == 4770 || src[i + 4] == 5961)) {

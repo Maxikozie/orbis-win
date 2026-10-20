@@ -1,0 +1,68 @@
+diff --git a/src/amd/vulkan/radv_cmd_buffer.c b/src/amd/vulkan/radv_cmd_buffer.c
+index 924bd60..143accd 100644
+--- a/src/amd/vulkan/radv_cmd_buffer.c
++++ b/src/amd/vulkan/radv_cmd_buffer.c
+@@ -7198,6 +7198,38 @@ radv_prims_for_vertices(struct radv_prim_vertex_count *info, unsigned num)
+    return 1 + ((num - info->min) / info->incr);
+ }
+ 
++#ifdef HAVE_ORBIS_PLATFORM
++static bool
++radv_orbis_force_wd_switch_on_eop(void)
++{
++   static int force = -1;
++
++   if (force < 0) {
++      const char *const e = getenv("ORBIS_FORCE_WD_SWITCH_ON_EOP");
++      force = e && e[0] == '1' && e[1] == '\0';
++      if (force)
++         mesa_logi("radv/orbis: forcing WD_SWITCH_ON_EOP for the Neo draw-path experiment");
++   }
++
++   return force;
++}
++
++static bool
++radv_orbis_disable_ia_switch_on_eoi(void)
++{
++   static int disable = -1;
++
++   if (disable < 0) {
++      const char *const e = getenv("ORBIS_DISABLE_IA_SWITCH_ON_EOI");
++      disable = e && e[0] == '1' && e[1] == '\0';
++      if (disable)
++         mesa_logi("radv/orbis: disabling IA_SWITCH_ON_EOI for the Neo draw-path experiment");
++   }
++
++   return disable;
++}
++#endif
++
+ static const struct radv_prim_vertex_count prim_size_table[] = {
+    [V_008958_DI_PT_NONE] = {0, 0},          [V_008958_DI_PT_POINTLIST] = {1, 1},
+    [V_008958_DI_PT_LINELIST] = {2, 2},      [V_008958_DI_PT_LINESTRIP] = {2, 1},
+@@ -7301,10 +7333,24 @@ radv_get_ia_multi_vgt_param(struct radv_cmd_buffer *cmd_buffer, bool instanced_d
+       if (count_from_stream_output)
+          wd_switch_on_eop = true;
+ 
++#ifdef HAVE_ORBIS_PLATFORM
++      /* Test the base-mode IA scheduling policy on Gladius without changing the reported topology.
++       * Base mode has max_se < 4 and therefore enables WD_SWITCH_ON_EOP here; Neo skips it and
++       * enables IA_SWITCH_ON_EOI. The 256/257 point boundary makes this a targeted A/B. */
++      if (gpu_info->family == CHIP_GLADIUS && radv_orbis_force_wd_switch_on_eop())
++         wd_switch_on_eop = true;
++#endif
++
+       /* Required on GFX7 and later. */
+       if (gpu_info->max_se > 2 && !wd_switch_on_eop)
+          ia_switch_on_eoi = true;
+ 
++#ifdef HAVE_ORBIS_PLATFORM
++      /* Keep Neo's WD policy and disable only its IA end-of-input switch. */
++      if (gpu_info->family == CHIP_GLADIUS && radv_orbis_disable_ia_switch_on_eoi())
++         ia_switch_on_eoi = false;
++#endif
++
+       /* Required by Hawaii and, for some special cases, by GFX8. */
+       if (ia_switch_on_eoi &&
+           (gpu_info->family == CHIP_HAWAII ||

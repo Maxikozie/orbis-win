@@ -34,12 +34,17 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--title-id", required=True)
     parser.add_argument("--title", required=True)
+    parser.add_argument("--eboot-source", type=Path,
+                        help="replace the base stage EBOOT with this file")
     parser.add_argument("--replace", action="append", default=[], metavar="REL=SOURCE")
     args = parser.parse_args()
     base = args.base_stage.resolve()
     out = args.out_dir.resolve()
     if not (base / "eboot.bin").is_file():
         parser.error("base stage has no eboot.bin")
+    eboot = args.eboot_source.resolve() if args.eboot_source else base / "eboot.bin"
+    if not eboot.is_file():
+        parser.error(f"EBOOT source missing: {eboot}")
     replacements: dict[str, Path] = {}
     for item in args.replace:
         rel, sep, source = item.partition("=")
@@ -64,7 +69,7 @@ def main() -> None:
     for rel in REQUIRED:
         if rel not in payload:
             parser.error(f"base stage lacks required platform module: {rel}")
-    command = [str(MAKE_PKG), "--eboot", str(base / "eboot.bin"),
+    command = [str(MAKE_PKG), "--eboot", str(eboot),
                "--out-dir", str(out), "--title-id", args.title_id,
                "--title", args.title]
     for rel, source in sorted(payload.items()):
@@ -79,6 +84,8 @@ def main() -> None:
         target = stage / rel
         if not target.is_file() or digest(source) != digest(target):
             raise RuntimeError(f"package stage mismatch: {rel}")
+    if digest(eboot) != digest(stage / "eboot.bin"):
+        raise RuntimeError("package stage EBOOT does not match its selected source")
     print(f"Verified {len(payload)} payload files in {stage}")
     print((out / "build.log").read_text().splitlines()[-1])
 

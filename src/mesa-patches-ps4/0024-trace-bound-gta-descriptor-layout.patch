@@ -1,0 +1,81 @@
+diff --git a/src/amd/vulkan/radv_cmd_buffer.c b/src/amd/vulkan/radv_cmd_buffer.c
+--- a/src/amd/vulkan/radv_cmd_buffer.c
++++ b/src/amd/vulkan/radv_cmd_buffer.c
+@@ -49,6 +49,7 @@
+ 
+ #include "util/compiler.h"
+ #include "util/fast_idiv_by_const.h"
++#include "util/simple_mtx.h"
+ #include "util/perf/u_trace.h"
+ 
+ enum {
+@@ -1965,6 +1966,57 @@
+    return va;
+ }
+ 
++#ifdef HAVE_ORBIS_PLATFORM
++#define RADV_ORBIS_GTA_SET_TRACE_MAX 256
++
++static simple_mtx_t radv_orbis_gta_set_trace_lock = SIMPLE_MTX_INITIALIZER;
++static uint64_t radv_orbis_gta_set_trace_vas[RADV_ORBIS_GTA_SET_TRACE_MAX];
++static unsigned radv_orbis_gta_set_trace_count;
++
++static bool
++radv_orbis_gta_set_trace_first(uint64_t va)
++{
++   const char *env = getenv("ORBIS_TRACE_GTA_SET");
++   if (!env || env[0] != '1' || env[1] != '\0')
++      return false;
++
++   simple_mtx_lock(&radv_orbis_gta_set_trace_lock);
++   for (unsigned i = 0; i < radv_orbis_gta_set_trace_count; i++) {
++      if (radv_orbis_gta_set_trace_vas[i] == va) {
++         simple_mtx_unlock(&radv_orbis_gta_set_trace_lock);
++         return false;
++      }
++   }
++   if (radv_orbis_gta_set_trace_count == RADV_ORBIS_GTA_SET_TRACE_MAX) {
++      simple_mtx_unlock(&radv_orbis_gta_set_trace_lock);
++      return false;
++   }
++   radv_orbis_gta_set_trace_vas[radv_orbis_gta_set_trace_count++] = va;
++   simple_mtx_unlock(&radv_orbis_gta_set_trace_lock);
++   return true;
++}
++
++static void
++radv_orbis_trace_gta_descriptor_set(const struct radv_shader *shader, unsigned set_idx, unsigned sgpr_idx,
++                                   const struct radv_descriptor_set *set)
++{
++   if (!set || !radv_orbis_gta_set_trace_first(set->header.va))
++      return;
++
++   const struct radv_descriptor_set_layout *layout = set->header.layout;
++   mesa_logi("radv/orbis: GTA_SET stage=%u shader=0x%" PRIx64 " set=%u sgpr=%u va=0x%" PRIx64
++             " set_size=%u layout_size=%u bindings=%u",
++             shader->info.stage, shader->va, set_idx, sgpr_idx, set->header.va, set->header.size, layout->size,
++             layout->binding_count);
++   for (unsigned binding = 0; binding < layout->binding_count; binding++) {
++      const struct radv_descriptor_set_binding_layout *binding_layout = &layout->binding[binding];
++      mesa_logi("radv/orbis: GTA_SET_BIND va=0x%" PRIx64 " binding=%u type=%u offset=0x%x size=%u array=%u",
++                set->header.va, binding, binding_layout->type, binding_layout->offset, binding_layout->size,
++                binding_layout->array_size);
++   }
++}
++#endif
++
+ static void
+ radv_emit_descriptors_per_stage(const struct radv_device *device, struct radv_cmd_stream *cs,
+                                 const struct radv_shader *shader, const struct radv_descriptor_state *descriptors_state)
+@@ -2008,6 +2060,11 @@
+             radeon_set_sh_reg_seq(sh_offset, count);
+ 
+             for (int i = 0; i < count; i++) {
++#ifdef HAVE_ORBIS_PLATFORM
++               const unsigned set_idx = start + i;
++               radv_orbis_trace_gta_descriptor_set(shader, set_idx, loc->sgpr_idx + i,
++                                                   descriptors_state->sets[set_idx]);
++#endif
+                const uint64_t va = radv_descriptor_get_va(descriptors_state, start + i);
+ 
+                radeon_emit(va);

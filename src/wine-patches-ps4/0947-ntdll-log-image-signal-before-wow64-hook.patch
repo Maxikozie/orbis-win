@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: log Oblivion image fault before WoW64 hook
+
+The PS4 signal trace added after segv_hook is skipped whenever the WoW64
+backend consumes a signal. Log only faults in Oblivion's known image range
+before invoking the hook, including the raw page-fault error code. This
+distinguishes an instruction-fetch protection fault from a later Wine fault.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2823,5 +2823,32 @@ static void __attribute__((used)) segv_handler( int signal, siginfo_t *siginfo,
+     EXCEPTION_RECORD rec = { .ExceptionAddress = (void *)RIP_sig(sigcontext) };
+ 
+ #ifdef __PROSPERO__
++    /* Record the raw Orbis page-fault context before wowprospero's hook can
++     * consume it. The image was granted RX by sceKernelMprotect, but Wine
++     * still reports a read AV at Oblivion's EIP. The x86 page-fault error
++     * code distinguishes instruction fetch (bit 4) from data read/write. */
++    if ((signal == SIGBUS || signal == SIGSEGV) && siginfo &&
++        (uintptr_t)siginfo->si_addr >= 0x004a0000 &&
++        (uintptr_t)siginfo->si_addr < 0x004b0000)
++    {
++        static unsigned int trace_count;
++        unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++        if (n <= 4)
++        {
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            char line[256];
++
++            snprintf( line, sizeof(line),
++                      "ntdll ps4-image-fault n=%u sig=%d code=%d addr=%p rip=%llx rsp=%llx cs=%x ss=%x flags=%llx trap=%lld err=%llx\n",
++                      n, signal, siginfo->si_code, siginfo->si_addr,
++                      (unsigned long long)RIP_sig(sigcontext),
++                      (unsigned long long)RSP_sig(sigcontext),
++                      CS_sig(sigcontext), SS_sig(sigcontext),
++                      (unsigned long long)EFL_sig(sigcontext),
++                      (long long)TRAP_sig(sigcontext),
++                      (unsigned long long)ERROR_sig(sigcontext) );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
+     if (segv_hook && segv_hook( siginfo, _sigcontext )) return;
+     /* The native WoW64 path returned from iretq at 0x7bef14c9, but only the
+-- 
+2.43.0

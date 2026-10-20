@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] server: log WoW64 registers at select-loop checkpoints
+
+The stuck guest PC maps to RtlUserThreadStart. Log its integer registers and
+flags alongside EIP/ESP so the next run can show whether its entry target and
+argument are valid or whether the sampled context is stale.
+
+diff --git a/server/thread.c b/server/thread.c
+index 979e4f7ccd..6d9e29e996 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -1148,8 +1148,9 @@ void ps5_trace_guest_context( struct thread *thread )
+     static int probe[2] = { -1, -1 };
+     uintptr_t teb = (uintptr_t)thread->teb, cpu = 0;
+     unsigned short machine = 0;
+-    unsigned int eip = 0, esp = 0;
+-    int slot_ok = 0, machine_ok = 0, context_ok = 0, i, used;
++    unsigned int eip = 0, esp = 0, eax = 0, ebx = 0, ecx = 0, edx = 0;
++    unsigned int esi = 0, edi = 0, ebp = 0, eflags = 0;
++    int slot_ok = 0, machine_ok = 0, context_ok = 0, regs_ok = 0, i, used;
+     char line[256];
+ 
+     if (probe[0] == -1 && pipe( probe )) probe[0] = probe[1] = -1;
+@@ -1161,6 +1162,24 @@ void ps5_trace_guest_context( struct thread *thread )
+     if (machine_ok)
+         context_ok = ps5_peek( probe, cpu + 4 + 0xb8, &eip, sizeof(eip) ) &&
+                      ps5_peek( probe, cpu + 4 + 0xc4, &esp, sizeof(esp) );
++    if (machine_ok)
++        regs_ok = ps5_peek( probe, cpu + 4 + 0xb0, &eax, sizeof(eax) ) &&
++                  ps5_peek( probe, cpu + 4 + 0xa4, &ebx, sizeof(ebx) ) &&
++                  ps5_peek( probe, cpu + 4 + 0xac, &ecx, sizeof(ecx) ) &&
++                  ps5_peek( probe, cpu + 4 + 0xa8, &edx, sizeof(edx) ) &&
++                  ps5_peek( probe, cpu + 4 + 0xa0, &esi, sizeof(esi) ) &&
++                  ps5_peek( probe, cpu + 4 + 0x9c, &edi, sizeof(edi) ) &&
++                  ps5_peek( probe, cpu + 4 + 0xb4, &ebp, sizeof(ebp) ) &&
++                  ps5_peek( probe, cpu + 4 + 0xc0, &eflags, sizeof(eflags) );
++
++    if (regs_ok)
++    {
++        char regs[192];
++        snprintf( regs, sizeof(regs),
++                  "wineserver guestregs tid=%04x eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x eflags=%08x\n",
++                  thread->id, eax, ebx, ecx, edx, esi, edi, ebp, eflags );
++        sceKernelDebugOutText( 0, regs );
++    }
+ 
+     used = snprintf( line, sizeof(line),
+                      "wineserver guest tid=%04x teb=%llx slot=%d cpu=%llx machine=%04x eip=%08x esp=%08x stack=",

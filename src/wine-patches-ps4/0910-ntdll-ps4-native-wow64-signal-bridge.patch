@@ -1,0 +1,53 @@
+Subject: ntdll: enable native WoW64 signal bridge on PS4 after FS probe
+
+PS4 provides the ordinary libc sigaction path, unlike the measured PS5 raw
+libkernel resolver. Keep the native backend fail-closed: route installed
+signals through the host-FS-restoring entry wrappers and advertise capabilities
+only when sysarch(AMD64_GET_FSBASE) succeeds with a nonzero host base, while
+retaining the existing selector and xstate checks. PS5 keeps its raw-entry
+requirements unchanged.
+
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 6ab16dc877..c00fc39e59 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -1049,7 +1049,13 @@ PW_NATIVE_SIGNAL_ENTRY( usr1 )
+ PW_NATIVE_SIGNAL_ENTRY( trap )
+ PW_NATIVE_SIGNAL_ENTRY( segv )
+ #undef PW_NATIVE_SIGNAL_ENTRY
++#if defined(__ORBIS__) && !defined(__PROSPERO_REAL__)
++/* PS4 uses libc sigaction, but native guest mode still needs to restore the
++ * host FS base before entering Wine's C signal handlers. */
++#define PW_SIGNAL_HANDLER(name) pw_native_##name##_handler
++#else
+ #define PW_SIGNAL_HANDLER(name) (pw_native_kernel.sigaction ? pw_native_##name##_handler : name##_handler)
++#endif
+ #else
+ #define PW_SIGNAL_HANDLER(name) name##_handler
+ #endif
+@@ -1141,12 +1147,25 @@ static unsigned int pw_native_signal_xstate_size( const XSAVE_AREA_HEADER *xs )
+ static unsigned int pw_native_ready_caps(void)
+ {
+     XSAVE_AREA_HEADER standard = {0};
++#if defined(__ORBIS__) && !defined(__PROSPERO_REAL__)
++    void *host_fs = NULL;
++
++    /* The PS4 does not expose the PS5 raw libkernel signal entry points.
++     * Its ordinary sigaction registrations have succeeded above; verify the
++     * primitive used by our signal wrappers before advertising native mode. */
++    if (cs64_sel != 0x43 || ds64_sel != 0x3b ||
++        user_shared_data->XState.EnabledFeatures != 7 ||
++        !pw_native_signal_xstate_size( &standard )) return 0;
++    if (amd64_get_fsbase( &host_fs ) || !host_fs) return 0;
++    return 7; /* libc sigaction, host-FS-safe entry, corrected FP/xstate context */
++#else
+     if (!pw_native_kernel.sigaction || !pw_native_kernel.sigreturn || !pw_native_kernel.sysarch)
+         return 0;
+     if (cs64_sel != 0x43 || ds64_sel != 0x3b ||
+         user_shared_data->XState.EnabledFeatures != 7 ||
+         !pw_native_signal_xstate_size( &standard )) return 0;
+     return 7; /* raw entries, host FS before C, corrected FP/xstate context */
++#endif
+ }
+ #endif
+ 

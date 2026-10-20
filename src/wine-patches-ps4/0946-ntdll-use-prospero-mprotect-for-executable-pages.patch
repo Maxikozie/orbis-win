@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: use Prospero mprotect wrapper for executable pages
+
+On PS4, mprotect_range() changes image-page protections through
+mprotect_exec(), which currently calls libc mprotect directly and bypasses
+host_mprotect/__wine_ps5_mprotect. Route those changes through host_mprotect
+so executable mappings use sceKernelMprotect and the bounded PS4 result trace.
+On other platforms host_mprotect is still the libc mprotect alias.
+
+---
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 0000000..0000000 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2327,10 +2327,10 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
+     if (force_exec_prot && (unix_prot & PROT_READ) && !(unix_prot & PROT_EXEC))
+     {
+         TRACE( "forcing exec permission on %p-%p\n", base, (char *)base + size - 1 );
+-        if (!mprotect( base, size, unix_prot | PROT_EXEC )) return 0;
++        if (!host_mprotect( base, size, unix_prot | PROT_EXEC )) return 0;
+         /* exec + write may legitimately fail, in that case fall back to write only */
+         if (!(unix_prot & PROT_WRITE)) return -1;
+     }
+ 
+-    return mprotect( base, size, unix_prot );
++    return host_mprotect( base, size, unix_prot );
+ }
+-- 
+2.43.0

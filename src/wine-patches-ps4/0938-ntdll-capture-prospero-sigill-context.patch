@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: capture raw Prospero SIGILL context
+
+The native SIGSYS pass-through stopped the previous Wine dispatcher loop, but
+SIGILL reports still showed inconsistent registers and a stale syscall frame.
+Record the first eight raw SIGILL contexts, including signal metadata, selectors,
+stack bounds, and the latest frame, before Wine rewrites the exception context.
+This diagnostic does not change fault handling.
+
+---
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2876,6 +2876,36 @@
+     }
+ #endif
+     data = init_handler( sigcontext );
++#ifdef __PROSPERO__
++    /* A SIGILL after the native SIGSYS pass-through may mean that the kernel
++     * returned to bad code, or that Wine is interpreting a stale syscall
++     * frame as a fault in the syscall path. Capture the raw signal context and
++     * frame bounds before setup_raise_exception() can rewrite either one. */
++    if (signal == SIGILL)
++    {
++        static unsigned int sigill_count;
++        unsigned int n = __atomic_add_fetch( &sigill_count, 1, __ATOMIC_RELAXED );
++        if (n <= 8)
++        {
++            struct syscall_frame *frame = get_syscall_frame( data );
++            ERR_(seh)( "Prospero SIGILL n=%u code=%d errno=%d addr=%p rip=%016lx rsp=%016lx cs=%04x ss=%04x trap=%016lx err=%016lx flags=%016lx\n",
++                      n, siginfo ? siginfo->si_code : 0, siginfo ? siginfo->si_errno : 0,
++                      siginfo ? siginfo->si_addr : NULL, (unsigned long)RIP_sig(sigcontext),
++                      (unsigned long)RSP_sig(sigcontext), CS_sig(sigcontext), SS_sig(sigcontext),
++                      (unsigned long)TRAP_sig(sigcontext), (unsigned long)ERROR_sig(sigcontext),
++                      (unsigned long)EFL_sig(sigcontext) );
++            ERR_(seh)( "Prospero SIGILL regs rax=%016lx rbx=%016lx rcx=%016lx rdx=%016lx rsi=%016lx rdi=%016lx\n",
++                      (unsigned long)RAX_sig(sigcontext), (unsigned long)RBX_sig(sigcontext),
++                      (unsigned long)RCX_sig(sigcontext), (unsigned long)RDX_sig(sigcontext),
++                      (unsigned long)RSI_sig(sigcontext), (unsigned long)RDI_sig(sigcontext) );
++            ERR_(seh)( "Prospero SIGILL frame=%p frame_id=%08x frame_rip=%016lx teb=%p kernel_stack=%p inside_syscall=%d\n",
++                      frame, frame ? frame->syscall_id : 0,
++                      frame ? (unsigned long)frame->rip : 0, data->teb,
++                      data->teb ? get_kernel_stack( data ) : NULL,
++                      is_inside_syscall( data, RSP_sig(sigcontext) ) );
++        }
++    }
++#endif
+     save_context( data, &context, sigcontext );
+ 
+     switch(TRAP_sig(sigcontext))
+-- 
+2.43.0

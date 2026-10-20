@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Subject: [PATCH] wine64: pass wait watchdog flag into Wine's environment
+
+On PS4 the title and Wine PRX have separate environment tables. Setting the
+watchdog variable with the title's libc setenv does not reach the in-process
+server. Add it to PwWineStartConfig.extra_env so pw_wine_start_environment
+writes it into the PRX environment before __wine_main starts.
+
+---
+diff --git a/src/pw_wine_start.h b/src/pw_wine_start.h
+--- a/src/pw_wine_start.h
++++ b/src/pw_wine_start.h
+@@ -18,5 +18,5 @@
+ enum {
+-    PW_WINE_START_MAX_ENV = 16,
++    PW_WINE_START_MAX_ENV = 17,
+     /* wine, the executable and every word a profile's arguments may split into */
+     PW_WINE_START_MAX_ARGS = 2 + PW_WINE_LAUNCH_WORDS,
+     /* Stages, reported so a failed start names where it stopped. */
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -960,4 +960,4 @@ int main(int argc, char **argv)
+     static char diagnostic_winedebug[PW_GAME_WINEDEBUG_CAPACITY + 64];
+     enum { WINE64_FIXED_ENV_COUNT = 6,
+-           WINE64_PROFILE_ENV_CAPACITY = 7 + PW_GAME_RUNTIME_ENV_MAX + PW_GAME_CPU_ENV_MAX };
++           WINE64_PROFILE_ENV_CAPACITY = 8 + PW_GAME_RUNTIME_ENV_MAX + PW_GAME_CPU_ENV_MAX };
+     static PwWineStartEnv extra[WINE64_FIXED_ENV_COUNT + WINE64_PROFILE_ENV_CAPACITY] = {
+@@ -1138,5 +1138,6 @@ int main(int argc, char **argv)
+             PS5LOG_LOG("PW_WINE64 nGlide resolution=desktop registry=%d", configured);
+         }
+-        if (PW_WINE64_WAIT_WATCHDOG) setenv("WINE_PS5_WAIT_WATCHDOG", "1", 1);
++        if (PW_WINE64_WAIT_WATCHDOG)
++            extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_PS5_WAIT_WATCHDOG", "1" };
+         /* [application] arguments follow the executable in Wine's argv. */
+         int words = pw_wine_launch_split(game->app.arguments, argument_words,
+-- 
+2.43.0

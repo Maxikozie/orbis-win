@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Mon, 19 Oct 2026 08:40:00 -0700
+Subject: [PATCH] server: trace PS4 wait results during slow startup
+
+Oblivion repeatedly reissues interruptible one-handle waits during its
+multi-minute startup. The existing entry trace shows millions of requests but
+not why each wait returns. Log the result, pending state, and object type at
+bounded power-of-two checkpoints, avoiding per-request logging overhead.
+
+---
+ server/thread.c | 45 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+
+diff --git a/server/thread.c b/server/thread.c
+index a7922f31df..01286b79b6 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -2326,6 +2326,51 @@ DECL_HANDLER(select)
+ 
+     reply->signaled = select_on( &select_op, op_size, req->cookie, req->flags, req->timeout );
+ 
++#ifdef __PROSPERO__
++    /* A PS4 Oblivion startup repeatedly reissues interruptible waits on one
++     * handle. Sample the result path sparsely so we can tell a real signaled
++     * event from a wait that keeps returning early, without enabling +server
++     * tracing for every request. */
++    if (select_op.op == SELECT_WAIT && op_size >= offsetof( union select_op, wait.handles ) + sizeof(obj_handle_t))
++    {
++        static unsigned int ps4_select_result_count;
++        unsigned int n = __atomic_add_fetch( &ps4_select_result_count, 1, __ATOMIC_RELAXED );
++
++        if (n <= 8 || !(n & (n - 1)))
++        {
++            struct object *object;
++            unsigned int type_index = 0xffffffff, type_len = 0;
++            char type_name[24] = "?";
++            char line[256];
++            unsigned int handle = select_op.wait.handles[0];
++            extern int sceKernelDebugOutText( int channel, const char *text );
++
++            if ((object = get_handle_obj( current->process, handle, 0, NULL )))
++            {
++                if (object->ops->type)
++                {
++                    const struct unicode_str *name = &object->ops->type->name;
++                    type_index = name->len ? object->ops->type->index : 0xfffffffe;
++                    type_len = name->len / sizeof(WCHAR);
++                    if (type_len >= sizeof(type_name)) type_len = sizeof(type_name) - 1;
++                    for (unsigned int i = 0; i < type_len; ++i)
++                        type_name[i] = name->str[i] < 0x80 ? (char)name->str[i] : '?';
++                    type_name[type_len] = 0;
++                }
++                release_object( object );
++            }
++
++            snprintf( line, sizeof(line),
++                      "wineserver select-result n=%u tid=%04x handle=%04x type=%s type_id=%u flags=%08x timeout=%llx signaled=%u error=%08x waiting=%d state=%d suspend=%d proc_suspend=%d cookie=%llx\n",
++                      n, current->id, handle, type_name, type_index, req->flags,
++                      (unsigned long long)req->timeout, reply->signaled, get_error(),
++                      !!current->wait, current->state, current->suspend,
++                      current->process->suspend, (unsigned long long)req->cookie );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
++#endif
++
+ #ifdef __PROSPERO__
+     if (!req->timeout && !req->size && ctx_count == 2 &&
+         ((const struct context_data *)((const char *)(result + 1) + req->size))->machine == 0x8664)

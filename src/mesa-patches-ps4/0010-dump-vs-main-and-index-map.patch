@@ -1,0 +1,88 @@
+Subject: [PATCH] orbis: capture the main vertex shader and index mapping
+
+The program base at DRAW_INDEX_2 can be RADV's VS prolog, which returns to the
+main VS through the VS_PROLOG_INPUTS user data. Capture that pointer and resolve
+the main shader address, then dump its bytes separately. Also report whether the
+indexed draw's index buffer belongs to a live mapping.
+
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -9599,6 +9599,8 @@
+             uint32_t draw_dword = UINT32_MAX;
+             uint32_t draw_index_count = 0;
+             uint64_t draw_index_va = 0;
++            uint64_t vs_prolog_inputs = 0;
++            uint64_t draw_vs_prolog_inputs = 0;
+ 
+             for (uint32_t i = 0; i + 1 < scan_to && i + 1 < hs->dwords;) {
+                const uint32_t hdr = hs->stream[i];
+@@ -9613,6 +9615,11 @@
+                      for (unsigned st = 0; st < ARRAY_SIZE(stages); ++st)
+                         if (reg == stages[st].sh)
+                            stages[st].pgm = (uint64_t)hs->stream[k] << 8;
++                     if (reg == 0x04e)
++                        vs_prolog_inputs = (vs_prolog_inputs & 0xffffffff00000000ull) | hs->stream[k];
++                     else if (reg == 0x04f)
++                        vs_prolog_inputs = (vs_prolog_inputs & 0x00000000ffffffffull) |
++                                           ((uint64_t)hs->stream[k] << 32);
+                   }
+                } else if (op == 0x27 && cnt >= 6 && i + cnt <= hs->dwords) {
+                   /* Snapshot the graphics program bases immediately before this indexed draw. The
+@@ -9621,6 +9628,7 @@
+                   draw_index_va = (uint64_t)hs->stream[i + 2] |
+                                   ((uint64_t)(hs->stream[i + 3] & 0xFFFFu) << 32);
+                   draw_index_count = hs->stream[i + 4];
++                  draw_vs_prolog_inputs = vs_prolog_inputs;
+                   for (unsigned st = 0; st < ARRAY_SIZE(stages); ++st) {
+                      draw_stages[st].name = stages[st].name;
+                      draw_stages[st].pgm = stages[st].pgm;
+@@ -9718,6 +9726,16 @@
+                          "%u indices from 0x%" PRIx64 " (PS 0x%" PRIx64 ", VS 0x%" PRIx64 ")",
+                          hung, draw_dword, draw_index_count, draw_index_va,
+                          draw_stages[0].pgm, draw_stages[1].pgm);
++               uint64_t index_lo = 0, index_hi = 0;
++               uint32_t index_bo = 0;
++               if (orbis_va_mapping_of(draw_index_va, &index_lo, &index_hi, &index_bo))
++                  mesa_logi("orbis-drm: submit #%" PRIu64 " DRAW_INDEX_2 index buffer is in BO %u mapping "
++                            "0x%" PRIx64 "..0x%" PRIx64 " (%" PRIu64 " bytes after base)",
++                            hung, index_bo, index_lo, index_hi, index_hi - draw_index_va);
++               else
++                  mesa_loge("orbis-drm: submit #%" PRIu64 " DRAW_INDEX_2 index buffer 0x%" PRIx64
++                            " is not in a live mapping", hung, draw_index_va);
++
+                for (unsigned st = 0; st < 2; ++st) {
+                   const uint64_t pgm = draw_stages[st].pgm;
+                   if (pgm == 0)
+@@ -9734,7 +9752,31 @@
+                   orbis_dump_ib(hung, (const uint32_t *)(uintptr_t)pgm, 128, draw_stages[st].name, false);
+                }
+ 
+-
++               if (draw_vs_prolog_inputs != 0) {
++                  uint64_t main_vs = draw_vs_prolog_inputs;
++                  const char *source = "direct VS prolog input";
++                  if (orbis_va_is_mapped(draw_vs_prolog_inputs, 8)) {
++                     const uint32_t *input = (const uint32_t *)(uintptr_t)draw_vs_prolog_inputs;
++                     const uint64_t indirect = (uint64_t)input[0] | ((uint64_t)input[1] << 32);
++                     if ((indirect & 0xffu) == 0 && indirect >= orbis_va_base &&
++                         indirect + 512 <= orbis_va_end && orbis_va_is_mapped(indirect, 512)) {
++                        main_vs = indirect;
++                        source = "VS prolog input table";
++                     }
++                  }
++                  mesa_logi("orbis-drm: submit #%" PRIu64 " draw VS prolog input 0x%" PRIx64
++                            " resolves to main VS 0x%" PRIx64 " (%s)",
++                            hung, draw_vs_prolog_inputs, main_vs, source);
++                  if (main_vs >= orbis_va_base && main_vs + 512 <= orbis_va_end &&
++                      orbis_va_is_mapped(main_vs, 512)) {
++                     mesa_logi("orbis-drm: submit #%" PRIu64 " DRAW_INDEX_2 main VS at 0x%" PRIx64
++                               ": first 128 dwords follow", hung, main_vs);
++                     orbis_dump_ib(hung, (const uint32_t *)(uintptr_t)main_vs, 128, "VS_MAIN", false);
++                  } else {
++                     mesa_logw("orbis-drm: submit #%" PRIu64 " resolved main VS 0x%" PRIx64
++                               " is not fully inside a live mapping; not dumping shader bytes", hung, main_vs);
++                  }
++               }
+             }
+ 
+             unsigned dumped = 0;

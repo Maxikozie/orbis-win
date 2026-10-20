@@ -1,0 +1,26 @@
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -2170,7 +2170,22 @@
+             } else {
+                mesa_logi("orbis-drm:   SH 0x%03x + %u -> 0x%" PRIx64 ":", reg, k - 2, va);
+             }
+-            for (unsigned r = 0; r < 2; ++r)
++            /* A sampled-image descriptor set in the fatal GTA draw has three 96-byte bindings, but the normal
++             * sixteen-dword peek stops before bindings 1 and 2. When explicitly armed, recognize the known
++             * binding-0 image descriptor at the set base and print the complete 288-byte set. This is still
++             * bounded to a live mapping and to a small number of matching sets. */
++            static unsigned gta_set_dumps;
++            const bool dump_gta_set = getenv("ORBIS_DUMP_GTA_SET") && reg == 0x00e && gta_set_dumps < 8 &&
++                                      orbis_va_is_mapped(va, 288) && q[2] == 0x401fc07fu &&
++                                      q[3] == 0x90d00facu && q[4] == 0x000fe000u && q[7] == 0xfffff1ffu;
++            const unsigned dump_dwords = dump_gta_set ? 72 : 16;
++            if (dump_gta_set) {
++               ++gta_set_dumps;
++               mesa_logi("orbis-drm: GTA_SET_DUMP submit #%" PRIu64 " SH 0x%03x va=0x%" PRIx64
++                         " bytes=288 bindings=0,1,2",
++                         seq, reg, va);
++            }
++            for (unsigned r = 0; r < dump_dwords / 8; ++r)
+                mesa_logi("orbis-drm:     %08x %08x %08x %08x %08x %08x %08x %08x", q[r * 8 + 0], q[r * 8 + 1],
+                          q[r * 8 + 2], q[r * 8 + 3], q[r * 8 + 4], q[r * 8 + 5], q[r * 8 + 6], q[r * 8 + 7]);
+          }

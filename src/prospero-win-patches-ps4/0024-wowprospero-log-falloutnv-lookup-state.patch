@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 12 Oct 2026 19:30:00 -0700
+Subject: [PATCH] wowprospero: log FalloutNV lookup manager state
+
+The source object passed to FalloutNV's RTTI conversion is null. The game's
+lookup routine returns null if its singleton is not ready or entry 0x15 is
+empty. Log the relocated singleton, readiness flags, and table entry at the
+fault to distinguish those cases.
+---
+ wine/wowprospero/cpu.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
+--- a/wine/wowprospero/cpu.c
++++ b/wine/wowprospero/cpu.c
+@@ -409,5 +409,22 @@
+                                  words[5], words[6], words[7] );
+                         else ERR( "guest frame2 object %08x: bytes unavailable\n", object );
+                     }
++                    /* FalloutNV 1.4.0.525's lookup at 0x58db10 reads this
++                     * relocated singleton, tests manager+8 bit 3, then
++                     * reads entry 0x15 at manager+0x6c. */
++                    {
++                        UINT manager, flags = 0, slot = 0;
++                        if (read_guest_bytes( 0x132a80c, &manager, sizeof(manager) ))
++                        {
++                            if (manager)
++                            {
++                                read_guest_bytes( manager + 8, &flags, sizeof(flags) );
++                                read_guest_bytes( manager + 0x6c, &slot, sizeof(slot) );
++                            }
++                            ERR( "guest frame2 lookup manager %08x flags %08x slot15 %08x\n",
++                                 manager, flags, slot );
++                        }
++                        else ERR( "guest frame2 lookup singleton unavailable\n" );
++                    }
+                 }
+                 if (pair[0] <= frame || pair[0] - frame > 0x100000) break;
+-- 
+2.45.0

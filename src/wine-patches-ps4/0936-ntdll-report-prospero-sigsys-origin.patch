@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: report the Prospero SIGSYS origin
+
+The Prospero SIGSYS route now reaches Wine's dispatcher, but Oblivion enters a
+repeated STATUS_ILLEGAL_INSTRUCTION loop from libSceLibcInternal. Log the
+signal metadata and current Wine syscall frame before dispatch so we can tell
+whether this SIGSYS came from a Windows syscall stub or from a native PS4
+system call.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -3263,6 +3263,13 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+     struct thread_data *data = init_handler( sigcontext );
+     struct syscall_frame *frame = get_syscall_frame( data );
+ 
++#ifdef __PROSPERO__
++    ERR_(seh)("Prospero SIGSYS code=%d errno=%d rax=%016lx rip=%016lx frame=%p frame_id=%08x frame_rip=%016lx\n",
++              siginfo ? siginfo->si_code : 0, siginfo ? siginfo->si_errno : 0,
++              (unsigned long)RAX_sig(sigcontext), (unsigned long)RIP_sig(sigcontext), frame,
++              frame ? frame->syscall_id : 0, frame ? (unsigned long)frame->rip : 0);
++#endif
++
+     TRACE_(seh)("SIGSYS, rax %#lx, rip %#lx.\n", (long)RAX_sig(sigcontext), (long)RIP_sig(sigcontext));
+ 
+ #ifdef __linux__
+-- 
+2.43.0

@@ -33,7 +33,7 @@ root=/home/zpeirce/ps4-gladius
 bundle=$root/sdk/orbis-sdk-v1
 oo=$bundle/sdk
 sdk=$root/build/ps4-wine-sdk
-pw=$root/prospero-win
+pw=${PW_ROOT:-$root/prospero-win}
 prx=$pw/.deps/wine-ps5/prx
 # The local Mesa implements low CPU aliases validated by vkmapprobe on PS4.
 # Override PW_RADV_MESA_SRC/PW_RADV_MESA_BUILD for an explicit alternate build.

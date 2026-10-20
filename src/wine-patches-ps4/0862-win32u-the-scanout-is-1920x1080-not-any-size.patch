@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: prospero-win <prospero-win@invalid>
-Subject: [PATCH] win32u: Answer with the scanout's extent, not the generic one.
+Subject: [PATCH] win32u: Use the headless scanout extent without HWND size checks
 
 0861 stopped overwriting the host's extents with the window's client rect,
 and the swapchain was refused again -- but this time the refusal says what
@@ -97,3 +97,27 @@ index cddf9eaf41..74bc65b2ce 100644
      (void)client_rect;
  #else
      /* Update the image extents to match what the Win32 WSI would provide. */
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -2003,0 +2004 @@
++#ifndef __PROSPERO__
+@@ -2005,0 +2007 @@
++#endif
+@@ -2012,0 +2015 @@
++#ifndef __PROSPERO__
+@@ -2019,0 +2023 @@
++#endif
+@@ -2030,0 +2035 @@
++#ifndef __PROSPERO__
+@@ -2032,0 +2038 @@
++#endif
+@@ -2038,0 +2045 @@
++#ifndef __PROSPERO__
+@@ -2045,0 +2053 @@
++#endif
+@@ -2107,0 +2116 @@
++#ifndef __PROSPERO__
+@@ -2114,0 +2124 @@
++#endif

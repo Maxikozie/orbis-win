@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace Oblivion host protection calls
+
+The 0948 trace confirms that mprotect_range() covers the instruction-fetch
+fault at 0x004a8330, but its size format is unsupported by Wine's debug
+formatter. Print the exact target-page vprot, each host protection request,
+and its return value with supported format specifiers.
+---
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2324,15 +2324,27 @@
+  */
+ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
+ {
++    BOOL trace_oblivion = (ULONG_PTR)base <= 0x004a8330 &&
++                          (ULONG_PTR)base + size > 0x004a8330;
++    int rc;
++
+     if (force_exec_prot && (unix_prot & PROT_READ) && !(unix_prot & PROT_EXEC))
+     {
+         TRACE( "forcing exec permission on %p-%p\n", base, (char *)base + size - 1 );
+-        if (!host_mprotect( base, size, unix_prot | PROT_EXEC )) return 0;
++        rc = host_mprotect( base, size, unix_prot | PROT_EXEC );
++        if (trace_oblivion)
++            ERR( "PS4_OBLIVION mprotect-exec addr=%p size=%lu prot=%x rc=%d forced=1\n",
++                 base, (unsigned long)size, unix_prot | PROT_EXEC, rc );
++        if (!rc) return 0;
+         /* exec + write may legitimately fail, in that case fall back to write only */
+         if (!(unix_prot & PROT_WRITE)) return -1;
+     }
+ 
+-    return host_mprotect( base, size, unix_prot );
++    rc = host_mprotect( base, size, unix_prot );
++    if (trace_oblivion)
++        ERR( "PS4_OBLIVION mprotect-exec addr=%p size=%lu prot=%x rc=%d forced=0\n",
++             base, (unsigned long)size, unix_prot, rc );
++    return rc;
+ }
+ 
+ 
+@@ -2352,9 +2364,13 @@
+                           (ULONG_PTR)base + size > 0x004a8330;
+ 
+     if (trace_oblivion)
+-        ERR( "PS4_OBLIVION mprotect-range enter base=%p size=%Ix set=%02x clear=%02x page=%p host-vprot=%02x prot=%x\n",
+-             base, size, set, clear, addr, get_host_page_vprot( addr ),
+-             get_unix_prot( (get_host_page_vprot( addr ) & ~clear) | set ) );
++    {
++        char *fault_page = ROUND_ADDR( (char *)0x004a8330, host_page_mask );
++        BYTE fault_vprot = get_host_page_vprot( fault_page );
++        ERR( "PS4_OBLIVION mprotect-range enter base=%p size=%lu set=%02x clear=%02x fault-page=%p fault-vprot=%02x target-prot=%x\n",
++             base, (unsigned long)size, set, clear, fault_page, fault_vprot,
++             get_unix_prot( (fault_vprot & ~clear) | set ) );
++    }
+ 
+     size = ROUND_SIZE( base, size, host_page_mask );
+ 
+@@ -2368,8 +2384,8 @@
+         if (mprotect_exec( addr, count * host_page_size, prot ))
+         {
+             if (trace_oblivion)
+-                ERR( "PS4_OBLIVION mprotect-range fail addr=%p size=%Ix prot=%x\n",
+-                     addr, count * host_page_size, prot );
++                ERR( "PS4_OBLIVION mprotect-range fail addr=%p size=%lu prot=%x\n",
++                     addr, (unsigned long)(count * host_page_size), prot );
+             return -1;
+         }
+         addr += count * host_page_size;
+@@ -2378,8 +2394,8 @@
+     }
+     rc = mprotect_exec( addr, count * host_page_size, prot );
+     if (trace_oblivion)
+-        ERR( "PS4_OBLIVION mprotect-range leave addr=%p size=%Ix prot=%x rc=%Ix\n",
+-             addr, count * host_page_size, prot, rc );
++        ERR( "PS4_OBLIVION mprotect-range leave addr=%p size=%lu prot=%x rc=%d\n",
++             addr, (unsigned long)(count * host_page_size), prot, rc );
+     return rc;
+ }
+ 
+-- 
+2.43.0

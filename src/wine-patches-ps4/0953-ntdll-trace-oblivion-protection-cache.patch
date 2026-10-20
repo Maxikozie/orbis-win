@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace Oblivion protection cache decisions
+
+Record bounded protection requests covering the failing image page, including
+requests skipped by Wine's host-protection cache. This distinguishes a missed
+host protection update from a permission change outside virtual.c.
+
+---
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -264,19 +264,30 @@
+     return ret;
+ }
+ 
+-static inline int counted_mprotect( void *addr, size_t len, int prot )
++static inline int counted_mprotect( const char *caller, void *addr, size_t len, int prot )
+ {
++    static LONG trace_oblivion_protect_count;
++    BOOL trace = trace_oblivion_mapping_range( addr, len ) &&
++                 __atomic_add_fetch( &trace_oblivion_protect_count, 1, __ATOMIC_RELAXED ) <= 64;
++    BOOL unchanged = host_prot_unchanged( addr, len, prot );
+     int ret;
+ 
+-    if (host_prot_unchanged( addr, len, prot ))
++    if (trace)
++        ERR( "PS4_OBLIVION protect enter caller=%s addr=%p len=%lx prot=%#x cache=%d\n",
++             caller, addr, (unsigned long)len, prot, unchanged );
++    if (unchanged)
+     {
+         vm_stat_add( VM_STAT_MPROTECT_SKIPPED, 1 );
++        if (trace) ERR( "PS4_OBLIVION protect result caller=%s skipped=1\n", caller );
+         return 0;
+     }
+     vm_stat_add( VM_STAT_MPROTECT, 1 );
+     vm_stat_add( VM_STAT_MPROTECT_BYTES, len );
+     if (!(ret = host_mprotect( addr, len, prot ))) host_prot_record( addr, len, prot | HOST_PROT_KNOWN );
+     else host_prot_record( addr, len, 0 );
++    if (trace)
++        ERR( "PS4_OBLIVION protect result caller=%s skipped=0 rc=%d errno=%d\n",
++             caller, ret, ret ? errno : 0 );
+     return ret;
+ }
+ 
+@@ -353,7 +364,7 @@
+ 
+ #define mmap(addr,len,prot,flags,fd,off) counted_mmap( __func__, addr, len, prot, flags, fd, off )
+ #define munmap(addr,len) counted_munmap( __func__, addr, len )
+-#define mprotect counted_mprotect
++#define mprotect(addr,len,prot) counted_mprotect( __func__, addr, len, prot )
+ 
+ /***********************************************************************
+  *           __wine_virtual_stats

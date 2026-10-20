@@ -1,0 +1,24 @@
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -2100,6 +2100,21 @@
+                                   "unmaps anything.",
+                                   seq, va, reg, base, base - blo, bwhat, bhi - blo);
+                   }
++
++                  /* A descriptor-shaped pair is only a candidate until its format is decoded. Report whether
++                   * its base currently belongs to a live BO; this distinguishes a plausible resource from a
++                   * stale or nonsensical address without relying on the address-reuse-prone freed-range ring. */
++                  static unsigned said_candidates;
++                  if (base != 0 && verbose && orbis_budget(&said_candidates, 64)) {
++                     uint64_t live_lo = 0, live_hi = 0;
++                     uint32_t live_bo = 0;
++                     if (orbis_va_mapping_of(base, &live_lo, &live_hi, &live_bo))
++                        mesa_logi("orbis-drm:   V# candidate[%u] base 0x%" PRIx64 " -> live BO %u, offset 0x%" PRIx64
++                                  ", 0x%" PRIx64 " bytes remain", d, base, live_bo, base - live_lo, live_hi - base);
++                     else
++                        mesa_logi("orbis-drm:   V# candidate[%u] base 0x%" PRIx64 " is not in a live BO mapping", d,
++                                  base);
++                  }
+                }
+             }
+ 

@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: report the pending server reply during WOW64 suspend checks
+
+When a native WOW64 thread is interrupted while reading a Wine server reply,
+include its current request and read progress in the bounded SIGUSR1 trace.
+This identifies the operation whose 64-byte reply header remains outstanding
+without logging every normal server round trip.
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index e4e6ed92d3..0d9515c390 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -258,11 +258,27 @@ static unsigned int send_request( int request_fd, const struct __server_request_
+ static void read_reply_data( int reply_fd, void *buffer, size_t size )
+ {
+     int ret;
++#ifdef __PROSPERO__
++    struct thread_data *data = get_thread_data();
++    if (data)
++    {
++        data->pw_server_fd = reply_fd;
++        data->pw_server_remaining = size;
++        data->pw_server_received = 0;
++    }
++#endif
+ 
+     for (;;)
+     {
+         if ((ret = read( reply_fd, buffer, size )) > 0)
+         {
++#ifdef __PROSPERO__
++            if (data)
++            {
++                data->pw_server_received += ret;
++                data->pw_server_remaining -= ret;
++            }
++#endif
+             if (!(size -= ret)) return;
+             buffer = (char *)buffer + ret;
+             continue;
+@@ -284,6 +300,10 @@ static void read_reply_data( int reply_fd, void *buffer, size_t size )
+  */
+ static inline unsigned int wait_reply( int reply_fd, struct __server_request_info *req )
+ {
++#ifdef __PROSPERO__
++    struct thread_data *data = get_thread_data();
++    if (data) data->pw_server_stage = 1;
++#endif
+ #ifdef __PROSPERO__
+     static unsigned int debug_wait_count;
+     unsigned int debug_wait_n = 0;
+@@ -327,7 +347,15 @@ static inline unsigned int wait_reply( int reply_fd, struct __server_request_inf
+     }
+ #endif
+     if (req->u.reply.reply_header.reply_size)
++    {
++#ifdef __PROSPERO__
++        if (data) data->pw_server_stage = 2;
++#endif
+         read_reply_data( reply_fd, req->reply_data, req->u.reply.reply_header.reply_size );
++    }
++#ifdef __PROSPERO__
++    if (data) data->pw_server_stage = 0;
++#endif
+     return req->u.reply.reply_header.error;
+ }
+ 
+@@ -725,6 +753,15 @@ unsigned int server_call_unlocked( void *req_ptr )
+     unsigned int ret;
+     ULONGLONG start = ps5_slow_log() ? ps5_now_us() : 0;
+ 
++#ifdef __PROSPERO__
++    data->pw_server_seq++;
++    data->pw_server_request = req->u.req.request_header.req;
++    data->pw_server_stage = 0;
++    data->pw_server_fd = data->reply_fd;
++    data->pw_server_remaining = 0;
++    data->pw_server_received = 0;
++#endif
++
+ #ifdef WINE_INPROCESS_SERVER
+     if (call_server_direct && data->tid)
+     {
+@@ -741,8 +778,17 @@ unsigned int server_call_unlocked( void *req_ptr )
+         }
+     }
+ #endif
+-    if ((ret = send_request( data->request_fd, req ))) return ret;
++    if ((ret = send_request( data->request_fd, req )))
++    {
++#ifdef __PROSPERO__
++        data->pw_server_stage = 0;
++#endif
++        return ret;
++    }
+     ret = wait_reply( data->reply_fd, req );
++#ifdef __PROSPERO__
++    data->pw_server_stage = 0;
++#endif
+     if (start && ps5_now_us() - start > 200000)
+         fprintf( stderr, "wine-ps5: slow request=%d ms=%llu tid=%04x\n", (int)req->u.req.request_header.req,
+                  (ps5_now_us() - start) / 1000, (int)data->tid );
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 75b346e15e..81750cd6c6 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -3108,14 +3108,16 @@ static void __attribute__((used)) usr1_handler( int signal, siginfo_t *siginfo,
+         if (n <= 8 || !(n & (n - 1)))
+         {
+             extern int sceKernelDebugOutText( int channel, const char *text );
+-            char line[176];
++            char line[240];
+             snprintf( line, sizeof(line),
+-                      "ntdll usr1-handler n=%u sig=%d pid=%d uid=%u code=%d tid=%04x teb=%p rip=%llx rsp=%llx syscall=%d\n",
++                      "ntdll usr1-handler n=%u sig=%d pid=%d uid=%u code=%d tid=%04x teb=%p rip=%llx rsp=%llx syscall=%d srv_seq=%u req=%d stage=%d fd=%d remain=%u got=%u\n",
+                       n, signal, siginfo ? siginfo->si_pid : -1,
+                       siginfo ? siginfo->si_uid : 0, siginfo ? siginfo->si_code : 0,
+                       data->tid, data->teb, (unsigned long long)RIP_sig(sigcontext),
+                       (unsigned long long)RSP_sig(sigcontext),
+-                      data->teb ? is_inside_syscall( data, RSP_sig(sigcontext) ) : 0 );
++                      data->teb ? is_inside_syscall( data, RSP_sig(sigcontext) ) : 0,
++                      data->pw_server_seq, data->pw_server_request, data->pw_server_stage,
++                      data->pw_server_fd, data->pw_server_remaining, data->pw_server_received );
+             sceKernelDebugOutText( 0, line );
+         }
+     }
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index a1fcb5bc8b..1a2e2a946d 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -108,6 +108,14 @@ struct thread_data
+     int          wait_fd[2];        /* fd for sleeping server requests */
+     int          alert_fd;          /* inproc sync fd for user apc alerts */
+     DWORD        tid;               /* thread id */
++#ifdef __PROSPERO__
++    volatile unsigned int pw_server_seq;
++    volatile int          pw_server_request;
++    volatile int          pw_server_stage;
++    volatile int          pw_server_fd;
++    volatile unsigned int pw_server_remaining;
++    volatile unsigned int pw_server_received;
++#endif
+     BOOL         allow_writes;      /* ThreadAllowWrites flags */
+     BOOL         suspend;           /* suspend on startup */
+     pthread_t    pthread_id;        /* pthread thread id */
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index d1d6890670..48c06cbdc8 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4651,6 +4651,14 @@ struct thread_data *virtual_alloc_thread_data(void)
+         data->wait_fd[0] = -1;
+         data->wait_fd[1] = -1;
+         data->alert_fd   = -1;
++#ifdef __PROSPERO__
++        data->pw_server_seq = 0;
++        data->pw_server_request = -1;
++        data->pw_server_stage = 0;
++        data->pw_server_fd = -1;
++        data->pw_server_remaining = 0;
++        data->pw_server_received = 0;
++#endif
+ #ifdef VALGRIND_STACK_REGISTER
+         VALGRIND_STACK_REGISTER( (char *)data + signal_stack_mask + 1, (char *)data + view->size );
+ #endif

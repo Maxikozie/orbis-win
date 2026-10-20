@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Subject: [PATCH] server: trace replies to get_process_debug_info on PS4
+
+The get_process_debug_info handler returns normally, but the client remains in
+its reply-pipe read. Log the reply write result and completion to determine
+whether the server delivers the 64-byte response.
+
+---
+diff --git a/server/request.c b/server/request.c
+index d74ea2d80a..69955432d6 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -309,10 +309,37 @@ static void send_reply( union generic_reply *reply )
+ {
+     int ret;
+ 
++#ifdef __PROSPERO__
++    extern int sceKernelDebugOutText( int channel, const char *text );
++    static unsigned int debug_info_count;
++    unsigned int debug_info_n = 0;
++    if (current->req.request_header.req == REQ_get_process_debug_info)
++    {
++        char line[128];
++        debug_info_n = __atomic_add_fetch( &debug_info_count, 1, __ATOMIC_RELAXED );
++        if (debug_info_n <= 16)
++        {
++            snprintf( line, sizeof(line), "wineserver: debug_reply begin n=%u tid=%04x fd=%d status=%08x size=%u\n",
++                      debug_info_n, current->id, get_unix_fd( current->reply_fd ),
++                      reply->reply_header.error, reply->reply_header.reply_size );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
++#endif
++
+     if (!current->reply_size)
+     {
+         if ((ret = write( get_unix_fd( current->reply_fd ),
+                           reply, sizeof(*reply) )) != sizeof(*reply)) goto error;
++#ifdef __PROSPERO__
++        if (debug_info_n && debug_info_n <= 16)
++        {
++            char line[96];
++            snprintf( line, sizeof(line), "wineserver: debug_reply write n=%u ret=%d expected=%u\n",
++                      debug_info_n, ret, (unsigned int)sizeof(*reply) );
++            sceKernelDebugOutText( 0, line );
++        }
++#endif
+     }
+     else
+     {
+@@ -335,6 +362,14 @@ static void send_reply( union generic_reply *reply )
+     }
+     free( current->reply_data );
+     current->reply_data = NULL;
++#ifdef __PROSPERO__
++    if (debug_info_n && debug_info_n <= 16)
++    {
++        char line[80];
++        snprintf( line, sizeof(line), "wineserver: debug_reply complete n=%u\n", debug_info_n );
++        sceKernelDebugOutText( 0, line );
++    }
++#endif
+     return;
+ 
+  error:
+-- 
+2.43.0

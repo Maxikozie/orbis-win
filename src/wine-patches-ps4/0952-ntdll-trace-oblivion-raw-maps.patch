@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace mapping calls for the Oblivion image page
+
+Log bounded mmap and munmap requests covering 0x004a8330 through the normal
+host-memory wrappers. This exposes fixed replacements and releases that
+bypass the PS4 protection probe without changing mapping behavior.
+
+---
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -199,10 +199,32 @@
+ #define host_mprotect mprotect
+ #endif
+ 
+-static inline void *counted_mmap( void *addr, size_t len, int prot, int flags, int fd, off_t off )
++/* Trace mapping calls covering Oblivion's fault page. Keep this narrow and
++ * bounded because the console runtime log is shared with other processes. */
++static BOOL trace_oblivion_mapping_range( const void *addr, size_t len )
+ {
+-    void *ret = host_mmap( addr, len, prot, flags, fd, off );
++    const ULONG_PTR target = 0x004a8330;
++    ULONG_PTR start = (ULONG_PTR)addr;
+ 
++    return addr && len && start <= target && target - start < len;
++}
++static LONG trace_oblivion_mmap_count, trace_oblivion_munmap_count;
++
++static inline void *counted_mmap( const char *caller, void *addr, size_t len, int prot,
++                                  int flags, int fd, off_t off )
++{
++    BOOL trace = trace_oblivion_mapping_range( addr, len ) &&
++                 __atomic_add_fetch( &trace_oblivion_mmap_count, 1, __ATOMIC_RELAXED ) <= 32;
++    void *ret;
++
++    if (trace)
++        ERR( "PS4_OBLIVION map enter caller=%s addr=%p len=%lx prot=%#x flags=%#x fd=%d offset=%lld\n",
++             caller, addr, (unsigned long)len, prot, flags, fd, (long long)off );
++    ret = host_mmap( addr, len, prot, flags, fd, off );
++
++    if (trace)
++        ERR( "PS4_OBLIVION map result caller=%s addr=%p len=%lx result=%p errno=%d\n",
++             caller, addr, (unsigned long)len, ret, ret == MAP_FAILED ? errno : 0 );
+     vm_stat_add( VM_STAT_MMAP, 1 );
+     if (ret != MAP_FAILED)
+     {
+@@ -224,11 +246,22 @@
+     return ret;
+ }
+ 
+-static inline int counted_munmap( void *addr, size_t len )
++static inline int counted_munmap( const char *caller, void *addr, size_t len )
+ {
++    BOOL trace = trace_oblivion_mapping_range( addr, len ) &&
++                 __atomic_add_fetch( &trace_oblivion_munmap_count, 1, __ATOMIC_RELAXED ) <= 32;
++    int ret;
++
++    if (trace)
++        ERR( "PS4_OBLIVION unmap enter caller=%s addr=%p len=%lx\n",
++             caller, addr, (unsigned long)len );
+     vm_stat_add( VM_STAT_MUNMAP, 1 );
+     host_prot_record( addr, len, 0 );
+-    return host_munmap( addr, len );
++    ret = host_munmap( addr, len );
++    if (trace)
++        ERR( "PS4_OBLIVION unmap result caller=%s addr=%p len=%lx result=%d errno=%d\n",
++             caller, addr, (unsigned long)len, ret, ret ? errno : 0 );
++    return ret;
+ }
+ 
+ static inline int counted_mprotect( void *addr, size_t len, int prot )
+@@ -318,8 +351,8 @@
+     return n;
+ }
+ 
+-#define mmap counted_mmap
+-#define munmap counted_munmap
++#define mmap(addr,len,prot,flags,fd,off) counted_mmap( __func__, addr, len, prot, flags, fd, off )
++#define munmap(addr,len) counted_munmap( __func__, addr, len )
+ #define mprotect counted_mprotect
+ 
+ /***********************************************************************

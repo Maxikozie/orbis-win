@@ -1,0 +1,100 @@
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -1835,6 +1835,89 @@
+    }
+ }
+ 
++/* The fatal slot-wait path runs after new submissions have stopped, so the
++ * earlier "stall while submitting" detector may never get a chance to inspect
++ * the draw. Keep the indexed-draw capture usable from both paths. */
++static void
++orbis_dump_indexed_draw(uint64_t seq, const uint32_t *stream, uint32_t dwords)
++{
++   uint64_t ps = 0, vs = 0, vs_inputs = 0;
++   uint64_t draw_ps = 0, draw_vs = 0, draw_vs_inputs = 0, index_va = 0;
++   uint32_t draw_at = UINT32_MAX, index_count = 0;
++
++   for (uint32_t i = 0; i + 1 < dwords;) {
++      const uint32_t hdr = stream[i];
++      if ((hdr >> 30) != 3)
++         break;
++      const uint32_t cnt = ((hdr >> 16) & 0x3fff) + 2;
++      const uint32_t op = (hdr >> 8) & 0xff;
++      if (i + cnt > dwords)
++         break;
++
++      if (op == 0x76 && cnt >= 3) {
++         const uint32_t base = stream[i + 1];
++         for (uint32_t k = i + 2; k < i + cnt; ++k) {
++            const uint32_t reg = base + k - i - 2;
++            if (reg == 0x008)
++               ps = (uint64_t)stream[k] << 8;
++            else if (reg == 0x048)
++               vs = (uint64_t)stream[k] << 8;
++            else if (reg == 0x04e)
++               vs_inputs = (vs_inputs & 0xffffffff00000000ull) | stream[k];
++            else if (reg == 0x04f)
++               vs_inputs = (vs_inputs & 0x00000000ffffffffull) | ((uint64_t)stream[k] << 32);
++         }
++      } else if (op == 0x27 && cnt >= 6) {
++         draw_at = i;
++         index_va = (uint64_t)stream[i + 2] | ((uint64_t)(stream[i + 3] & 0xffffu) << 32);
++         index_count = stream[i + 4];
++         draw_ps = ps;
++         draw_vs = vs;
++         draw_vs_inputs = vs_inputs;
++      }
++      i += cnt;
++   }
++
++   if (draw_at == UINT32_MAX)
++      return;
++
++   mesa_logi("orbis-drm: submit #%" PRIu64 " HUNG-WAIT last DRAW_INDEX_2 at dword %u: "
++             "%u indices from 0x%" PRIx64 " (PS 0x%" PRIx64 ", VS 0x%" PRIx64 ")",
++             seq, draw_at, index_count, index_va, draw_ps, draw_vs);
++   uint64_t lo = 0, hi = 0;
++   uint32_t bo = 0;
++   if (orbis_va_mapping_of(index_va, &lo, &hi, &bo))
++      mesa_logi("orbis-drm: submit #%" PRIu64 " HUNG-WAIT index BO %u mapping "
++                "0x%" PRIx64 "..0x%" PRIx64 " (%" PRIu64 " bytes after base)",
++                seq, bo, lo, hi, hi - index_va);
++   else
++      mesa_loge("orbis-drm: submit #%" PRIu64 " HUNG-WAIT index buffer 0x%" PRIx64
++                " is not in a live mapping", seq, index_va);
++
++   uint64_t main_vs = draw_vs_inputs;
++   const char *source = "direct VS prolog input";
++   if (draw_vs_inputs != 0 && orbis_va_is_mapped(draw_vs_inputs, 8)) {
++      const uint32_t *input = (const uint32_t *)(uintptr_t)draw_vs_inputs;
++      const uint64_t indirect = (uint64_t)input[0] | ((uint64_t)input[1] << 32);
++      if ((indirect & 0xffu) == 0 && indirect >= orbis_va_base &&
++          indirect + 512 <= orbis_va_end && orbis_va_is_mapped(indirect, 512)) {
++         main_vs = indirect;
++         source = "VS prolog input table";
++      }
++   }
++   mesa_logi("orbis-drm: submit #%" PRIu64 " HUNG-WAIT VS prolog input 0x%" PRIx64
++             " resolves to main VS 0x%" PRIx64 " (%s)", seq, draw_vs_inputs, main_vs, source);
++
++   if (main_vs >= orbis_va_base && main_vs + 512 <= orbis_va_end && orbis_va_is_mapped(main_vs, 512)) {
++      mesa_logi("orbis-drm: submit #%" PRIu64 " HUNG-WAIT VS_MAIN at 0x%" PRIx64
++                ": first 128 dwords follow", seq, main_vs);
++      orbis_dump_ib(seq, (const uint32_t *)(uintptr_t)main_vs, 128, "VS_MAIN", false);
++   } else {
++      mesa_logw("orbis-drm: submit #%" PRIu64 " resolved main VS 0x%" PRIx64
++                " is not fully inside a live mapping", seq, main_vs);
++   }
++}
++
+ /* ⚠ FOLLOW WHAT THE FRAME POINTS AT, BECAUSE THE ADDRESS IS NEITHER IN THE PACKETS NOR IN MEMORY.
+  *
+  * Run H closed the two obvious doors. Scanning all 580 MiB of mapped memory for the faulting base in its 64-bit
+@@ -10101,6 +10184,7 @@
+                if (hs->seq == hung && hs->dwords > 0) {
+                   mesa_logw("orbis-drm: dumping submit #%" PRIu64 ", the one the label never reached.", hung);
+                   orbis_dump_ib(hung, hs->stream, hs->dwords, "HUNG-WAIT", true);
++                  orbis_dump_indexed_draw(hung, hs->stream, hs->dwords);
+                } else {
+                   mesa_logw("orbis-drm: submit #%" PRIu64 " has already left the %u-slot hung ring (it holds "
+                             "#%" PRIu64 ") - nothing to dump. Raise ORBIS_HUNG_RING.",

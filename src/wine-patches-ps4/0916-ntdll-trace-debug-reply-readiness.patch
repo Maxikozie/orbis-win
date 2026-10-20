@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Subject: [PATCH] ntdll: trace PS4 reply-pipe readiness for debug info
+
+The server logs a completed 64-byte write for get_process_debug_info while the
+native client remains in read(fd=0x20). Poll the client endpoint and report
+queued bytes before the read, then report if the read returns. This separates
+missing pipe readiness/data from a blocked read syscall.
+
+---
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -51,6 +51,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/types.h>
++#include <sys/ioctl.h>
+ #include <sys/mman.h>
+ #include <sys/socket.h>
+ #include <sys/wait.h>
+@@ -71,6 +72,7 @@
+ #include <sys/thr.h>
+ #endif
+ #include <unistd.h>
++#include <poll.h>
+ #ifdef __APPLE__
+ #include <crt_externs.h>
+ #include <spawn.h>
+@@ -282,7 +284,48 @@
+  */
+ static inline unsigned int wait_reply( int reply_fd, struct __server_request_info *req )
+ {
++#ifdef __PROSPERO__
++    static unsigned int debug_wait_count;
++    unsigned int debug_wait_n = 0;
++    if (req->u.req.request_header.req == REQ_get_process_debug_info)
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        struct pollfd pfd;
++        unsigned int i;
++        debug_wait_n = __atomic_add_fetch( &debug_wait_count, 1, __ATOMIC_RELAXED );
++        if (debug_wait_n <= 16)
++        {
++            pfd.fd = reply_fd;
++            pfd.events = POLLIN;
++            for (i = 0; i < 5; i++)
++            {
++                int available = -1, ioctl_ret, poll_ret;
++                char line[128];
++                pfd.revents = 0;
++                poll_ret = poll( &pfd, 1, 1000 );
++                ioctl_ret = ioctl( reply_fd, FIONREAD, &available );
++                snprintf( line, sizeof(line),
++                          "ntdll: debug_reply_poll n=%u fd=%d poll=%d events=%04x ioctl=%d bytes=%d errno=%d\n",
++                          debug_wait_n, reply_fd, poll_ret, pfd.revents,
++                          ioctl_ret, available, errno );
++                sceKernelDebugOutText( 0, line );
++                if (poll_ret != 0) break;
++            }
++        }
++    }
++#endif
+     read_reply_data( reply_fd, &req->u.reply, sizeof(req->u.reply) );
++#ifdef __PROSPERO__
++    if (debug_wait_n && debug_wait_n <= 16)
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        char line[112];
++        snprintf( line, sizeof(line), "ntdll: debug_reply_read done n=%u status=%08x size=%u\n",
++                  debug_wait_n, req->u.reply.reply_header.error,
++                  req->u.reply.reply_header.reply_size );
++        sceKernelDebugOutText( 0, line );
++    }
++#endif
+     if (req->u.reply.reply_header.reply_size)
+         read_reply_data( reply_fd, req->reply_data, req->u.reply.reply_header.reply_size );
+     return req->u.reply.reply_header.error;
+-- 
+2.43.0

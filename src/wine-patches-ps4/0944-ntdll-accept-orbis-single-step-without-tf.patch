@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: accept raw Orbis #DB after TF is cleared
+
+The PS4 reports raw trap 1 for the syscall-return #DB, but the captured
+RFLAGS value 0x10202 has TF (0x100) clear. Treat raw trap 1 as authoritative
+when the event is on Wine's syscall stack; retain the TF check for Wine's
+mapped trap value on other Prospero targets.
+
+---
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2888,7 +2888,7 @@
+         unsigned long raw_flags = EFL_sig(sigcontext);
+         ULONG_PTR raw_rip = RIP_sig(sigcontext), raw_rsp = RSP_sig(sigcontext);
+         BOOL has_teb = !!data->teb;
+-        BOOL is_step = (raw_trap == PROSPERO_SINGLE_STEP_TRAP || raw_trap == 1) && (raw_flags & 0x100);
++        BOOL is_step = raw_trap == 1 || (raw_trap == PROSPERO_SINGLE_STEP_TRAP && (raw_flags & 0x100));
+         BOOL inside = has_teb && is_inside_syscall( data, raw_rsp );
+         struct syscall_frame *frame = has_teb ? get_syscall_frame( data ) : NULL;
+         void *kernel_stack = has_teb ? get_kernel_stack( data ) : NULL;
+@@ -2901,7 +2901,7 @@
+         {
+             unsigned int n = __atomic_add_fetch( &probe_count, 1, __ATOMIC_RELAXED );
+             if (n <= 8)
+-                ERR_(seh)( "Prospero step probe 0943 n=%u sig=%d trap=%ld wine_trap=%d flags=%016lx rip=%016lx rsp=%016lx teb=%p stack=%p frame=%p frame_id=%08x frame_rip=%016lx is_step=%d inside=%d\n",
++                ERR_(seh)( "Prospero step probe 0944 n=%u sig=%d trap=%ld wine_trap=%d flags=%016lx rip=%016lx rsp=%016lx teb=%p stack=%p frame=%p frame_id=%08x frame_rip=%016lx is_step=%d inside=%d\n",
+                           n, signal, (long)raw_trap, TRAP_x86_TRCTRAP, raw_flags,
+                           (unsigned long)raw_rip, (unsigned long)raw_rsp, data->teb,
+                           kernel_stack, frame, frame ? frame->syscall_id : 0,
+@@ -2912,7 +2912,7 @@
+             static unsigned int trace_count;
+             unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
+             if (n <= 8 || !(n & (n - 1)))
+-                ERR_(seh)( "Consuming Prospero single-step 0943 n=%u sig=%d trap=%ld wine_trap=%d rip=%016lx rsp=%016lx frame=%p frame_id=%08x frame_rip=%016lx\n",
++                ERR_(seh)( "Consuming Prospero single-step 0944 n=%u sig=%d trap=%ld wine_trap=%d rip=%016lx rsp=%016lx frame=%p frame_id=%08x frame_rip=%016lx\n",
+                           n, signal, (long)raw_trap, TRAP_x86_TRCTRAP,
+                           (unsigned long)raw_rip, (unsigned long)raw_rsp, frame,
+                           frame ? frame->syscall_id : 0, frame ? (unsigned long)frame->rip : 0 );
+-- 
+2.43.0

@@ -6,9 +6,9 @@
 |---|---|
 | Console | PS4 Pro (CUH-7xxx) |
 | Firmware | 9.60, GoldHEN working |
-| PS4 RADV driver | Exists, validated on hardware |
-| Validated on | Liverpool, 18 CU |
-| Your part | Gladius, 36 CU |
+| PS4 RADV driver | Native Orbis fork; base mode and Pro Neo path exercised |
+| Measured | Liverpool-compatible mode: 18 CU; Neo probe: 4 SE, 36 active CU |
+| Still open | Full Vulkan CTS on Gladius; Neo GTA IV GPU hang; generation/feature reporting |
 
 ---
 
@@ -17,31 +17,24 @@ is Mesa's RADV running natively on the PS4 GPU under Orbis OS — a no-DRM winsy
 `sceGnmSubmitCommandBuffers`, and a VideoOut WSI. It passes Vulkan CTS on hardware and runs
 OpenGothic at roughly 50 fps.
 
-It has never run on a Pro.
+The Pro path has now run on hardware, but it is not complete: a hardware-ID
+probe measured the Neo topology, while GTA IV in Neo mode still hangs and a
+full Vulkan CTS run on Gladius has not been completed. The non-Neo package runs
+in Liverpool-compatible mode and is the working control.
 
-## The finding your console is positioned for
+## The generation question remains open
 
-`CHIP_GLADIUS` is already in the driver. It is declared in `amd_family.h` as a gfx7 part beside
-`CHIP_LIVERPOOL`, PCI device `0x9924` maps to it in `ac_gpu_info.c`, and every Liverpool workaround
-in the tree is written `family == CHIP_LIVERPOOL || family == CHIP_GLADIUS`. But every captured
-`radeon_info` dump, every CTS run and every frame in the project's record came off a base PS4.
+`CHIP_GLADIUS` maps PCI device `0x9924` to the Pro family, and the Orbis
+backend changes topology when the title is in Neo mode. However,
+`ac_drm_query_hw_ip_info()` currently reports GFX IP version 7.2 in both
+modes. The log prints `gfx_level` as a number; `gfx=9` means enum `GFX7`, not
+GFX9. That is the current driver configuration, not a silicon measurement.
 
-**The Pro path is written and unexercised.**
-
-That changes what this plan is. It is not a port. It is a bring-up: you run code that already
-exists on a part it has never seen, and you find out where the two chips diverge. Four of the five
-stages below need no new code at all.
-
-## One correction worth carrying in
-
-The Pro's GPU is marketed as Polaris, and you would reasonably expect gfx8. The driver does not
-treat it that way. `ac_get_llvm_processor_name` returns `"bonaire"` for both Liverpool and Gladius,
-with the comment:
-
-> Sony's semi-custom gfx7 parts have no LLVM target of their own; Bonaire is the gfx7 processor
-> definition, and the shader ISA is the same.
-
-So you get more compute units, not a newer feature level. **Plan for width, not for gfx8 features.**
+Sony describes the Pro GPU as combining Polaris features with custom hardware.
+That does not establish which Mesa generation and feature paths are correct for
+Gladius. Treat its target, descriptor, format/layout, and topology assumptions
+as separate questions; use hardware probes and a Gladius Vulkan CTS run to
+resolve them rather than inferring support from the family name or CU count.
 
 ---
 

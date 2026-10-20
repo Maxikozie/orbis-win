@@ -1,0 +1,99 @@
+Subject: server: identify repeated registry value queries in klog
+
+The PS4 native PC sampler found the busy thread repeatedly entering libkernel's
+read syscall on fd 32 with 64-byte messages. Wine request 92 is
+get_key_value, and it dominated the in-process server request stream. Log each
+distinct key/value pair and power-of-two repeat counts through klog so the
+next run identifies the registry lookup without flooding the log.
+
+diff --git a/server/registry.c b/server/registry.c
+index 364b72e529..3eb4417995 100644
+--- a/server/registry.c
++++ b/server/registry.c
+@@ -2281,6 +2281,76 @@ DECL_HANDLER(set_key_value)
+ }
+ 
+ /* retrieve the value of a registry key */
++#ifdef __PROSPERO__
++struct pw_key_value_probe_entry
++{
++    obj_handle_t handle;
++    unsigned int name_hash;
++    unsigned int count;
++};
++
++static struct pw_key_value_probe_entry pw_key_value_probe[64];
++
++static void pw_append_wstr( char *line, size_t *pos, const WCHAR *str, data_size_t len )
++{
++    data_size_t i;
++    for (i = 0; str && i + sizeof(WCHAR) <= len && *pos + 1 < 512; i += sizeof(WCHAR))
++    {
++        WCHAR ch = str[i / sizeof(WCHAR)];
++        line[(*pos)++] = ch >= 0x20 && ch <= 0x7e ? (char)ch : '?';
++    }
++}
++
++static void pw_log_key_value_query( obj_handle_t handle, struct key *key, struct unicode_str name )
++{
++    extern int sceKernelDebugOutText( int channel, const char *text );
++    unsigned int hash = 2166136261u, slot, count = 0;
++    data_size_t i, path_len = 0;
++    WCHAR *path;
++    char line[512];
++    size_t pos;
++
++    for (i = 0; i + sizeof(WCHAR) <= name.len; i += sizeof(WCHAR))
++        hash = (hash ^ name.str[i / sizeof(WCHAR)]) * 16777619u;
++    slot = (hash ^ handle) & 63;
++    for (i = 0; i < 64; ++i)
++    {
++        struct pw_key_value_probe_entry *entry = &pw_key_value_probe[(slot + i) & 63];
++        if (!entry->count)
++        {
++            entry->handle = handle;
++            entry->name_hash = hash;
++            entry->count = 1;
++            count = 1;
++            break;
++        }
++        if (entry->handle == handle && entry->name_hash == hash)
++        {
++            count = ++entry->count;
++            break;
++        }
++    }
++    if (!count || (count != 1 && (count & (count - 1)))) return;
++
++    path = key_get_full_name( &key->obj, ~0u, &path_len );
++    pos = snprintf( line, sizeof(line), "wineserver: getvalue n=%u hkey=%x path=", count, handle );
++    if (pos >= sizeof(line)) pos = sizeof(line) - 1;
++    pw_append_wstr( line, &pos, path, path_len );
++    if (path) free( path );
++    if (pos + 8 < sizeof(line))
++    {
++        memcpy( line + pos, " value=", 7 );
++        pos += 7;
++        if (!name.len) line[pos++] = '<';
++        pw_append_wstr( line, &pos, name.str, name.len );
++        if (!name.len && pos + 1 < sizeof(line)) line[pos++] = '>';
++    }
++    if (pos + 1 < sizeof(line)) line[pos++] = '\n';
++    line[pos] = 0;
++    sceKernelDebugOutText( 0, line );
++}
++#endif
++
+ DECL_HANDLER(get_key_value)
+ {
+     struct key *key;
+@@ -2289,6 +2359,9 @@ DECL_HANDLER(get_key_value)
+     reply->total = 0;
+     if ((key = get_hkey_obj( req->hkey, KEY_QUERY_VALUE )))
+     {
++#ifdef __PROSPERO__
++        pw_log_key_value_query( req->hkey, key, name );
++#endif
+         get_value( key, name, &reply->type, &reply->total );
+         release_object( key );
+     }

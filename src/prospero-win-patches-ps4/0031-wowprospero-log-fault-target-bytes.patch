@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Subject: [PATCH] wowprospero: log live guest fault target bytes
+
+Resolve the immediate frame’s direct-call target and dump its live entry
+bytes when raising the guest exception. This identifies runtime-patched code
+that differs from the on-disk executable.
+
+diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
+--- a/wine/wowprospero/cpu.c
++++ b/wine/wowprospero/cpu.c
+@@ -393,6 +393,40 @@
+                          pair[1] - (UINT)sizeof(callsite), callsite[0], callsite[1],
+                          callsite[2], callsite[3], callsite[4], callsite[5],
+                          callsite[6], callsite[7] );
++                /* When this frame was entered by a direct CALL, resolve the
++                 * target and record its live entry bytes. FalloutNV's return
++                 * site is in a runtime-patched image page, so its static EXE
++                 * disassembly does not describe the code that faulted. */
++                if (i == 0 && pair[1] >= 5)
++                {
++                    BYTE call[5], target_code[32] = {0};
++                    INT displacement;
++                    UINT target = 0;
++                    BOOL call_ok = read_guest_bytes( pair[1] - 5, call, sizeof(call) ) && call[0] == 0xe8;
++
++                    if (call_ok)
++                    {
++                        memcpy( &displacement, call + 1, sizeof(displacement) );
++                        target = pair[1] + displacement;
++                    }
++                    if (call_ok && read_guest_bytes( target, target_code, sizeof(target_code) ))
++                    {
++                        ERR( "guest frame0 call target %08x bytes %02x %02x %02x %02x %02x %02x %02x %02x\n",
++                             target, target_code[0], target_code[1], target_code[2], target_code[3],
++                             target_code[4], target_code[5], target_code[6], target_code[7] );
++                        ERR( "guest frame0 target+8 %02x %02x %02x %02x %02x %02x %02x %02x\n",
++                             target_code[8], target_code[9], target_code[10], target_code[11],
++                             target_code[12], target_code[13], target_code[14], target_code[15] );
++                        ERR( "guest frame0 target+16 %02x %02x %02x %02x %02x %02x %02x %02x\n",
++                             target_code[16], target_code[17], target_code[18], target_code[19],
++                             target_code[20], target_code[21], target_code[22], target_code[23] );
++                        ERR( "guest frame0 target+24 %02x %02x %02x %02x %02x %02x %02x %02x\n",
++                             target_code[24], target_code[25], target_code[26], target_code[27],
++                             target_code[28], target_code[29], target_code[30], target_code[31] );
++                    }
++                    else ERR( "guest frame0 call target unavailable call=%u target=%08x\n",
++                             call_ok, target );
++                }
+                 /* In the observed FalloutNV chain, frame 1 returns to
+                  * 0x7da98f. Its local -0x20 holds the result of the preceding
+                  * lookup(0), which is then used as the RTTI source object. */

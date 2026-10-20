@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Subject: [PATCH] wowprospero: trace callers of the faulting guest function
+
+Resolve direct-call targets and dump live entry bytes for the first three
+frames in the guest exception chain. This extends the runtime-code trace one
+frame above the failing dereference.
+
+diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
+--- a/wine/wowprospero/cpu.c
++++ b/wine/wowprospero/cpu.c
+@@ -393,11 +393,11 @@
+                          pair[1] - (UINT)sizeof(callsite), callsite[0], callsite[1],
+                          callsite[2], callsite[3], callsite[4], callsite[5],
+                          callsite[6], callsite[7] );
+-                /* When this frame was entered by a direct CALL, resolve the
+-                 * target and record its live entry bytes. FalloutNV's return
+-                 * site is in a runtime-patched image page, so its static EXE
+-                 * disassembly does not describe the code that faulted. */
+-                if (i == 0 && pair[1] >= 5)
++                /* For the first three frames, resolve direct CALL targets
++                 * and record their live entry bytes. FalloutNV's frames pass
++                 * through runtime-modified image pages, so static EXE
++                 * disassembly does not describe the code that ran. */
++                if (i < 3 && pair[1] >= 5)
+                 {
+                     BYTE call[5], target_code[32] = {0};
+                     INT displacement;

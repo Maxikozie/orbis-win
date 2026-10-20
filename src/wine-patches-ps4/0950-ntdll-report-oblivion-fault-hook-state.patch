@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: report Oblivion fault hook and live page state
+
+0960 reports the migrated guest page as RX, but the CPU still raises an
+instruction-fetch fault at 0x004a8330. Log the installed WoW64 fault-hook
+result and a live VirtualQuery snapshot before Wine begins exception dispatch.
+This distinguishes a stale/non-executable mapping from a fault the native
+signal path is failing to hand off.
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index d09ba1fd6b..96c8c07ac0 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2850,7 +2850,50 @@ static void __attribute__((used)) segv_handler( int signal, siginfo_t *siginfo,
+             sceKernelDebugOutText( 0, line );
+         }
+     }
+-    if (segv_hook && segv_hook( siginfo, _sigcontext )) return;
++    {
++        int hook_result = segv_hook ? segv_hook( siginfo, _sigcontext ) : 0;
++
++        /* 0960 replaced the low Oblivion instruction page with flexible
++         * memory and the kernel then reported it RX, but the guest still
++         * raised an instruction-fetch fault there. Capture the actual page
++         * state and whether the translator's fault hook claimed it before
++         * Wine starts exception dispatch. */
++        if ((signal == SIGBUS || signal == SIGSEGV) && siginfo &&
++            (uintptr_t)siginfo->si_addr >= 0x004a0000 &&
++            (uintptr_t)siginfo->si_addr < 0x004b0000)
++        {
++            struct ps4_virtual_query_info
++            {
++                void *start, *end;
++                int64_t offset;
++                int32_t protection, memory_type;
++                uint8_t flags;
++                char name[32];
++            } info;
++            extern int sceKernelVirtualQuery( const void *, int, void *, size_t );
++            extern int sceKernelDebugOutText( int, const char * );
++            static unsigned int trace_count;
++            unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++
++            if (n <= 4)
++            {
++                char line[256];
++                int query_rc;
++
++                memset( &info, 0, sizeof(info) );
++                query_rc = sceKernelVirtualQuery( siginfo->si_addr, 1, &info, sizeof(info) );
++                info.name[sizeof(info.name) - 1] = 0;
++                snprintf( line, sizeof(line),
++                          "ntdll ps4-image-hook n=%u hook=%d result=%d sig=%d code=%d addr=%p rip=%llx query=%d range=%p-%p prot=%x type=%x flags=%x name=%s\n",
++                          n, !!segv_hook, hook_result, signal, siginfo->si_code,
++                          siginfo->si_addr, (unsigned long long)RIP_sig(sigcontext),
++                          query_rc, info.start, info.end, info.protection,
++                          info.memory_type, info.flags, info.name );
++                sceKernelDebugOutText( 0, line );
++            }
++        }
++        if (hook_result) return;
++    }
+     /* The native WoW64 path returned from iretq at 0x7bef14c9, but only the
+      * resulting guest exception was visible. Capture SIGBUS and SIGSEGV raw
+      * host frames before Wine rewrites them into an exception context. */

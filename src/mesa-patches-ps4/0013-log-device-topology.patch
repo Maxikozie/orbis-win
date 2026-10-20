@@ -1,0 +1,24 @@
+--- a/src/amd/common/ac_gpu_info.c
++++ b/src/amd/common/ac_gpu_info.c
+@@ -1346,6 +1346,21 @@
+    info->min_good_cu_per_sa =
+       (info->num_cu / (info->num_se * info->max_sa_per_se * cu_group)) * cu_group;
+ 
++#ifdef HAVE_ORBIS_PLATFORM
++   if (info->family == CHIP_LIVERPOOL || info->family == CHIP_GLADIUS) {
++      mesa_logi("orbis: RADV device-info topology pci=0x%04x family=%u gfx=%u SE=%u SA/SE=%u "
++                "num_SE=%u CU/SH=%u num_CU=%u CU/SA=%u..%u",
++                info->pci_id, info->family, info->gfx_level, info->max_se, info->max_sa_per_se,
++                info->num_se, info->num_cu_per_sh, info->num_cu, info->min_good_cu_per_sa,
++                info->max_good_cu_per_sa);
++      for (unsigned se = 0; se < info->max_se; ++se) {
++         for (unsigned sa = 0; sa < info->max_sa_per_se; ++sa)
++            mesa_logi("orbis: RADV device-info CU mask SE%u/SA%u = 0x%08x (%u CUs)",
++                      se, sa, info->cu_mask[se][sa], util_bitcount(info->cu_mask[se][sa]));
++      }
++   }
++#endif
++
+    info->gfx_ib_pad_with_type2 = info->gfx_level == GFX6;
+ 
+    if (info->gfx_level >= GFX11 && info->gfx_level < GFX12) {

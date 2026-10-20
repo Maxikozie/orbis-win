@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: classify Orbis trap 1 as privileged instruction
+
+The PS4 mcontext uses FreeBSD trap numbers: 1 is T_PRIVINFLT and 10 is
+T_TRCTRAP. Do not consume trap 1 as a single-step. Log the loaded module and
+instruction bytes for the native privileged-instruction fault so the next
+fix targets the actual opcode rather than hiding the exception.
+
+---
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2877,18 +2877,14 @@
+ #endif
+     data = init_handler( sigcontext );
+ #ifdef __PROSPERO__
+-#ifdef __ORBIS__
+-#define PROSPERO_SINGLE_STEP_TRAP 1 /* Orbis exposes the raw x86 vector. */
+-#else
+ #define PROSPERO_SINGLE_STEP_TRAP TRAP_x86_TRCTRAP
+-#endif
+     {
+         static unsigned int probe_count;
+         unsigned long raw_trap = TRAP_sig(sigcontext);
+         unsigned long raw_flags = EFL_sig(sigcontext);
+         ULONG_PTR raw_rip = RIP_sig(sigcontext), raw_rsp = RSP_sig(sigcontext);
+         BOOL has_teb = !!data->teb;
+-        BOOL is_step = raw_trap == 1 || (raw_trap == PROSPERO_SINGLE_STEP_TRAP && (raw_flags & 0x100));
++        BOOL is_step = raw_trap == PROSPERO_SINGLE_STEP_TRAP && (raw_flags & 0x100);
+         BOOL inside = has_teb && is_inside_syscall( data, raw_rsp );
+         struct syscall_frame *frame = has_teb ? get_syscall_frame( data ) : NULL;
+         void *kernel_stack = has_teb ? get_kernel_stack( data ) : NULL;
+@@ -2896,7 +2892,7 @@
+         /* Snapshot every predicate before logging: the log path may itself
+          * replace Wine's active syscall frame. This distinguishes a raw #DB
+          * that misses the consume guard from a signal that never is #DB. */
+-        if (raw_trap == PROSPERO_SINGLE_STEP_TRAP || raw_trap == 1 || (raw_flags & 0x100) ||
++        if (raw_trap == PROSPERO_SINGLE_STEP_TRAP || (raw_flags & 0x100) ||
+             signal == SIGILL || signal == SIGTRAP)
+         {
+             unsigned int n = __atomic_add_fetch( &probe_count, 1, __ATOMIC_RELAXED );
+@@ -2950,6 +2946,18 @@
+                       frame ? (unsigned long)frame->rip : 0, data->teb,
+                       data->teb ? get_kernel_stack( data ) : NULL,
+                       is_inside_syscall( data, RSP_sig(sigcontext) ) );
++            if (TRAP_sig(sigcontext) == TRAP_x86_PRIVINFLT)
++            {
++                BYTE opcode[8] = {0};
++                char module[256] = "unknown";
++                unsigned long offset = 0;
++                memcpy( opcode, (const void *)RIP_sig(sigcontext), sizeof(opcode) );
++                pw_module_at( (const void *)RIP_sig(sigcontext), module, sizeof(module), &offset );
++                ERR_(seh)( "Orbis privileged-opcode rip=%016lx module=%s+%lx bytes=%02x %02x %02x %02x %02x %02x %02x %02x\n",
++                           (unsigned long)RIP_sig(sigcontext), module, offset,
++                           opcode[0], opcode[1], opcode[2], opcode[3],
++                           opcode[4], opcode[5], opcode[6], opcode[7] );
++            }
+         }
+     }
+ #endif
+-- 
+2.43.0

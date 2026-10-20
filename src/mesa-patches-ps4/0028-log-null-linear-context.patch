@@ -1,0 +1,23 @@
+diff --git a/src/util/ralloc.c b/src/util/ralloc.c
+index 5736dd6..edc5378 100644
+--- a/src/util/ralloc.c
++++ b/src/util/ralloc.c
+@@ -29,6 +29,7 @@
+ #include <string.h>
+ 
+ #include "util/list.h"
++#include "util/log.h"
+ #include "util/macros.h"
+ #include "util/u_math.h"
+ #include "util/u_printf.h"
+@@ -1050,6 +1051,10 @@ get_node_canary_size()
+ void *
+ linear_alloc_child(linear_ctx *ctx, unsigned size)
+ {
++   if (unlikely(!ctx))
++      mesa_loge("linear_alloc_child: NULL context size=%u caller=%p",
++                size, __builtin_return_address(0));
++
+    assert(ctx->magic == LMAGIC_CONTEXT);
+    assert(get_node_canary(ctx->latest)->magic == LMAGIC_NODE);
+    assert(get_node_canary(ctx->latest)->offset == ctx->offset);

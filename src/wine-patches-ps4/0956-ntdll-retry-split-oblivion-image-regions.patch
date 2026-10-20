@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: retry RX repair across split Oblivion image regions
+
+The 0975 run found the previously observed executable image page at
+0x004a7e60, but sceKernelVirtualQuery reported a split region beginning at
+0x004a4000 after an adjacent page's protection changed. Accept queried
+subregions contained within the measured main-image span instead of requiring
+the old unsplit mapping boundary. Keep the retry limited to instruction-fetch
+faults in that image span and verify RX before retrying.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2860,9 +2860,9 @@
+                 range_start = (uintptr_t)info.start;
+                 range_end = (uintptr_t)info.end;
+             }
+-            if (!query_rc && ((range_start == 0x0049c000 && range_end == 0x004a8000) ||
+-                              (range_start == 0x004a8000 && range_end == 0x004ac000)) &&
+-                page >= range_start && page + 0x4000 <= range_end &&
++            if (!query_rc && range_start >= 0x00400000 &&
++                range_end <= 0x00a28000 && page >= range_start &&
++                page + 0x4000 <= range_end &&
+                 (info.protection & PROT_READ) && !(info.protection & PROT_EXEC))
+             {
+                 mprotect_rc = __wine_ps5_mprotect( (void *)page, 0x4000,
+-- 
+2.43.0

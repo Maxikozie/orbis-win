@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: retry faults across measured Oblivion image pages
+
+The 0969 retry restored execution at 0x004a8330, after which the next
+instruction-fetch fault occurred at 0x004a7e60 in the adjacent read-only
+mapping. Retry RX repair one page at a time across only the two observed
+anonymous image ranges; bound attempts and verify effective protection.
+
+---
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2823,15 +2823,12 @@ static void __attribute__((used)) segv_handler( int signal, siginfo_t *siginfo,
+     EXCEPTION_RECORD rec = { .ExceptionAddress = (void *)RIP_sig(sigcontext) };
+ 
+ #ifdef __PROSPERO__
+-    /* The 0968 heartbeat proved that this exact Oblivion image page can be
+-     * changed from R to RX, but the permission disappears again before the
+-     * next instruction fetch. Retry the fetch from the signal context after
+-     * repairing the kernel mapping. Returning from this handler restores the
+-     * interrupted guest context and retries RIP_sig(). Keep this scoped to
+-     * the one measured page and to x86 instruction-fetch faults. */
++    /* The 0969 run retried 0x004a8330 successfully, then faulted fetching
++     * 0x004a7e60 in the adjacent read-only image mapping. Repair one measured
++     * page at a time and retry each instruction fetch. */
+     if ((signal == SIGBUS || signal == SIGSEGV) && siginfo &&
+         (ERROR_sig(sigcontext) & 0x10) &&
+-        (uintptr_t)siginfo->si_addr >= 0x004a8000 &&
++        (uintptr_t)siginfo->si_addr >= 0x0049c000 &&
+         (uintptr_t)siginfo->si_addr < 0x004ac000 &&
+         RIP_sig(sigcontext) == (uintptr_t)siginfo->si_addr)
+     {
+@@ -2848,35 +2845,51 @@ static void __attribute__((used)) segv_handler( int signal, siginfo_t *siginfo,
+         extern int sceKernelDebugOutText( int, const char * );
+         static unsigned int repair_count;
+         unsigned int attempt = __atomic_add_fetch( &repair_count, 1, __ATOMIC_RELAXED );
++        uintptr_t page = (uintptr_t)siginfo->si_addr & ~(uintptr_t)0x3fff;
+ 
+         if (attempt <= 8)
+         {
+             int query_rc, mprotect_rc = -999, verify_rc = -1, protection = -1;
++            uintptr_t range_start = 0, range_end = 0;
+             char line[256];
+ 
+             memset( &info, 0, sizeof(info) );
+             query_rc = sceKernelVirtualQuery( siginfo->si_addr, 1, &info, sizeof(info) );
+-            if (!query_rc && (uintptr_t)info.start == 0x004a8000 &&
+-                (uintptr_t)info.end == 0x004ac000 &&
++            if (!query_rc)
++            {
++                range_start = (uintptr_t)info.start;
++                range_end = (uintptr_t)info.end;
++            }
++            if (!query_rc && ((range_start == 0x0049c000 && range_end == 0x004a8000) ||
++                              (range_start == 0x004a8000 && range_end == 0x004ac000)) &&
++                page >= range_start && page + 0x4000 <= range_end &&
+                 (info.protection & PROT_READ) && !(info.protection & PROT_EXEC))
+             {
+-                mprotect_rc = __wine_ps5_mprotect( (void *)0x004a8000, 0x4000,
++                mprotect_rc = __wine_ps5_mprotect( (void *)page, 0x4000,
+                                                   PROT_READ | PROT_EXEC );
+                 memset( &info, 0, sizeof(info) );
+                 verify_rc = sceKernelVirtualQuery( siginfo->si_addr, 1, &info, sizeof(info) );
+-                if (!verify_rc) protection = info.protection;
++                if (!verify_rc)
++                {
++                    protection = info.protection;
++                    range_start = (uintptr_t)info.start;
++                    range_end = (uintptr_t)info.end;
++                }
+             }
+             if (!query_rc && !verify_rc && (protection & PROT_EXEC))
+             {
+                 snprintf( line, sizeof(line),
+-                          "ntdll ps4-fault-rx-retry build=0969 attempt=%u addr=%p rc=%d prot=%#x; retrying RIP\n",
+-                          attempt, siginfo->si_addr, mprotect_rc, protection );
++                          "ntdll ps4-fault-rx-retry build=0970 attempt=%u addr=%p page=%p range=%p-%p rc=%d prot=%#x; retrying RIP\n",
++                          attempt, siginfo->si_addr, (void *)page,
++                          (void *)range_start, (void *)range_end, mprotect_rc, protection );
+                 sceKernelDebugOutText( 0, line );
+                 return;
+             }
+             snprintf( line, sizeof(line),
+-                      "ntdll ps4-fault-rx-retry build=0969 attempt=%u addr=%p query=%d rc=%d verify=%d prot=%#x; falling through\n",
+-                      attempt, siginfo->si_addr, query_rc, mprotect_rc, verify_rc, protection );
++                      "ntdll ps4-fault-rx-retry build=0970 attempt=%u addr=%p page=%p range=%p-%p query=%d rc=%d verify=%d prot=%#x; falling through\n",
++                      attempt, siginfo->si_addr, (void *)page,
++                      (void *)range_start, (void *)range_end,
++                      query_rc, mprotect_rc, verify_rc, protection );
+             sceKernelDebugOutText( 0, line );
+         }
+     }

@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 12 Oct 2026 19:00:00 -0700
+Subject: [PATCH] wowprospero: log bounded guest frame chain at exceptions
+
+The FalloutNV exception's immediate caller is clear, but the next saved
+return address lands in the middle of a game instruction. Log up to eight
+monotonic EBP frames and the bytes immediately before each return address to
+tell stack corruption from an incomplete/nonstandard frame chain.
+---
+ wine/wowprospero/cpu.c | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
+--- a/wine/wowprospero/cpu.c
++++ b/wine/wowprospero/cpu.c
+@@ -376,2 +376,27 @@ static void raise_guest_exception( I386_CONTEXT *ctx, DWORD code, UINT address, UINT write )
+         else ERR( "guest [ebp-4] unavailable (ebp %08lx)\n", ctx->Ebp );
++        /* Walk the conventional EBP chain while it remains monotonic and
++         * readable. Include bytes ending at each saved return address so a
++         * corrupt frame can be distinguished from a valid caller site. */
++        {
++            UINT frame = ctx->Ebp;
++            unsigned int i;
++
++            for (i = 0; i < 8; ++i)
++            {
++                UINT pair[2];
++                BYTE callsite[8];
++
++                if (!read_guest_bytes( frame, pair, sizeof(pair) )) break;
++                ERR( "guest frame %u ebp %08x saved %08x return %08x\n",
++                     i, frame, pair[0], pair[1] );
++                if (pair[1] >= sizeof(callsite) &&
++                    read_guest_bytes( pair[1] - sizeof(callsite), callsite, sizeof(callsite) ))
++                    ERR( "guest return-bytes %08x: %02x %02x %02x %02x %02x %02x %02x %02x\n",
++                         pair[1] - (UINT)sizeof(callsite), callsite[0], callsite[1],
++                         callsite[2], callsite[3], callsite[4], callsite[5],
++                         callsite[6], callsite[7] );
++                if (pair[0] <= frame || pair[0] - frame > 0x100000) break;
++                frame = pair[0];
++            }
++        }
+         /* The top of the i386 stack, for the callers' return addresses. */
+-- 
+2.45.0

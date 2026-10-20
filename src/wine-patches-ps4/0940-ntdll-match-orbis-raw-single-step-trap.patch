@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: match Orbis raw #DB trap number
+
+Orbis reports the x86 exception vector (1) in its signal context. Wine's
+FreeBSD compatibility headers define T_TRCTRAP as 10, so comparing the raw
+Orbis value with TRAP_x86_TRCTRAP misses the single-step and replays the stale
+syscall frame. Use the raw Orbis vector on PS4 and keep Wine's platform mapping
+elsewhere. Log both values when the handler consumes the event.
+
+---
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2908,27 +2908,30 @@
+ #endif
+     save_context( data, &context, sigcontext );
+ #ifdef __PROSPERO__
+-    /* On PS4, a native syscall return can surface its single-step (#DB) as
+-     * SIGILL. The syscall stack and TF bit identify it; treating TRAP_TRACE
+-     * as an illegal instruction sends it back through a stale Wine frame and
+-     * repeats forever. Single-step through Wine's host syscall machinery is
+-     * not useful to the Windows caller, so clear TF and resume at the next
+-     * host instruction. */
+-    if (TRAP_sig(sigcontext) == TRAP_x86_TRCTRAP && data->teb &&
++#ifdef __ORBIS__
++#define PROSPERO_SINGLE_STEP_TRAP 1 /* Orbis exposes the raw x86 vector. */
++#else
++#define PROSPERO_SINGLE_STEP_TRAP TRAP_x86_TRCTRAP
++#endif
++    /* PS4 reports the raw x86 vector for a syscall-return single-step (#DB),
++     * while Wine's FreeBSD compatibility headers map T_TRCTRAP to 10. Match
++     * the Orbis value here or the stale syscall frame is replayed forever. */
++    if (TRAP_sig(sigcontext) == PROSPERO_SINGLE_STEP_TRAP && data->teb &&
+         (EFL_sig(sigcontext) & 0x100) && is_inside_syscall( data, RSP_sig(sigcontext) ))
+     {
+         static unsigned int trace_count;
+         unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
+         if (n <= 8 || !(n & (n - 1)))
+-            ERR_(seh)( "Consuming Prospero single-step n=%u sig=%d rip=%016lx rsp=%016lx frame=%p frame_id=%08x frame_rip=%016lx\n",
+-                      n, signal, (unsigned long)RIP_sig(sigcontext),
+-                      (unsigned long)RSP_sig(sigcontext), get_syscall_frame( data ),
+-                      get_syscall_frame( data )->syscall_id,
++            ERR_(seh)( "Consuming Prospero single-step 0940 n=%u sig=%d trap=%ld wine_trap=%d rip=%016lx rsp=%016lx frame=%p frame_id=%08x frame_rip=%016lx\n",
++                      n, signal, (long)TRAP_sig(sigcontext), TRAP_x86_TRCTRAP,
++                      (unsigned long)RIP_sig(sigcontext), (unsigned long)RSP_sig(sigcontext),
++                      get_syscall_frame( data ), get_syscall_frame( data )->syscall_id,
+                       (unsigned long)get_syscall_frame( data )->rip );
+         EFL_sig(sigcontext) &= ~0x100;
+         leave_handler( data, sigcontext );
+         return;
+     }
++#undef PROSPERO_SINGLE_STEP_TRAP
+ #endif
+ 
+     switch(TRAP_sig(sigcontext))
+-- 
+2.43.0

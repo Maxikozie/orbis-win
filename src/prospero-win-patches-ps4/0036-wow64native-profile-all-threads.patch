@@ -1,0 +1,327 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Subject: [PATCH] wow64native: sample every native thread profile
+
+diff --git a/wine/wow64native/unix.c b/wine/wow64native/unix.c
+index c6ed5d4..ebe1c16 100644
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -9,27 +9,159 @@
+ #include "wine/debug.h"
+ #include <stdlib.h>
+ #include <string.h>
++#ifdef __PROSPERO__
++#include <errno.h>
++#include <stdint.h>
++#include <sys/mman.h>
++#endif
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(wow);
+ #ifdef __PROSPERO__
+ #include <dlfcn.h>
++#include <pthread.h>
++#include <unistd.h>
+ #endif
+ 
+ static __thread struct pw_native_thread_state thread_state;
+ static __thread int thread_initialized;
++#ifdef __PROSPERO__
++/* libkernel's compat signal trampoline reads a host signal TCB through the
++ * qword at guest TEB32.FiberData/ArbitraryUserPointer (FS:0x10). Keep the
++ * upper ArbitraryUserPointer dword untouched by placing the shim below 4 GiB
++ * and using FiberData's existing non-fiber sentinel offset. */
++static __thread void *signal_tcb_page;
++static __thread ULONG saved_fiber_data;
++static __thread ULONG signal_tcb_fiber_data;
++#endif
+ static int process_ready;
+ static int profile_enabled;
+ static __thread struct pw_native_profile thread_profile;
+-static void profile_report(void *arg)
++#ifdef __PROSPERO__
++#define PW_PROFILE_WATCH_MAX_THREADS 64
++/* The test title can sit in guest code forever, so BTCpuThreadTerm is not a
++ * reliable place to collect counters. A low-rate host thread samples native
++ * threads while they are alive. */
++struct pw_profile_watch_entry
++{
++    struct pw_native_thread_state *state;
++    unsigned long long host_calls, guest_calls, unix_calls, syscall_calls;
++    unsigned int samples;
++};
++static pthread_mutex_t profile_watch_lock = PTHREAD_MUTEX_INITIALIZER;
++static struct pw_profile_watch_entry profile_watch_entries[PW_PROFILE_WATCH_MAX_THREADS];
++static pthread_t profile_watch_thread;
++static volatile int profile_watch_started;
++#endif
++static void profile_read(const struct pw_native_thread_state *state,
++                         unsigned long long *host_calls, unsigned long long *guest_calls,
++                         unsigned long long *host_ticks, unsigned long long *guest_ticks,
++                         unsigned long long *unix_calls, unsigned long long *syscall_calls,
++                         unsigned long long *last_tsc)
+ {
+-    const struct pw_native_thread_state *state = arg;
+     const struct pw_native_profile *p = (void *)state->profile;
+     if (!p) return;
+-    WINE_MESSAGE("PW_NATIVE_PROFILE version=1 teb=%llx tsc=%llu host_calls=%llu guest_calls=%llu host_sysarch_ticks=%llu guest_sysarch_ticks=%llu unix_calls=%llu syscall_calls=%llu\n",
+-                 state->guest_fs, p->last_tsc, p->host_calls, p->guest_calls,
+-                 p->host_sysarch_ticks, p->guest_sysarch_ticks, p->unix_calls, p->syscall_calls);
++    *host_calls = __atomic_load_n(&p->host_calls, __ATOMIC_RELAXED);
++    *guest_calls = __atomic_load_n(&p->guest_calls, __ATOMIC_RELAXED);
++    *host_ticks = __atomic_load_n(&p->host_sysarch_ticks, __ATOMIC_RELAXED);
++    *guest_ticks = __atomic_load_n(&p->guest_sysarch_ticks, __ATOMIC_RELAXED);
++    *unix_calls = __atomic_load_n(&p->unix_calls, __ATOMIC_RELAXED);
++    *syscall_calls = __atomic_load_n(&p->syscall_calls, __ATOMIC_RELAXED);
++    *last_tsc = __atomic_load_n(&p->last_tsc, __ATOMIC_RELAXED);
+ }
+ 
++static void profile_report(void *arg)
++{
++    const struct pw_native_thread_state *state = arg;
++    unsigned long long host_calls = 0, guest_calls = 0, host_ticks = 0, guest_ticks = 0;
++    unsigned long long unix_calls = 0, syscall_calls = 0, last_tsc = 0;
++    profile_read(state, &host_calls, &guest_calls, &host_ticks, &guest_ticks,
++                 &unix_calls, &syscall_calls, &last_tsc);
++    WINE_MESSAGE("PW_NATIVE_PROFILE version=2 teb=%llx tsc=%llu host_calls=%llu guest_calls=%llu host_sysarch_ticks=%llu guest_sysarch_ticks=%llu unix_calls=%llu syscall_calls=%llu\n",
++                 state->guest_fs, last_tsc, host_calls, guest_calls,
++                 host_ticks, guest_ticks, unix_calls, syscall_calls);
++}
++
++#ifdef __PROSPERO__
++static void *profile_watch_main(void *unused)
++{
++    (void)unused;
++    for (;;)
++    {
++        sleep(2);
++        pthread_mutex_lock(&profile_watch_lock);
++        for (unsigned int i = 0; i < PW_PROFILE_WATCH_MAX_THREADS; ++i)
++        {
++            struct pw_profile_watch_entry *entry = &profile_watch_entries[i];
++            unsigned long long host_calls = 0, guest_calls = 0, host_ticks = 0, guest_ticks = 0;
++            unsigned long long unix_calls = 0, syscall_calls = 0, last_tsc = 0;
++            int changed;
++            if (!entry->state) continue;
++            profile_read(entry->state, &host_calls, &guest_calls, &host_ticks, &guest_ticks,
++                         &unix_calls, &syscall_calls, &last_tsc);
++            changed = !entry->samples || host_calls != entry->host_calls ||
++                      guest_calls != entry->guest_calls || unix_calls != entry->unix_calls ||
++                      syscall_calls != entry->syscall_calls;
++            if (changed || !(entry->samples % 5))
++                WINE_MESSAGE("PW_NATIVE_PROFILE version=2 teb=%llx tsc=%llu host_calls=%llu guest_calls=%llu host_sysarch_ticks=%llu guest_sysarch_ticks=%llu unix_calls=%llu syscall_calls=%llu samples=%u changed=%d\n",
++                             entry->state->guest_fs, last_tsc, host_calls, guest_calls,
++                             host_ticks, guest_ticks, unix_calls, syscall_calls,
++                             entry->samples, changed);
++            entry->host_calls = host_calls;
++            entry->guest_calls = guest_calls;
++            entry->unix_calls = unix_calls;
++            entry->syscall_calls = syscall_calls;
++            ++entry->samples;
++        }
++        pthread_mutex_unlock(&profile_watch_lock);
++    }
++    return NULL;
++}
++
++static void profile_watch_register(struct pw_native_thread_state *state)
++{
++    unsigned int i;
++    int expected = 0;
++    pthread_mutex_lock(&profile_watch_lock);
++    for (i = 0; i < PW_PROFILE_WATCH_MAX_THREADS; ++i)
++        if (!profile_watch_entries[i].state)
++        {
++            profile_watch_entries[i].state = state;
++            profile_watch_entries[i].samples = 0;
++            break;
++        }
++    pthread_mutex_unlock(&profile_watch_lock);
++    if (i == PW_PROFILE_WATCH_MAX_THREADS)
++    {
++        WINE_MESSAGE("PW_NATIVE_PROFILE watcher-full max=%u teb=%llx\n",
++                     PW_PROFILE_WATCH_MAX_THREADS, state->guest_fs);
++        return;
++    }
++    if (!__atomic_compare_exchange_n(&profile_watch_started, &expected, 1, 0,
++                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
++    if (pthread_create(&profile_watch_thread, NULL, profile_watch_main, NULL))
++    {
++        __atomic_store_n(&profile_watch_started, 0, __ATOMIC_RELAXED);
++        WINE_MESSAGE("PW_NATIVE_PROFILE watcher-start failed\n");
++        return;
++    }
++    pthread_detach(profile_watch_thread);
++    WINE_MESSAGE("PW_NATIVE_PROFILE watcher-start interval=2s max_threads=%u teb=%llx\n",
++                 PW_PROFILE_WATCH_MAX_THREADS, state->guest_fs);
++}
++
++static void profile_watch_unregister(struct pw_native_thread_state *state)
++{
++    pthread_mutex_lock(&profile_watch_lock);
++    for (unsigned int i = 0; i < PW_PROFILE_WATCH_MAX_THREADS; ++i)
++        if (profile_watch_entries[i].state == state)
++        {
++            profile_watch_entries[i].state = NULL;
++            break;
++        }
++    pthread_mutex_unlock(&profile_watch_lock);
++}
++#endif
++
+ static NTSTATUS capture_host_fs(unsigned long long *base)
+ {
+     *base = 0;
+@@ -50,10 +182,16 @@ static NTSTATUS capture_host_fs(unsigned long long *base)
+ static NTSTATUS process_init(void *args)
+ {
+     struct pw_native_init_params *params = args;
++    WINE_MESSAGE("PW_NATIVE_STAGE process_init enter args=%p version=%u expected=%u\n",
++                 args, params ? params->version : 0, PW_NATIVE_ABI_VERSION);
+     process_ready = 0;
+     profile_enabled = 0;
+     if (!params || params->version != PW_NATIVE_ABI_VERSION)
++    {
++        WINE_MESSAGE("PW_NATIVE_STAGE process_init reject params=%p version=%u\n",
++                     args, params ? params->version : 0);
+         return STATUS_INVALID_PARAMETER;
++    }
+     params->transitions_ready = 0;
+     params->fs32_selector = 0;
+     params->fs_set_proc = 0;
+@@ -65,17 +203,28 @@ static NTSTATUS process_init(void *args)
+         /* Resolve through ntdll's Wine dl facade: this optional export is
+          * absent in older runtimes, which must keep the backend disabled. */
+         query = dlsym(RTLD_DEFAULT, PW_NATIVE_SIGNAL_QUERY);
+-        if (!query) return STATUS_NOT_SUPPORTED;
++        WINE_MESSAGE("PW_NATIVE_STAGE process_init query=%p\n", query);
++        if (!query)
++        {
++            WINE_MESSAGE("PW_NATIVE_STAGE process_init missing-query\n");
++            return STATUS_NOT_SUPPORTED;
++        }
+         caps = query(PW_NW64_CAPS_VERSION);
++        WINE_MESSAGE("PW_NATIVE_STAGE process_init caps=%08x required=%08x\n",
++                     caps, PW_NW64_CAP_REQUIRED);
+         if ((caps & PW_NW64_CAP_REQUIRED) != PW_NW64_CAP_REQUIRED)
++        {
++            WINE_MESSAGE("PW_NATIVE_STAGE process_init insufficient-caps\n");
+             return STATUS_NOT_SUPPORTED;
++        }
+         params->fs_set_proc = (unsigned long long)sysarch;
+         params->transitions_ready = 1;
+         process_ready = 1;
+-        {
+-            const char *value = getenv("PW_NATIVE_PROFILE");
+-            profile_enabled = value && !strcmp(value, "1");
+-        }
++        /* ORBW00040 diagnostic build: collect FS-transition counters and
++         * report them periodically and when the native thread exits. */
++        profile_enabled = 1;
++        WINE_MESSAGE("PW_NATIVE_STAGE process_init ready fs_set_proc=%p profile=%d\n",
++                     (void *)(ULONG_PTR)params->fs_set_proc, profile_enabled);
+         return STATUS_SUCCESS;
+     }
+ #endif
+@@ -86,19 +235,65 @@ static NTSTATUS thread_init(void *args)
+ {
+     struct pw_native_thread_params *params = args;
+     NTSTATUS status;
+-    if (!params || params->version != PW_NATIVE_ABI_VERSION) return STATUS_INVALID_PARAMETER;
++    WINE_MESSAGE("PW_NATIVE_STAGE thread_init enter args=%p version=%u expected=%u teb=%08x initialized=%d\n",
++                 args, params ? params->version : 0, PW_NATIVE_ABI_VERSION,
++                 params ? (unsigned)params->guest_teb : 0, thread_initialized);
++    if (!params || params->version != PW_NATIVE_ABI_VERSION)
++    {
++        WINE_MESSAGE("PW_NATIVE_STAGE thread_init reject params=%p version=%u\n",
++                     args, params ? params->version : 0);
++        return STATUS_INVALID_PARAMETER;
++    }
+     params->state = 0;
+     if (params->guest_teb < 0x10000 || params->guest_teb > 0xfffff000)
++    {
++        WINE_MESSAGE("PW_NATIVE_STAGE thread_init invalid-teb teb=%08x\n",
++                     (unsigned)params->guest_teb);
+         return STATUS_INVALID_ADDRESS;
++    }
+     if (thread_initialized)
+     {
+-        if (thread_state.guest_fs != params->guest_teb) return STATUS_INVALID_PARAMETER;
++        if (thread_state.guest_fs != params->guest_teb)
++        {
++            WINE_MESSAGE("PW_NATIVE_STAGE thread_init teb-mismatch old=%llx new=%llx\n",
++                         thread_state.guest_fs, params->guest_teb);
++            return STATUS_INVALID_PARAMETER;
++        }
+         thread_state.status = process_ready ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+         params->state = (unsigned long long)&thread_state;
++        WINE_MESSAGE("PW_NATIVE_STAGE thread_init reuse state=%p status=%08x ready=%d\n",
++                     &thread_state, (unsigned)thread_state.status, process_ready);
+         return thread_state.status;
+     }
+     status = capture_host_fs(&thread_state.host_fs);
++    WINE_MESSAGE("PW_NATIVE_STAGE thread_init host-fs status=%08x base=%llx\n",
++                 (unsigned)status, thread_state.host_fs);
+     if (status) return status;
++#ifdef __PROSPERO__
++    {
++        const size_t page_size = 0x4000;
++        const ULONG fiber_offset = 0x1e00;
++        ULONG *fiber_data = (ULONG *)(ULONG_PTR)(params->guest_teb + 0x10);
++        void *page = mmap((void *)0x10000000, page_size, PROT_READ | PROT_WRITE,
++                          MAP_PRIVATE | MAP_ANON, -1, 0);
++        WINE_MESSAGE("PW_NATIVE_STAGE thread_init mmap page=%p errno=%d\n", page, errno);
++        if (page == MAP_FAILED || (ULONG_PTR)page > 0xffffffffu - fiber_offset)
++        {
++            WINE_MESSAGE("PW_NATIVE_STAGE thread_init mmap-rejected page=%p\n", page);
++            if (page != MAP_FAILED) munmap(page, page_size);
++            return STATUS_NO_MEMORY;
++        }
++        memset(page, 0, page_size);
++        signal_tcb_page = page;
++        saved_fiber_data = *fiber_data;
++        signal_tcb_fiber_data = (ULONG)((ULONG_PTR)page + fiber_offset);
++        *fiber_data = signal_tcb_fiber_data;
++        WINE_MESSAGE("PW_NATIVE_STAGE thread_init tcb teb=%08x page=%p fiber=%08x previous=%08x\n",
++                     (unsigned)params->guest_teb, page, signal_tcb_fiber_data, saved_fiber_data);
++        WINE_MESSAGE("PW_NATIVE_SIGNAL_TCB guest_teb=%08x page=%p fiber=%08x previous=%08x\n",
++                     (unsigned)params->guest_teb, page, signal_tcb_fiber_data, saved_fiber_data);
++    }
++#endif
+     thread_profile = (struct pw_native_profile){0};
+     if (profile_enabled)
+     {
+@@ -109,6 +304,11 @@ static NTSTATUS thread_init(void *args)
+     thread_state.status = process_ready ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+     thread_initialized = 1;
+     params->state = (unsigned long long)&thread_state;
++    WINE_MESSAGE("PW_NATIVE_STAGE thread_init ready state=%p status=%08x ready=%d\n",
++                 &thread_state, (unsigned)thread_state.status, process_ready);
++#ifdef __PROSPERO__
++    if (profile_enabled) profile_watch_register(&thread_state);
++#endif
+     return thread_state.status;
+ }
+ 
+@@ -126,7 +326,22 @@ static NTSTATUS thread_get(void *args)
+ 
+ static NTSTATUS thread_term(void *args)
+ {
++#ifdef __PROSPERO__
++    WINE_MESSAGE("PW_NATIVE_STAGE thread_term enter args=%p initialized=%d teb=%llx page=%p\n",
++                 args, thread_initialized, thread_state.guest_fs, signal_tcb_page);
++    if (signal_tcb_page)
++    {
++        ULONG *fiber_data = (ULONG *)(ULONG_PTR)(thread_state.guest_fs + 0x10);
++        if (*fiber_data == signal_tcb_fiber_data) *fiber_data = saved_fiber_data;
++        munmap(signal_tcb_page, 0x4000);
++        signal_tcb_page = NULL;
++        saved_fiber_data = signal_tcb_fiber_data = 0;
++    }
++#endif
+     profile_report(&thread_state);
++#ifdef __PROSPERO__
++    profile_watch_unregister(&thread_state);
++#endif
+     thread_profile = (struct pw_native_profile){0};
+     thread_state = (struct pw_native_thread_state){0};
+     thread_initialized = 0;

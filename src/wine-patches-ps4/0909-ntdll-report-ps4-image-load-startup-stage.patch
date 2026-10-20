@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gladius PS4 port <noreply@example.invalid>
+Subject: [PATCH] ntdll: Report PS4 initial image and startup stage
+
+Report the main PE load result and mark each remaining ntdll startup phase.
+This identifies failures before Wine reaches the selected WoW64 CPU backend.
+
+Diagnostic only; no runtime behavior changes.
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 2cea2de4be..44bca3cb36 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1530,6 +1530,21 @@ NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine, void **mod
+ 
+     status = open_main_image( nt_name, module, &main_image_info, loadorder, load_machine );
+ 
++#ifdef __PROSPERO__
++    /* On PS4 the fatal startup signal can happen while Wine is resolving the
++     * initial PE. Keep the image loader's result on the title's stderr sink so
++     * we can distinguish an inaccessible file, a rejected PE, and a mapping
++     * conflict before the WoW64 backend is reached. */
++    {
++        char line[160];
++        int len = snprintf( line, sizeof(line),
++                            "wine startup: main image status=%08x requested=%04x actual=%04x base=%p entry=%p\n",
++                            status, load_machine, main_image_info.Machine,
++                            status ? NULL : *module, main_image_info.TransferAddress );
++        if (len > 0) wine_write_stderr( line, len < (int)sizeof(line) ? len : sizeof(line) - 1 );
++    }
++#endif
++
+     switch (status)
+     {
+     case STATUS_DLL_NOT_FOUND:
+@@ -1959,17 +1974,27 @@ static void start_main_thread(void)
+     startup_mark( "server_init_process" );
+     startup_info_size = server_init_process();
+     startup_mark( "server connected" );
++    startup_mark( "virtual_map_user_shared_data begin" );
+     virtual_map_user_shared_data();
++    startup_mark( "init_cpu_info begin" );
+     init_cpu_info();
++    startup_mark( "init_files begin" );
+     init_files();
++    startup_mark( "init_startup_info begin" );
+     init_startup_info();
+     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
+     set_load_order_app_name( main_wargv[0] );
++    startup_mark( "init_thread_stack begin" );
+     init_thread_stack( teb, 0, 0, 0 );
++    startup_mark( "NtCreateKeyedEvent begin" );
+     NtCreateKeyedEvent( &keyed_event, GENERIC_READ | GENERIC_WRITE, NULL, 0 );
++    startup_mark( "load_ntdll begin" );
+     load_ntdll();
++    startup_mark( "load_wow64_ntdll begin" );
+     load_wow64_ntdll( main_image_info.Machine );
++    startup_mark( "load_apiset_dll begin" );
+     load_apiset_dll();
++    startup_mark( "server_init_process_done begin" );
+     server_init_process_done();
+ }
+ 

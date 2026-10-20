@@ -1,0 +1,31 @@
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -62,6 +62,12 @@
+ /* The system suspend path waits for the GNM driver's per-frame submission
+  * completion notification, including frames submitted through Vulkan/AGC. */
+ extern int32_t sceGnmSubmitDone(void);
++#ifdef PW_RELOCATABLE_WINE
++/* Present only in the relocatable PRX build. Keep the eboot image mapped
++ * through Sony display/input setup, then release its low range immediately
++ * before Wine starts the selected Windows process. */
++extern int pw_relocated_wine_release_eboot(void) __attribute__((weak));
++#endif
+ 
+ /* Where the title's Wine runtime can be seen: /app0 inside the sandbox;
+  * once /data is granted the process sees the real root, where /app0 does
+@@ -1258,6 +1264,15 @@
+         status = pw_wine_start_environment(&start, &config, &ops);
+         PS5LOG_LOG("PW_WINE64 environment status=%d", status);
+     }
++#ifdef PW_RELOCATABLE_WINE
++    if (status == PW_OK) {
++        if (game && pw_relocated_wine_release_eboot) {
++            int release_status = pw_relocated_wine_release_eboot();
++            PS5LOG_LOG("PW_WINE64 relocatable eboot release status=%d", release_status);
++            if (release_status) status = PW_ERR_STATE;
++        }
++    }
++#endif
+     if (status == PW_OK) {
+         status = pw_wine_start_run(&start, &config, &ops);
+         PS5LOG_LOG("PW_WINE64 run status=%d", status);

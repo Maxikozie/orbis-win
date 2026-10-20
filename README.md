@@ -1,4 +1,7 @@
-# ps4-gladius
+# orbis-win
+
+**Current PS4 Wine port handoff:** [docs/HANDOFF-2026-10-20.md](docs/HANDOFF-2026-10-20.md).
+The repository carries the PS4 runtime port, build and packaging tools, compatibility patches, and hardware test notes.
 
 Bringing RADV — and eventually a Windows runtime — up on a **PlayStation 4 Pro**,
 running on Orbis OS itself. No Linux, no dual boot.
@@ -7,11 +10,14 @@ The hard dependency already exists: [orbis-ports/mesa-ps4](https://github.com/or
 is Mesa's RADV running natively on the PS4 GPU, submitting through `sceGnmSubmitCommandBuffers`,
 presenting through VideoOut. It passes Vulkan CTS on hardware and runs OpenGothic at ~50 fps.
 
-**It has never run on a Pro.** `CHIP_GLADIUS` is declared in the driver, PCI
-`0x9924` maps to it, and every Liverpool workaround is written
-`family == CHIP_LIVERPOOL || family == CHIP_GLADIUS` — but every captured dump,
-every CTS run and every frame in that project's record came off a base PS4
-(Liverpool, 18 CU). The Pro path is written and unexercised.
+**The Pro path is active, but not complete.** On the PS4 Pro, RADV identifies
+Neo mode as `CHIP_GLADIUS`; a hardware-ID probe measured four shader engines
+and 36 active CUs. Raster-config and CU-mask experiments have run, but the
+Neo GTA IV workload still hangs and no Vulkan CTS run has completed on Gladius.
+The Orbis winsys currently reports GFX IP version 7.2 in both title modes, so
+the printed `gfx=9` means Mesa enum `GFX7` (ordinal 9), not GFX9. Whether that
+GFX-level choice correctly models the Pro's custom Polaris-era hardware remains
+an open driver question; see [`docs/HANDOFF-2026-10-09.md`](docs/HANDOFF-2026-10-09.md).
 
 So this is not a port. It is a bring-up, and most of it is measurement.
 [`docs/PLAN.md`](docs/PLAN.md) has the five stages;
@@ -154,17 +160,28 @@ launching the old installed package cannot test a newly uploaded build.
 The corrected GTA IV profile lives in `src/profiles/gtaiv.profile` and was
 uploaded separately: 1920x1080, upstream launch arguments, and XInput,
 with the intentional `d3d9=n` override retained for this copy's 1911.dll path.
-Pinball is now the active baseline: it draws frames and plays audio, but
-controls work on hardware with patch 0869, and System/MS Sans Serif load
-with patch 0821. The game renders but its window decorations are missing.
-Its profile shows the full 800x600 desktop and traces window layout and keys.
-See the latest entries in `docs/FINDINGS.md`.
+Pinball is the confirmed baseline: the clean `ORBW00024` package works, and
+the user confirms its presentation looks correct. Controls work with patch
+0869, and System/MS Sans Serif load with patch 0821. Windows decorations are
+intentionally omitted for the console presentation. See the current handoff
+for the composition fix and the next title tests.
 
 ```sh
 ./scripts/logs.sh klog &               # FIRST. See the warning below.
 python3 ./scripts/ps5logd.py &         # runtime TCP logs, port 9300; only one receiver
 ./scripts/build-app-ps4.sh --pkg --neo && ./scripts/deploy.sh wine-app
 ./scripts/build.sh threadprobe --pkg --neo --deploy    # only if a number is disputed
+```
+
+For a side-by-side GTA IV Neo/base comparison, install the Neo package as
+`GLDS10005` and the base package as `GLDS10041`. Deploy them separately with
+`./scripts/deploy.sh wine-app` and `./scripts/deploy.sh wine-app-base`. To
+rebuild the base package without overwriting the default Neo output:
+
+```sh
+TITLE_ID=GLDS10041 TITLE="Prospero Wine Base" \
+  PKG_OUT="$PWD/pkgout/wine-app-variants/GLDS10041-base" \
+  ./scripts/build-app-ps4.sh --pkg
 ```
 
 Install from `/data/pkg/` and launch Pinball. Press Options (F2), Cross
@@ -205,9 +222,10 @@ the exact failure all day into a channel nobody was recording.
 own diagnostics. Use `ERR()` in ntdll (it arrives even from a thread with no
 TEB) and `sceKernelDebugOutText` in wineserver.
 
-⚠ **Always build with `--neo`.** `build-app-ps4.sh` defaults to `NEO=0`, and a
-package built without it runs a Pro as a base PS4 — the only sign is
-`device "PS5" 1002:9920` in the log.
+⚠ **Build the normal PS4 Pro package with `--neo`.** `build-app-ps4.sh` defaults
+to `NEO=0`, and a package built without it runs a Pro as a base PS4 — the only
+sign is `device "PS5" 1002:9920` in the log. The separately named
+`GLDS10041` package above is the deliberate base-mode comparison build.
 
 ⚠ **`scripts/prx-ps4.sh` empties `prx/sce_module`** and rebuilds only its own
 nine modules. Run `radv-`, `freetype-` and `wineps5-prx-ps4.sh` after it, or the
@@ -218,8 +236,8 @@ twelve modules.
 context from patches later in the series and will not apply at its own position.
 Put the change after the patch that owns that code, or fold it in — the NULL
 `thread_data` guard went into `0882`, which introduces the thread that has no
-Wine data. The series is `0100-0899` and `0870-0899` is contiguous, so new wine
-patches go in the free `0821-0869` range.
+Wine data. The base series is `0100-0899`; local follow-up patches `0900-0961`
+are appended after it, and the build accepts through `0961`.
 
 ⚠ **`prospero-win/` is gitignored and is its own tree.** Work there survives
 only as a patch in `src/prospero-win-patches-ps4/`. Verify one with

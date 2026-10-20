@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] server: trace PS4 SIGUSR1 delivery source
+
+The native WoW64 startup thread repeatedly enters wait_suspend even though
+the server reports zero thread and process suspend counts. Trace bounded
+SIGUSR1 deliveries at the Unix signal boundary, including the server request
+that caused each send and the target's wait/suspend state.
+
+--- a/server/ptrace.c
++++ b/server/ptrace.c
+@@ -253,6 +253,28 @@
+ int send_thread_signal( struct thread *thread, int sig )
+ {
+     int ret = -1;
++#ifdef __PROSPERO__
++    unsigned int n = 0;
++    int trace = 0;
++
++    if (sig == SIGUSR1)
++    {
++        static unsigned int trace_count;
++        n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++        trace = n <= 8 || !(n & (n - 1));
++        if (trace)
++        {
++            char line[192];
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            snprintf( line, sizeof(line),
++                      "wineserver sigusr1-send n=%u from=%04x req=%u to=%04x suspend=%d proc_suspend=%d state=%d waiting=%d context=%d\n",
++                      n, current ? current->id : 0, current ? current->ps5_last_req : 0,
++                      thread->id, thread->suspend, thread->process->suspend,
++                      thread->state, !!thread->wait, !!thread->context );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
++#endif
+ 
+     if (thread->unix_tid != -1)
+     {
+@@ -265,6 +287,16 @@
+         thread->unix_tid = -1;
+     }
+ 
++#ifdef __PROSPERO__
++    if (trace)
++    {
++        char line[96];
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        snprintf( line, sizeof(line), "wineserver sigusr1-send-result n=%u result=%d errno=%d\n",
++                  n, ret, errno );
++        sceKernelDebugOutText( 0, line );
++    }
++#endif
+     if (debug_level && ret != -1)
+         fprintf( stderr, "%04x: *sent signal* %s\n", thread->id, get_signal_name( sig ));
+     return (ret != -1);

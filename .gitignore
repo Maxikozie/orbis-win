@@ -8,6 +8,9 @@ build/
 build-*/
 pkgout/
 *build-*/
+codex_scratch/
+__pycache__/
+*.py[cod]
 
 # local console settings
 config.env

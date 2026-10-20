@@ -1,0 +1,108 @@
+From: Codex <codex@localhost>
+Subject: [PATCH] server: trace a stalled registry request on PS4
+
+The Oblivion run reached its executable but stopped rendering while the
+native sampler repeatedly observed a 64-byte Wine reply-pipe read. Expand
+the registry-query table beyond its 64-entry startup capacity, pair
+bounded get_key_value handler begin/end markers, and report whether the
+in-process server actually arms the wait watchdog.
+
+---
+--- a/server/registry.c
++++ b/server/registry.c
+@@ -2289,7 +2289,9 @@
+     unsigned int count;
+ };
+ 
+-static struct pw_key_value_probe_entry pw_key_value_probe[64];
++/* The small original table filled before the title reached its first menu.
++ * Keep enough distinct names to cover the game's startup and first scene. */
++static struct pw_key_value_probe_entry pw_key_value_probe[512];
+ 
+ static void pw_append_wstr( char *line, size_t *pos, const WCHAR *str, data_size_t len )
+ {
+@@ -2312,10 +2314,10 @@
+ 
+     for (i = 0; i + sizeof(WCHAR) <= name.len; i += sizeof(WCHAR))
+         hash = (hash ^ name.str[i / sizeof(WCHAR)]) * 16777619u;
+-    slot = (hash ^ handle) & 63;
+-    for (i = 0; i < 64; ++i)
+-    {
+-        struct pw_key_value_probe_entry *entry = &pw_key_value_probe[(slot + i) & 63];
++    slot = (hash ^ handle) & 511;
++    for (i = 0; i < 512; ++i)
++    {
++        struct pw_key_value_probe_entry *entry = &pw_key_value_probe[(slot + i) & 511];
+         if (!entry->count)
+         {
+             entry->handle = handle;
+--- a/server/request.c
++++ b/server/request.c
+@@ -353,6 +353,25 @@
+     enum request req = thread->req.request_header.req;
+ 
+ #ifdef __PROSPERO__
++    /* A client can sit forever in wait_reply() if the in-process server stops
++     * completing a request. Pair bounded power-of-two markers so the last
++     * begin without a matching end identifies the handler that did not return. */
++    if (req == REQ_get_key_value)
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        static unsigned int began;
++        char line[96];
++        unsigned int count = __atomic_add_fetch( &began, 1, __ATOMIC_RELAXED );
++        if (count <= 512 || !(count & (count - 1)))
++        {
++            snprintf( line, sizeof(line), "wineserver: getvalue begin n=%u tid=%04x\n",
++                      count, thread->id );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
++#endif
++
++#ifdef __PROSPERO__
+     /* ⚠ DIAGNOSTIC. A handler that faults takes the server thread with it, and
+      * the backtrace names only call_req_handler -- the request it was given is
+      * the one thing that identifies the handler. WINEDEBUG=+server cannot
+@@ -389,6 +408,22 @@
+         req_handlers[req]( &current->req, &reply );
+     else
+         set_error( STATUS_NOT_IMPLEMENTED );
++
++#ifdef __PROSPERO__
++    if (req == REQ_get_key_value)
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        static unsigned int ended;
++        char line[96];
++        unsigned int count = __atomic_add_fetch( &ended, 1, __ATOMIC_RELAXED );
++        if (count <= 512 || !(count & (count - 1)))
++        {
++            snprintf( line, sizeof(line), "wineserver: getvalue end n=%u tid=%04x status=%08x\n",
++                      count, thread->id, current ? current->error : 0 );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
++#endif
+ 
+     if (current)
+     {
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -1223,10 +1223,15 @@
+ static void start_wait_watchdog(void)
+ {
+     static int started;
++    extern int sceKernelDebugOutText( int channel, const char *text );
++    const char *enabled;
+ 
+     if (started) return;
+     started = 1;
+-    if (getenv( "WINE_PS5_WAIT_WATCHDOG" )) add_timeout_user( -2 * TICKS_PER_SEC, wait_watchdog, NULL );
++    enabled = getenv( "WINE_PS5_WAIT_WATCHDOG" );
++    sceKernelDebugOutText( 0, enabled ? "wineserver: wait watchdog armed\n" :
++                           "wineserver: wait watchdog env missing\n" );
++    if (enabled) add_timeout_user( -2 * TICKS_PER_SEC, wait_watchdog, NULL );
+ }
+ 
+ static int wait_on( const union select_op *select_op, unsigned int count, struct object *objects[],

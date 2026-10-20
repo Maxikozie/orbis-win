@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: route Prospero SIGSYS through Wine's syscall dispatcher
+
+The PS4 native WoW64 path raises SIGSYS when a Windows syscall instruction
+reaches the host. The Wine SIGSYS handler translates that frame back into
+Wine's syscall dispatcher, but upstream only compiles and installs it for
+Linux and macOS. On Prospero the early-fault handler therefore terminates the
+process in NtQueryDirectoryFile instead of dispatching the syscall.
+
+Enable the existing handler for Prospero as well. Its Linux-only
+PR_SET_SYSCALL_USER_DISPATCH branch remains guarded by __linux__.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 0000000..0000000 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -3250,7 +3250,7 @@
+ }
+ 
+ 
+-#if defined(__APPLE__) || defined(__linux__)
++#if defined(__APPLE__) || defined(__linux__) || defined(__PROSPERO__)
+ /**********************************************************************
+  *		sigsys_handler
+  *
+@@ -3517,7 +3517,7 @@ void signal_init_process( TEB *teb )
+     if (pw_native_sigaction( SIGILL, &sig_act, NULL ) == -1) goto error;
+     if (pw_native_sigaction( SIGBUS, &sig_act, NULL ) == -1) goto error;
+-#if defined(__APPLE__) || defined(__linux__)
++#if defined(__APPLE__) || defined(__linux__) || defined(__PROSPERO__)
+     sig_act.sa_sigaction = sigsys_handler;
+     if (pw_native_sigaction( SIGSYS, &sig_act, NULL ) == -1) goto error;
+ #endif
+ 
+ #ifdef __PROSPERO__

@@ -49,7 +49,6 @@ static int32_t platform_load_start(const char *path, size_t argc, const void *ar
      * libvulkan.prx has now been refused three times for three different
      * guesses. Print the kernel's own answer instead. */
     if (handle < 0) {
-        extern int sceKernelDebugOutText(int channel, const char *text);
         static int reported;
         char line[256];
 

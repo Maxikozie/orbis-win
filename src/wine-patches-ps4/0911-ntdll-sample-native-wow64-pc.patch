@@ -1,0 +1,115 @@
+Subject: ntdll: sample native WoW64 program counter on SIGPROF
+
+Add an optional SIGPROF sampling hook to the PS4 native WoW64 signal bridge.
+Install it only when SIGPROF still has its default action, keep the required
+native readiness mask unchanged, and expose an atomic register snapshot for
+the native-thread watcher to report outside signal context.
+
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index c00fc39e59..cc0942dcd5 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -97,6 +97,10 @@ WINE_DECLARE_DEBUG_CHANNEL(seh);
+ extern int sceKernelGetModuleInfo( int32_t handle, void *info );
+ static struct native_libkernel_entries pw_native_kernel;
+ static unsigned int pw_native_caps;
++static volatile unsigned long long pw_native_pc_sequence;
++static volatile unsigned long long pw_native_pc_rip, pw_native_pc_rsp, pw_native_pc_cs;
++static volatile unsigned long long pw_native_pc_rax, pw_native_pc_rdi, pw_native_pc_rsi;
++static volatile unsigned long long pw_native_pc_rdx, pw_native_pc_r10;
+ 
+ __attribute__((visibility("default")))
+ unsigned int __wine_prospero_native_wow64_caps( unsigned int version )
+@@ -104,6 +106,30 @@ unsigned int __wine_prospero_native_wow64_caps( unsigned int version )
+     return version == 1 ? __atomic_load_n( &pw_native_caps, __ATOMIC_ACQUIRE ) : 0;
+ }
+ 
++__attribute__((visibility("default")))
++unsigned int __wine_prospero_native_profile_sample( unsigned long long *sequence,
++                                                     unsigned long long *rip,
++                                                     unsigned long long *rsp,
++                                                     unsigned long long *cs,
++                                                     unsigned long long *rax,
++                                                     unsigned long long *rdi,
++                                                     unsigned long long *rsi,
++                                                     unsigned long long *rdx,
++                                                     unsigned long long *r10 )
++{
++    unsigned long long seq = __atomic_load_n( &pw_native_pc_sequence, __ATOMIC_ACQUIRE );
++    if (sequence) *sequence = seq;
++    if (rip) *rip = __atomic_load_n( &pw_native_pc_rip, __ATOMIC_RELAXED );
++    if (rsp) *rsp = __atomic_load_n( &pw_native_pc_rsp, __ATOMIC_RELAXED );
++    if (cs) *cs = __atomic_load_n( &pw_native_pc_cs, __ATOMIC_RELAXED );
++    if (rax) *rax = __atomic_load_n( &pw_native_pc_rax, __ATOMIC_RELAXED );
++    if (rdi) *rdi = __atomic_load_n( &pw_native_pc_rdi, __ATOMIC_RELAXED );
++    if (rsi) *rsi = __atomic_load_n( &pw_native_pc_rsi, __ATOMIC_RELAXED );
++    if (rdx) *rdx = __atomic_load_n( &pw_native_pc_rdx, __ATOMIC_RELAXED );
++    if (r10) *r10 = __atomic_load_n( &pw_native_pc_r10, __ATOMIC_RELAXED );
++    return 1;
++}
++
+ static void pw_native_resolve_kernel(void)
+ {
+     unsigned char info[0x160] = {0};
+@@ -1048,6 +1064,7 @@ PW_NATIVE_SIGNAL_ENTRY( quit )
+ PW_NATIVE_SIGNAL_ENTRY( usr1 )
+ PW_NATIVE_SIGNAL_ENTRY( trap )
+ PW_NATIVE_SIGNAL_ENTRY( segv )
++PW_NATIVE_SIGNAL_ENTRY( profile )
+ #undef PW_NATIVE_SIGNAL_ENTRY
+ #if defined(__ORBIS__) && !defined(__PROSPERO_REAL__)
+ /* PS4 uses libc sigaction, but native guest mode still needs to restore the
+@@ -1056,6 +1073,24 @@ PW_NATIVE_SIGNAL_ENTRY( segv )
+ #else
+ #define PW_SIGNAL_HANDLER(name) (pw_native_kernel.sigaction ? pw_native_##name##_handler : name##_handler)
+ #endif
++
++#ifdef __PROSPERO__
++static void __attribute__((used)) profile_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
++{
++    ucontext_t *context = _sigcontext;
++    (void)signal;
++    (void)siginfo;
++    __atomic_store_n( &pw_native_pc_rip, RIP_sig(context), __ATOMIC_RELAXED );
++    __atomic_store_n( &pw_native_pc_rsp, RSP_sig(context), __ATOMIC_RELAXED );
++    __atomic_store_n( &pw_native_pc_cs, CS_sig(context), __ATOMIC_RELAXED );
++    __atomic_store_n( &pw_native_pc_rax, RAX_sig(context), __ATOMIC_RELAXED );
++    __atomic_store_n( &pw_native_pc_rdi, RDI_sig(context), __ATOMIC_RELAXED );
++    __atomic_store_n( &pw_native_pc_rsi, RSI_sig(context), __ATOMIC_RELAXED );
++    __atomic_store_n( &pw_native_pc_rdx, RDX_sig(context), __ATOMIC_RELAXED );
++    __atomic_store_n( &pw_native_pc_r10, R10_sig(context), __ATOMIC_RELAXED );
++    __atomic_add_fetch( &pw_native_pc_sequence, 1, __ATOMIC_RELEASE );
++}
++#endif
+ #else
+ #define PW_SIGNAL_HANDLER(name) name##_handler
+ #endif
+@@ -1157,7 +1187,7 @@ static unsigned int pw_native_ready_caps(void)
+         user_shared_data->XState.EnabledFeatures != 7 ||
+         !pw_native_signal_xstate_size( &standard )) return 0;
+     if (amd64_get_fsbase( &host_fs ) || !host_fs) return 0;
+-    return 7; /* libc sigaction, host-FS-safe entry, corrected FP/xstate context */
++    return 7 | (pw_native_caps & 0x20); /* libc signal path, host-FS-safe entry, corrected FP/xstate context */
+ #else
+     if (!pw_native_kernel.sigaction || !pw_native_kernel.sigreturn || !pw_native_kernel.sysarch)
+         return 0;
+@@ -3389,6 +3419,19 @@ void signal_init_process( TEB *teb )
+     if (pw_native_sigaction( SIGSYS, &sig_act, NULL ) == -1) goto error;
+ #endif
+ 
++#ifdef __PROSPERO__
++    {
++        struct sigaction old_act;
++        if (pw_native_sigaction( SIGPROF, NULL, &old_act ) == 0 && old_act.sa_handler == SIG_DFL)
++        {
++            sig_act.sa_sigaction = PW_SIGNAL_HANDLER(profile);
++            if (pw_native_sigaction( SIGPROF, &sig_act, NULL ) == 0) pw_native_caps |= 0x20;
++            else TRACE_(seh)( "could not install native PC sampler signal\n" );
++        }
++        else TRACE_(seh)( "native PC sampler unavailable: SIGPROF already owned\n" );
++    }
++#endif
++
+ #ifdef __linux__
+     if (syscall_dispatch_enabled)
+     {

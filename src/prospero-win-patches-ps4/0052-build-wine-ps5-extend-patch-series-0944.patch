@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] build: accept PS4 Wine patch 0944
+
+Allow the raw PS4 single-step fix when the kernel has cleared TF.
+
+---
+--- a/tools/build_wine_ps5.sh
++++ b/tools/build_wine_ps5.sh
+@@ -167,8 +167,8 @@
+             fail "patch name must be NNNN-lower-case-words.patch: $patch"
+         number=$(printf '%s' "$patch" | cut -c1-4 | sed 's/^0*//')
+         number=${number:-0}
+-        [ "$number" -ge 100 ] && [ "$number" -le 943 ] ||
+-            fail "patch number outside 0100-0943: $patch"
++        [ "$number" -ge 100 ] && [ "$number" -le 944 ] ||
++            fail "patch number outside 0100-0944: $patch"
+         [ "$number" -ne "$last" ] || fail "duplicate patch number: $patch"
+         last=$number
+         grep -q '^Subject: ' "$patches/$patch" || fail "patch has no Subject: $patch"
+-- 
+2.43.0

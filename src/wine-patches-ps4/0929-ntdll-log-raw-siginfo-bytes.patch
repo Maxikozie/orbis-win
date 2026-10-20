@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: log raw PS4 SIGUSR1 siginfo bytes
+
+The PS4 signal handler sees repeated SIGUSR1 deliveries with si_code=3 and no
+sender PID, while wineserver's instrumented send_thread_signal path stays
+silent. Record the raw siginfo prefix at the same sparse checkpoints to verify
+the Orbis kernel's signal-info layout and identify fields not represented by
+the SDK's decoded siginfo_t.
+
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 7700eb565e..f45778a277 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -3135,6 +3135,21 @@ static void __attribute__((used)) usr1_handler( int signal, siginfo_t *siginfo,
+                       data->pw_server_seq, data->pw_server_request, data->pw_server_stage,
+                       data->pw_server_fd, data->pw_server_remaining, data->pw_server_received );
+             sceKernelDebugOutText( 0, line );
++            if (siginfo)
++            {
++                char raw_line[192];
++                int offset, i;
++                offset = snprintf( raw_line, sizeof(raw_line), "ntdll usr1-raw n=%u bytes=", n );
++                for (i = 0; i < 32 && offset > 0 && offset < sizeof(raw_line) - 4; i++)
++                    offset += snprintf( raw_line + offset, sizeof(raw_line) - offset,
++                                        "%02x", ((const unsigned char *)siginfo)[i] );
++                if (offset > 0 && offset < sizeof(raw_line) - 2)
++                {
++                    raw_line[offset++] = '\n';
++                    raw_line[offset] = 0;
++                    sceKernelDebugOutText( 0, raw_line );
++                }
++            }
+         }
+     }
+ #endif

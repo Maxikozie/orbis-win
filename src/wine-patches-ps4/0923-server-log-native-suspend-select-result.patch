@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] server: report native WoW64 suspend select results
+
+The native startup probe shows a valid 32-bit thread entry context but no
+guest progress while the thread repeatedly submits zero-timeout REQ_select.
+Report the server-side suspend and wait state at bounded checkpoints to show
+whether the thread remains suspended or the select request returns early.
+
+diff --git a/server/thread.c b/server/thread.c
+index 1898a0a1de..c0a92b23f3 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -2327,3 +2327,25 @@ DECL_HANDLER(select)
+     reply->signaled = select_on( &select_op, op_size, req->cookie, req->flags, req->timeout );
+ 
++#ifdef __PROSPERO__
++    if (!req->timeout && !req->size && ctx_count == 2 &&
++        ((const struct context_data *)((const char *)(result + 1) + req->size))->machine == 0x8664)
++    {
++        static unsigned int trace_count;
++        unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++
++        if (n <= 4 || !(n & (n - 1)))
++        {
++            char line[256];
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            snprintf( line, sizeof(line),
++                      "wineserver select-result n=%u tid=%04x signaled=%u error=%08x suspend=%d proc_suspend=%d state=%d waiting=%d context=%d context_status=%08x cookie=%llx\n",
++                      n, current->id, reply->signaled, get_error(), current->suspend,
++                      current->process->suspend, current->state, !!current->wait,
++                      !!current->context, current->context ? current->context->status : 0,
++                      (unsigned long long)current->suspend_cookie );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
++#endif
++
+     if (get_error() == STATUS_USER_APC && get_reply_max_size() >= sizeof(union apc_call))

@@ -79,17 +79,25 @@ gen "$prx/obj/ntdll_desc.c" \
     __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook \
     pw_wine_set_display_release pw_wine_release_display pw_ps4_setenv pw_wine_dl_addr \
     --optional-from "$build/dlls/ntdll/ntdll.so" --nm llvm-nm \
-    --optional-export __wine_prospero_native_wow64_caps
+    --optional-export __wine_prospero_native_wow64_caps \
+    --optional-export __wine_prospero_native_profile_sample
 gen "$prx/obj/win32u_desc.c" __wine_unix_lib_init
-gen "$prx/obj/wineserver_desc.c" \
-    pw_wineserver_connect pw_wine_thread_register pw_wine_thread_unregister \
-    pw_wineserver_call_direct pw_wineserver_try_fast_mutex \
-    pw_wineserver_mutex_backend pw_wineserver_sync_backend pw_cwd_share_changes
+if [ "${PW_PRE_V020:-0}" = 1 ]; then
+    gen "$prx/obj/wineserver_desc.c" \
+        pw_wineserver_connect pw_wine_thread_register pw_wine_thread_unregister \
+        pw_wineserver_call_direct pw_wineserver_try_fast_mutex pw_cwd_share_changes
+else
+    gen "$prx/obj/wineserver_desc.c" \
+        pw_wineserver_connect pw_wine_thread_register pw_wine_thread_unregister \
+        pw_wineserver_call_direct pw_wineserver_try_fast_mutex \
+        pw_wineserver_mutex_backend pw_wineserver_sync_backend pw_cwd_share_changes
+fi
 gen "$prx/obj/wowprospero_desc.c" __wine_unix_call_funcs
+gen "$prx/obj/wow64native_desc.c" __wine_unix_call_funcs
 for m in winevulkan opengl32 ws2_32 crypt32 dwrite xinput1_3; do
     gen "$prx/obj/${m}_desc.c" __wine_unix_call_funcs __wine_unix_call_wow64_funcs
 done
-for d in ntdll win32u wineserver wowprospero winevulkan opengl32 ws2_32 crypt32 dwrite xinput1_3; do
+for d in ntdll win32u wineserver wowprospero wow64native winevulkan opengl32 ws2_32 crypt32 dwrite xinput1_3; do
     $CC -std=gnu11 -O2 -fPIC -I"$root/wine/ps5" -c "$prx/obj/${d}_desc.c" -o "$prx/obj/${d}_desc.o"
 done
 
@@ -270,6 +278,45 @@ if [ -f "$prx/wowprospero.shared.elf" ]; then
            >> "$prx/wowprospero.link.log" 2>&1
     then echo "  ✓ wowprospero  $(du -h "$prx/sce_module/wowprospero.prx" | cut -f1)"
     else echo "  ✗ wowprospero: create-fself"; tail -3 "$prx/wowprospero.link.log" | sed 's/^/      /'; status=1; fi
+fi
+
+if [ "${PW_SKIP_NATIVE:-0}" = 1 ]; then
+    echo "== 6. skip native WoW64 companion (translator control build) =="
+else
+echo "== 6. wow64native (native WoW64 Unix companion) =="
+# The PE backend's DllMain calls __wine_init_unix_call(). That requires this
+# Unix companion at x86_64-unix/wow64native.prx. The package's generic PRX
+# staging loop copies every module in sce_module/ to both runtime locations;
+# omitting this companion makes DllMain fail with STATUS_DLL_INIT_FAILED and
+# Wine silently falls back to the prefix CPU, even while telemetry says the
+# selected backend is native.
+export PW_PRX_STUBS="-L$stubs -Wl,--as-needed $(ls "$stubs"/*.so 2>/dev/null | tr '\n' ' ')"
+$CC -shared -Wl,-Bsymbolic -Wl,--eh-frame-hdr -Wl,-soname,wow64native.prx \
+    -femulated-tls \
+    -D__PROSPERO__ -D__WINESRC__ -DWINE_UNIX_LIB -D_REENTRANT \
+    -I"$root/wine/wow64native" -I"$build/include" -I"$work/source/include" \
+    -I"$root/src" -I"$root/include" \
+    "$root/wine/wow64native/unix.c" "$gladius/src/native/pw_emutls_ps4.c" \
+    "$gladius/src/native/pw_wow_log_ps4.c" \
+    "$prx/obj/pw_wine_dl_libc.o" "$prx/obj/wow64native_desc.o" \
+    -o "$prx/wow64native.shared.elf" \
+    > "$prx/wow64native.link.log" 2>&1 || {
+        echo "  ✗ wow64native: link"; grep -E "error|undefined" "$prx/wow64native.link.log" | head -4; status=1;
+    }
+
+if [ -f "$prx/wow64native.shared.elf" ]; then
+    if "$oo/bin/linux/create-fself" -in "$prx/wow64native.shared.elf" \
+           -out "$prx/wow64native.oelf" -lib "$prx/sce_module/wow64native.prx" \
+           -libname "wow64native.prx" -ptype fake -library-path "$stubs:$oo/lib" \
+           >> "$prx/wow64native.link.log" 2>&1
+    then
+        cp "$prx/wow64native.shared.elf" "$stubs/wow64native.so"
+        cp "$prx/wow64native.shared.elf" "$stubs/wow64native.prx"
+        echo "  ✓ wow64native  $(du -h "$prx/sce_module/wow64native.prx" | cut -f1)"
+    else
+        echo "  ✗ wow64native: create-fself"; tail -3 "$prx/wow64native.link.log" | sed 's/^/      /'; status=1
+    fi
+fi
 fi
 
 exit $status

@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: leave native Prospero SIGSYS at syscall return site
+
+Prospero SIGSYS can also report a native libkernel syscall failure. Do not
+feed its errno/result in RAX to Wine's Windows syscall dispatcher: that turned
+0xffffffffade97eba into win32u syscall 3770 and looped on illegal instruction.
+The native syscall context already points after the syscall instruction, where
+libkernel's wrapper handles the returned error. Windows syscall IDs are
+zero-extended 13-bit values (ntdll or win32u table), so route only those.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 0000000..0000000 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -3267,5 +3267,18 @@ static void sigsys_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+     ERR_(seh)("Prospero SIGSYS code=%d errno=%d rax=%016lx rip=%016lx frame=%p frame_id=%08x frame_rip=%016lx\n",
+               siginfo ? siginfo->si_code : 0, siginfo ? siginfo->si_errno : 0,
+               (unsigned long)RAX_sig(sigcontext), (unsigned long)RIP_sig(sigcontext), frame,
+               frame ? frame->syscall_id : 0, frame ? (unsigned long)frame->rip : 0);
++
++    /* Native libkernel wrappers can also raise SIGSYS. In that case RAX is
++     * the host syscall result, not a Wine service number; the saved RIP is
++     * already after the syscall and must be allowed to take the wrapper's
++     * error path. Wine's ntdll/win32u service IDs fit in 13 zero-extended
++     * bits (the table selector is bit 12). */
++    if ((ULONG_PTR)RAX_sig(sigcontext) > 0x1fff)
++    {
++        ERR_(seh)("Passing native Prospero SIGSYS through: rax=%016lx rip=%016lx flags=%08lx\n",
++                  (unsigned long)RAX_sig(sigcontext), (unsigned long)RIP_sig(sigcontext),
++                  (unsigned long)EFL_sig(sigcontext));
++        return;
++    }
+ #endif
+ 
+     TRACE_(seh)("SIGSYS, rax %#lx, rip %#lx.\n", (long)RAX_sig(sigcontext), (long)RIP_sig(sigcontext));
+-- 
+2.43.0

@@ -1,0 +1,198 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Subject: [PATCH] profiles: select nGlide desktop resolution in the prefix
+
+Let MDK select nGlide 1.01's documented By desktop option by writing its
+per-prefix registry value before Wine starts. This avoids relying on an
+unsupported environment variable and pairs with the 1920x1080 desktop profile.
+
+---
+diff --git a/native/pw_wine_prefix.c b/native/pw_wine_prefix.c
+index 6ba3acd..43b1b74 100644
+--- a/native/pw_wine_prefix.c
++++ b/native/pw_wine_prefix.c
+@@ -45,6 +45,44 @@ int pw_wine_prefix_temp_create(const char *prefix, PwPrefixTemp *temp)
+     return (int)temp->count;
+ }
+ 
++int pw_wine_prefix_nglide_desktop_resolution(const char *prefix)
++{
++    static const char section[] = "[Software\\\\Zeus Software\\\\nGlide]";
++    static const char setting[] = "\"Resolution\"=dword:00000001";
++    char path[1024], line[1024];
++    FILE *file;
++    int in_section = 0;
++
++    if (!prefix || snprintf(path, sizeof(path), "%s/user.reg", prefix) >= (int)sizeof(path))
++        return -1;
++    if (!(file = fopen(path, "r"))) return -1;
++    while (fgets(line, sizeof(line), file)) {
++        size_t length = strcspn(line, "\r\n");
++        line[length] = 0;
++        if (line[0] == '[') in_section = !strcmp(line, section);
++        else if (in_section && !strcmp(line, setting)) {
++            fclose(file);
++            return 0;
++        }
++        if (length + 1 == sizeof(line) && !feof(file)) {
++            int c;
++            while ((c = fgetc(file)) != '\n' && c != EOF) {}
++        }
++    }
++    {
++        int failed = ferror(file);
++        if (fclose(file)) failed = 1;
++        if (failed) return -1;
++    }
++    if (!(file = fopen(path, "ab"))) return -1;
++    {
++        int failed = fputs("\n[Software\\\\Zeus Software\\\\nGlide]\n\"Resolution\"=dword:00000001\n", file) == EOF;
++        if (fclose(file)) failed = 1;
++        if (failed) return -1;
++    }
++    return 1;
++}
++
+ /* Whole small files; NULL when unreadable or larger than limit. */
+ static unsigned char *read_file(const char *path, size_t limit, size_t *size)
+ {
+diff --git a/native/pw_wine_prefix.h b/native/pw_wine_prefix.h
+index b7996ac..0f84573 100644
+--- a/native/pw_wine_prefix.h
++++ b/native/pw_wine_prefix.h
+@@ -9,6 +9,11 @@
+  * created, as for a prefix Wine has not made yet. */
+ int pw_wine_prefix_temp_create(const char *prefix, PwPrefixTemp *temp);
+ 
++/* Sets nGlide 1.01's per-prefix Resolution value to By desktop (registry
++ * DWORD 1). Appends the setting only when it is not already present. Returns
++ * 1 when written, 0 when already set, or -1 on an I/O or path error. */
++int pw_wine_prefix_nglide_desktop_resolution(const char *prefix);
++
+ /* WoW64 loads its CPU backend from the prefix's system32 only, so a prefix
+  * made before the native backend shipped lacks it. Copies source (the
+  * runtime's x86_64-windows/<name>) to <prefix>/drive_c/windows/system32/<name>
+diff --git a/src/pw_game_profile.c b/src/pw_game_profile.c
+index 4d0024c..988b670 100644
+--- a/src/pw_game_profile.c
++++ b/src/pw_game_profile.c
+@@ -257,8 +257,8 @@ static int debug_field(PwGameProfile *profile, const uint8_t *key, size_t key_le
+     return PW_OK;
+ }
+ 
+-/* [runtime] thread_scheduling: true/false or 1/0; cpu: native or
+- * translator; each once. */
++/* [runtime] thread_scheduling: true/false or 1/0; nglide_resolution: app or
++ * desktop; cpu: native or translator. */
+ static int runtime_field(PwGameRuntime *runtime, uint32_t *seen, const uint8_t *key, size_t key_length,
+                          const uint8_t *v, size_t n)
+ {
+@@ -274,6 +274,14 @@ static int runtime_field(PwGameRuntime *runtime, uint32_t *seen, const uint8_t *
+         return PW_OK;
+     }
+     if (is(key, key_length, "thread_scheduling")) bit = 1u, field = &runtime->thread_scheduling;
++    else if (is(key, key_length, "nglide_resolution")) {
++        if (*seen & 4u) return PW_ERR_MALFORMED;
++        if (is(v, n, "desktop")) runtime->nglide_desktop_resolution = 1;
++        else if (is(v, n, "app")) runtime->nglide_desktop_resolution = 0;
++        else return PW_ERR_UNSUPPORTED;
++        *seen |= 4u;
++        return PW_OK;
++    }
+     else return PW_ERR_UNSUPPORTED;
+     if (*seen & bit) return PW_ERR_MALFORMED;
+     if (is(v, n, "true") || is(v, n, "1")) on = 1;
+diff --git a/src/pw_game_profile.h b/src/pw_game_profile.h
+index fe91377..ea62f74 100644
+--- a/src/pw_game_profile.h
++++ b/src/pw_game_profile.h
+@@ -97,6 +97,7 @@ typedef enum PwGameCpu {
+ 
+ typedef struct PwGameRuntime {
+     int thread_scheduling;      /* WINE_PS5_SCHED=1 */
++    int nglide_desktop_resolution; /* set nGlide's Resolution registry value */
+     PwGameCpu cpu;
+ } PwGameRuntime;
+ 
+diff --git a/tests/test_pw_game_profile.c b/tests/test_pw_game_profile.c
+index 81c8cf9..557ba89 100644
+--- a/tests/test_pw_game_profile.c
++++ b/tests/test_pw_game_profile.c
+@@ -130,13 +130,15 @@ static void test_runtime(void)
+     assert(p.runtime.thread_scheduling == 1);
+     assert(pw_game_runtime_env(&p.runtime, env) == 1);
+     assert(!strcmp(env[0].name, "WINE_PS5_SCHED") && !strcmp(env[0].value, "1"));
++    assert(parse(APP "[runtime]\nnglide_resolution = desktop\nthread_scheduling = true\n", &p) == PW_OK);
++    assert(p.runtime.nglide_desktop_resolution && pw_game_runtime_env(&p.runtime, env) == 1);
+     /* Among the other sections, in any case. */
+     assert(parse(APP "[display]\nview = desktop\n[runtime]\nThread_Scheduling = 1\n"
+                  "[debug]\nwinedebug = +seh\n", &p) == PW_OK);
+     assert(p.runtime.thread_scheduling == 1);
+     assert(p.display.view == PW_GAME_VIEW_DESKTOP && !strcmp(p.winedebug, "+seh"));
+     /* Turned off explicitly: nothing reaches the environment. */
+-    assert(parse(APP "[runtime]\nthread_scheduling = FALSE\n", &p) == PW_OK);
++    assert(parse(APP "[runtime]\nthread_scheduling = FALSE\nnglide_resolution = app\n", &p) == PW_OK);
+     assert(!p.runtime.thread_scheduling && pw_game_runtime_env(&p.runtime, env) == 0);
+     assert(pw_game_runtime_env(NULL, env) == 0 && pw_game_runtime_env(&p.runtime, NULL) == 0);
+ }
+@@ -171,6 +173,8 @@ static void test_refusals(void)
+         APP "[runtime]\nthread_scheduling =\n",
+         APP "[runtime]\nthread_scheduling = on\n",
+         APP "[runtime]\nthread_scheduling = 0\nthread_scheduling = 1\n",
++        APP "[runtime]\nnglide_resolution = 640x480\n",
++        APP "[runtime]\nnglide_resolution = app\nnglide_resolution = desktop\n",
+         APP "[runtime]\ntrust_code_pages = 1\n",                /* unknown key */
+         APP "[runtime]\ncpu = dbt\n",                           /* native or translator only */
+         APP "[runtime]\ncpu =\n",
+diff --git a/tests/test_pw_wine_prefix_cpu.c b/tests/test_pw_wine_prefix_cpu.c
+index 25d408d..a7ffe5d 100644
+--- a/tests/test_pw_wine_prefix_cpu.c
++++ b/tests/test_pw_wine_prefix_cpu.c
+@@ -48,6 +48,22 @@ int main(void)
+         assert(!mkdir(system32, 0777));
+     }
+ 
++    /* nGlide's "By desktop" mode is registry DWORD 1 in this prefix. */
++    {
++        char reg[300], buffer[512] = {0};
++        FILE *file;
++        snprintf(reg, sizeof(reg), "%s/user.reg", prefix);
++        assert(pw_wine_prefix_nglide_desktop_resolution(prefix) == -1);
++        write_file(reg, "WINE REGISTRY Version 2\n\n[Software\\\\Wine\\\\WineDbg] 123\n\"Other\"=dword:00000001\n");
++        assert(pw_wine_prefix_nglide_desktop_resolution(prefix) == 1);
++        file = fopen(reg, "rb"); assert(file);
++        assert(fread(buffer, 1, sizeof(buffer) - 1, file) > 0);
++        assert(fclose(file) == 0);
++        assert(strstr(buffer, "[Software\\\\Zeus Software\\\\nGlide]\n\"Resolution\"=dword:00000001\n"));
++        assert(pw_wine_prefix_nglide_desktop_resolution(prefix) == 0);
++        remove(reg);
++    }
++
+     /* first launch copies it, the next one finds the same file */
+     assert(pw_wine_prefix_cpu_install(prefix, source, "wow64native.dll") == 1);
+     assert(file_is(installed, "native v1") && access(temporary, F_OK) != 0);
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 12039c7..c22eb85 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1026,7 +1073,8 @@ int main(int argc, char **argv)
+ 
+             for (size_t i = 0; i < runtime_count; i++)
+                 extra[config.extra_env_count++] = (PwWineStartEnv){ runtime_env[i].name, runtime_env[i].value };
+-            PS5LOG_LOG("PW_WINE64 runtime thread_scheduling=%d", game->runtime.thread_scheduling);
++            PS5LOG_LOG("PW_WINE64 runtime thread_scheduling=%d nglide_desktop_resolution=%d",
++                       game->runtime.thread_scheduling, game->runtime.nglide_desktop_resolution);
+         }
+         /* [runtime] cpu: a 32-bit game runs on the native WoW64 CPU unless it
+          * draws with OpenGL or its profile asks for the translator; the native
+@@ -1072,6 +1120,10 @@ int main(int argc, char **argv)
+             PS5LOG_LOG("PW_WINE64 prefix temp folders=%d last=%s", folders,
+                        temp.count ? temp.folders[temp.count - 1] : "-");
+         }
++        if (game->runtime.nglide_desktop_resolution) {
++            int configured = pw_wine_prefix_nglide_desktop_resolution(prefix);
++            PS5LOG_LOG("PW_WINE64 nGlide resolution=desktop registry=%d", configured);
++        }
+         if (PW_WINE64_WAIT_WATCHDOG) setenv("WINE_PS5_WAIT_WATCHDOG", "1", 1);
+         /* [application] arguments follow the executable in Wine's argv. */
+         int words = pw_wine_launch_split(game->app.arguments, argument_words,

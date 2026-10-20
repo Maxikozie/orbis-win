@@ -21,7 +21,7 @@ endif()
 find_program(GLSLANG NAMES glslangValidator glslang REQUIRED)
 add_custom_command(
   OUTPUT  "${CMAKE_CURRENT_BINARY_DIR}/bench_comp_spv.h"
-  COMMAND "${GLSLANG}" -V "${CMAKE_CURRENT_LIST_DIR}/bench.comp"
+  COMMAND "${GLSLANG}" -V --target-env vulkan1.1 "${CMAKE_CURRENT_LIST_DIR}/bench.comp"
           --vn bench_comp_spv -o "${CMAKE_CURRENT_BINARY_DIR}/bench_comp_spv.h"
   DEPENDS "${CMAKE_CURRENT_LIST_DIR}/bench.comp"
   COMMENT "glslang: bench.comp -> bench_comp_spv.h")

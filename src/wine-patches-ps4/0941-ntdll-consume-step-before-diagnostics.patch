@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: consume Prospero syscall single-step before logging
+
+The SIGILL diagnostic added before the single-step check logs through Wine's
+syscall path. That can replace the per-thread syscall-frame pointer before the
+later is_inside_syscall() check, so a genuine #DB is missed and the stale
+syscall frame is replayed. Test and consume the raw Orbis #DB immediately
+after init_handler(), before any logging or context processing.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index b185e6b4e9..2a46de4765 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2876,6 +2876,31 @@ static void __attribute__((used)) segv_handler( int signal, siginfo_t *siginfo,
+     }
+ #endif
+     data = init_handler( sigcontext );
++#ifdef __PROSPERO__
++#ifdef __ORBIS__
++#define PROSPERO_SINGLE_STEP_TRAP 1 /* Orbis exposes the raw x86 vector. */
++#else
++#define PROSPERO_SINGLE_STEP_TRAP TRAP_x86_TRCTRAP
++#endif
++    /* Do this before diagnostic logging: logging can replace the current
++     * syscall-frame pointer, making is_inside_syscall() miss this #DB. */
++    if (TRAP_sig(sigcontext) == PROSPERO_SINGLE_STEP_TRAP && data->teb &&
++        (EFL_sig(sigcontext) & 0x100) && is_inside_syscall( data, RSP_sig(sigcontext) ))
++    {
++        static unsigned int trace_count;
++        unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++        if (n <= 8 || !(n & (n - 1)))
++            ERR_(seh)( "Consuming Prospero single-step 0941 n=%u sig=%d trap=%ld wine_trap=%d rip=%016lx rsp=%016lx frame=%p frame_id=%08x frame_rip=%016lx\n",
++                      n, signal, (long)TRAP_sig(sigcontext), TRAP_x86_TRCTRAP,
++                      (unsigned long)RIP_sig(sigcontext), (unsigned long)RSP_sig(sigcontext),
++                      get_syscall_frame( data ), get_syscall_frame( data )->syscall_id,
++                      (unsigned long)get_syscall_frame( data )->rip );
++        EFL_sig(sigcontext) &= ~0x100;
++        leave_handler( data, sigcontext );
++        return;
++    }
++#undef PROSPERO_SINGLE_STEP_TRAP
++#endif
+ #ifdef __PROSPERO__
+     /* A SIGILL after the native SIGSYS pass-through may mean that the kernel
+      * returned to bad code, or that Wine is interpreting a stale syscall
+@@ -2907,32 +2932,6 @@ static void __attribute__((used)) segv_handler( int signal, siginfo_t *siginfo,
+     }
+ #endif
+     save_context( data, &context, sigcontext );
+-#ifdef __PROSPERO__
+-#ifdef __ORBIS__
+-#define PROSPERO_SINGLE_STEP_TRAP 1 /* Orbis exposes the raw x86 vector. */
+-#else
+-#define PROSPERO_SINGLE_STEP_TRAP TRAP_x86_TRCTRAP
+-#endif
+-    /* PS4 reports the raw x86 vector for a syscall-return single-step (#DB),
+-     * while Wine's FreeBSD compatibility headers map T_TRCTRAP to 10. Match
+-     * the Orbis value here or the stale syscall frame is replayed forever. */
+-    if (TRAP_sig(sigcontext) == PROSPERO_SINGLE_STEP_TRAP && data->teb &&
+-        (EFL_sig(sigcontext) & 0x100) && is_inside_syscall( data, RSP_sig(sigcontext) ))
+-    {
+-        static unsigned int trace_count;
+-        unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
+-        if (n <= 8 || !(n & (n - 1)))
+-            ERR_(seh)( "Consuming Prospero single-step 0940 n=%u sig=%d trap=%ld wine_trap=%d rip=%016lx rsp=%016lx frame=%p frame_id=%08x frame_rip=%016lx\n",
+-                      n, signal, (long)TRAP_sig(sigcontext), TRAP_x86_TRCTRAP,
+-                      (unsigned long)RIP_sig(sigcontext), (unsigned long)RSP_sig(sigcontext),
+-                      get_syscall_frame( data ), get_syscall_frame( data )->syscall_id,
+-                      (unsigned long)get_syscall_frame( data )->rip );
+-        EFL_sig(sigcontext) &= ~0x100;
+-        leave_handler( data, sigcontext );
+-        return;
+-    }
+-#undef PROSPERO_SINGLE_STEP_TRAP
+-#endif
+ 
+     switch(TRAP_sig(sigcontext))
+     {
+--
+2.43.0

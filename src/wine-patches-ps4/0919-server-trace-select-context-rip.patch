@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Subject: [PATCH] server: trace context carried by zero-handle select
+
+Do not decode a select opcode when the request has no select payload. For
+zero-handle selects that carry a suspended thread context, log the machine,
+context flags, and interrupted RIP to identify the signal/suspend caller.
+
+---
+--- a/server/request.c
++++ b/server/request.c
+@@ -442,10 +442,14 @@
+         if (n <= 32 || !(n & (n - 1)))
+         {
+             unsigned int op = 0xffffffff, count = 0, handles[8] = {0};
++            const struct context_data *contexts = NULL;
++            unsigned int ctx_count = 0, ctx_machine = 0, ctx_flags = 0;
++            unsigned long long ctx_rip = 0;
+             data_size_t data_size = thread->req.request_header.request_size;
+             char line[256];
+ 
+-            if (result && data_size >= sizeof(*result) + sizeof(op))
++            if (result && select->size >= sizeof(op) &&
++                data_size >= sizeof(*result) + select->size)
+             {
+                 const union select_op *select_op = (const union select_op *)(result + 1);
+                 op = select_op->op;
+@@ -460,12 +464,26 @@
+                 }
+             }
+ 
++            if (result && data_size >= sizeof(*result) + select->size + sizeof(*contexts))
++            {
++                data_size_t extra = data_size - sizeof(*result) - select->size;
++                contexts = (const struct context_data *)((const char *)(result + 1) + select->size);
++                ctx_count = extra / sizeof(*contexts);
++                if (ctx_count && contexts[0].machine == 0x8664)
++                {
++                    ctx_machine = contexts[0].machine;
++                    ctx_flags = contexts[0].flags;
++                    ctx_rip = contexts[0].ctl.x86_64_regs.rip;
++                }
++            }
++
+             snprintf( line, sizeof(line),
+-                      "wineserver select n=%u tid=%04x flags=%08x cookie=%llx timeout=%llx size=%u prev=%04x op=%u handles=%u:%04x,%04x,%04x,%04x,%04x,%04x,%04x,%04x\n",
++                      "wineserver select n=%u tid=%04x flags=%08x cookie=%llx timeout=%llx size=%u prev=%04x op=%u handles=%u:%04x,%04x,%04x,%04x,%04x,%04x,%04x,%04x ctx=%u machine=%04x ctxflags=%08x rip=%llx\n",
+                       n, thread->id, select->flags, (unsigned long long)select->cookie,
+                       (unsigned long long)select->timeout, select->size, select->prev_apc,
+                       op, count, handles[0], handles[1], handles[2], handles[3],
+-                      handles[4], handles[5], handles[6], handles[7] );
++                      handles[4], handles[5], handles[6], handles[7], ctx_count,
++                      ctx_machine, ctx_flags, ctx_rip );
+             sceKernelDebugOutText( 0, line );
+         }
+     }
+-- 
+2.43.0

@@ -1,0 +1,43 @@
+Subject: dsound: sample PS4 mixer wait timing
+
+The Oblivion trace attributes repeated GetCurrentPadding calls to
+DSOUND_PerformMix. The mixer is meant to wait on its wake event between
+passes, with a minimum timeout of 5 ms. Sample the wait result and elapsed
+time in bounded batches to determine whether the event or timeout is causing
+the mixer thread to spin on PS4. This changes logging only.
+
+diff --git a/dlls/dsound/mixer.c b/dlls/dsound/mixer.c
+--- a/dlls/dsound/mixer.c
++++ b/dlls/dsound/mixer.c
+@@ -1078,15 +1078,31 @@
+ DWORD CALLBACK DSOUND_mixthread(void *p)
+ {
+ 	DirectSoundDevice *dev = p;
++    DWORD sample_tick = GetTickCount();
++    unsigned int loops = 0, signaled = 0, timeouts = 0, other = 0;
+ 
+ 	TRACE("(%p)\n", dev);
+ 	SetThreadDescription(GetCurrentThread(), L"wine_dsound_mixer");
+         _controlfp_s(NULL, _DN_FLUSH, _MCW_DN);
+ 
+         for (;;)
+         {
+             DWORD ret = WaitForSingleObject(dev->sleepev, dev->sleeptime);
++            loops++;
++            if (ret == WAIT_OBJECT_0) signaled++;
++            else if (ret == WAIT_TIMEOUT) timeouts++;
++            else other++;
++            if (!(loops & 0xfff))
++            {
++                DWORD now = GetTickCount();
++                WINE_MESSAGE("PW_DSOUND_WAIT loops=%u elapsed_ms=%lu requested_ms=%lu "
++                             "signaled=%u timeout=%u other=%u\n",
++                             loops, now - sample_tick, dev->sleeptime,
++                             signaled, timeouts, other);
++                sample_tick = now;
++                signaled = timeouts = other = 0;
++            }
+             if (ret == WAIT_FAILED)
+                 WARN("wait returned error %lu %08lx!\n", GetLastError(), GetLastError());
+             else if (ret != WAIT_OBJECT_0)
+                 WARN("wait returned %08lx!\n", ret);

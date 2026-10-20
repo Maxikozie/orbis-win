@@ -1,0 +1,22 @@
+--- a/dlls/dsound/primary.c
++++ b/dlls/dsound/primary.c
+@@ -288,18 +288,12 @@
+ 
+     hres = IAudioClient_Initialize(client,
+             AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_NOPERSIST |
+-            AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
++            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+             800000, 0, wfx, NULL);
+     if(FAILED(hres)){
+         IAudioClient_Release(client);
+         ERR("Initialize failed: %08lx\n", hres);
+         return hres;
+-    }
+-
+-    hres = IAudioClient_SetEventHandle(client, device->sleepev);
+-    if (FAILED(hres)) {
+-        WARN("SetEventHandle failed: %08lx\n", hres);
+-        goto err;
+     }
+ 
+     hres = IAudioClient_GetService(client, &IID_IAudioRenderClient, (void**)&render);

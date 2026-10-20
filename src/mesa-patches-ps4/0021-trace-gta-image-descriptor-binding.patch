@@ -1,0 +1,158 @@
+diff --git a/src/amd/vulkan/radv_descriptor_set.c b/src/amd/vulkan/radv_descriptor_set.c
+index d4efeb2..1bdc294 100644
+--- a/src/amd/vulkan/radv_descriptor_set.c
++++ b/src/amd/vulkan/radv_descriptor_set.c
+@@ -5,6 +5,8 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include <stdlib.h>
++
+ #include "radv_descriptor_set.h"
+ #include "util/orbis_api_probe.h"
+ #include "radv_cmd_buffer.h"
+@@ -13,6 +15,23 @@
+ #include "radv_entrypoints.h"
+ #include "radv_sampler.h"
+ #include "vk_descriptors.h"
++#include "util/log.h"
++#include "util/u_atomic.h"
++
++static void
++radv_trace_gta_image_descriptor(const struct radv_descriptor_set *set, uint32_t binding, uint32_t array_element,
++                                VkDescriptorType type, uint32_t offset, const uint32_t *desc)
++{
++   static int trace_count;
++
++   if (!getenv("ORBIS_TRACE_GTA_DESC") || offset != 0x18 || p_atomic_inc_return(&trace_count) > 64)
++      return;
++
++   mesa_logi("orbis-drm: GTA_DESC set_va=0x%" PRIx64 " set_size=%u binding=%u element=%u type=%u offset=0x%x "
++             "words=%08x %08x %08x %08x %08x %08x %08x %08x",
++             set->header.va, set->header.size, binding, array_element, type, offset, desc[0], desc[1], desc[2], desc[3],
++             desc[4], desc[5], desc[6], desc[7]);
++}
+ 
+ VKAPI_ATTR VkResult VKAPI_CALL
+ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
+@@ -611,6 +630,10 @@ radv_update_descriptor_sets_impl(struct radv_device *device, struct radv_cmd_buf
+          case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+             radv_write_image_descriptor(ptr, radv_get_sampled_image_desc_size(pdev), writeset->descriptorType,
+                                         writeset->pImageInfo + j);
++            radv_trace_gta_image_descriptor(set, writeset->dstBinding, writeset->dstArrayElement + j,
++                                            writeset->descriptorType,
++                                            binding_layout->offset + binding_layout->size * (writeset->dstArrayElement + j),
++                                            ptr);
+             break;
+          case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: {
+             if (binding_layout->has_ycbcr_sampler) {
+@@ -621,6 +644,11 @@ radv_update_descriptor_sets_impl(struct radv_device *device, struct radv_cmd_buf
+                                                             !binding_layout->immutable_samplers_offset);
+             }
+ 
++            radv_trace_gta_image_descriptor(set, writeset->dstBinding, writeset->dstArrayElement + j,
++                                            writeset->descriptorType,
++                                            binding_layout->offset + binding_layout->size * (writeset->dstArrayElement + j),
++                                            ptr);
++
+             if (copy_immutable_samplers) {
+                const uint32_t sampler_offset = radv_get_combined_image_sampler_offset(pdev);
+                const unsigned idx = writeset->dstArrayElement + j;
+@@ -695,6 +723,16 @@ radv_update_descriptor_sets_impl(struct radv_device *device, struct radv_cmd_buf
+          } else
+             memcpy(dst_ptr, src_ptr, copy_size);
+ 
++         if (dst_binding_layout->type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
++             dst_binding_layout->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
++             dst_binding_layout->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) {
++            radv_trace_gta_image_descriptor(dst_set, copyset->dstBinding, copyset->dstArrayElement + j,
++                                            dst_binding_layout->type,
++                                            dst_binding_layout->offset + dst_binding_layout->size *
++                                               (copyset->dstArrayElement + j),
++                                            dst_ptr);
++         }
++
+          src_ptr += src_binding_layout->size / 4;
+          dst_ptr += dst_binding_layout->size / 4;
+       }
+diff --git a/src/amd/vulkan/radv_descriptor_update_template.c b/src/amd/vulkan/radv_descriptor_update_template.c
+index 4b75cac..d83d952 100644
+--- a/src/amd/vulkan/radv_descriptor_update_template.c
++++ b/src/amd/vulkan/radv_descriptor_update_template.c
+@@ -5,11 +5,31 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include <stdlib.h>
++
+ #include "radv_descriptor_update_template.h"
+ #include "radv_cmd_buffer.h"
+ #include "radv_descriptors.h"
+ #include "radv_device.h"
+ #include "radv_entrypoints.h"
++#include "util/log.h"
++#include "util/u_atomic.h"
++
++static void
++radv_trace_gta_template_image_descriptor(const struct radv_descriptor_set *set, uint32_t binding,
++                                         uint32_t array_element, VkDescriptorType type, uint32_t offset,
++                                         const uint32_t *desc)
++{
++   static int trace_count;
++
++   if (!getenv("ORBIS_TRACE_GTA_DESC") || offset != 0x18 || p_atomic_inc_return(&trace_count) > 64)
++      return;
++
++   mesa_logi("orbis-drm: GTA_DESC_TEMPLATE set_va=0x%" PRIx64 " set_size=%u binding=%u element=%u type=%u "
++             "offset=0x%x words=%08x %08x %08x %08x %08x %08x %08x %08x",
++             set->header.va, set->header.size, binding, array_element, type, offset, desc[0], desc[1], desc[2], desc[3],
++             desc[4], desc[5], desc[6], desc[7]);
++}
+ 
+ VKAPI_ATTR VkResult VKAPI_CALL
+ radv_CreateDescriptorUpdateTemplate(VkDevice _device, const VkDescriptorUpdateTemplateCreateInfo *pCreateInfo,
+@@ -88,6 +108,8 @@ radv_CreateDescriptorUpdateTemplate(VkDevice _device, const VkDescriptorUpdateTe
+                                                         .src_offset = entry->offset,
+                                                         .src_stride = entry->stride,
+                                                         .dst_offset = dst_offset,
++                                                        .binding = entry->dstBinding,
++                                                        .array_element = entry->dstArrayElement,
+                                                         .dst_stride = dst_stride,
+                                                         .has_sampler = !binding_layout->immutable_samplers_offset,
+                                                         .has_ycbcr_sampler = binding_layout->has_ycbcr_sampler,
+@@ -158,6 +180,9 @@ radv_update_descriptor_set_with_template_impl(struct radv_device *device, struct
+          case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+             radv_write_image_descriptor(pDst, radv_get_sampled_image_desc_size(pdev), templ->entry[i].descriptor_type,
+                                         (struct VkDescriptorImageInfo *)pSrc);
++            radv_trace_gta_template_image_descriptor(
++               set, templ->entry[i].binding, templ->entry[i].array_element + j, templ->entry[i].descriptor_type,
++               (templ->entry[i].dst_offset + j * templ->entry[i].dst_stride) * 4, pDst);
+             break;
+          case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: {
+             if (templ->entry[i].has_ycbcr_sampler) {
+@@ -168,6 +193,10 @@ radv_update_descriptor_set_with_template_impl(struct radv_device *device, struct
+                                                             templ->entry[i].has_sampler);
+             }
+ 
++            radv_trace_gta_template_image_descriptor(
++               set, templ->entry[i].binding, templ->entry[i].array_element + j, templ->entry[i].descriptor_type,
++               (templ->entry[i].dst_offset + j * templ->entry[i].dst_stride) * 4, pDst);
++
+             if (cmd_buffer && templ->entry[i].immutable_samplers) {
+                const uint32_t sampler_offset = radv_get_combined_image_sampler_offset(pdev);
+ 
+diff --git a/src/amd/vulkan/radv_descriptor_update_template.h b/src/amd/vulkan/radv_descriptor_update_template.h
+index d184caf..622ac7b 100644
+--- a/src/amd/vulkan/radv_descriptor_update_template.h
++++ b/src/amd/vulkan/radv_descriptor_update_template.h
+@@ -24,6 +24,10 @@ struct radv_descriptor_update_template_entry {
+    /* Into mapped_ptr or dynamic_descriptors, in units of the respective array */
+    uint32_t dst_offset;
+ 
++   /* Source Vulkan binding and first array element, for descriptor diagnostics. */
++   uint32_t binding;
++   uint32_t array_element;
++
+    /* In dwords. Not valid/used for dynamic descriptors */
+    uint32_t dst_stride;
+ 

@@ -1,0 +1,26 @@
+From: Codex <codex@localhost>
+Subject: [PATCH] wow64native: make cross-thread profiling watcher opt-in
+
+The PS4 diagnostic watcher reads native thread-local profile state from a
+separate thread. A thread that exits without running BTCpuThreadTerm can leave
+a stale TLS pointer in the watch list. Keep the watcher disabled unless the
+caller explicitly sets PW_NATIVE_WATCH=1; thread-exit profile reports remain
+available without the asynchronous sampler.
+
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -369,6 +369,11 @@ static NTSTATUS thread_init(void *args)
+                  &thread_state, (unsigned)thread_state.status, process_ready);
+ #ifdef __PROSPERO__
+-    if (profile_enabled) profile_watch_register(&thread_state);
++    /* The optional watcher samples thread-local state from another thread.
++     * Keep it off by default: threads that exit outside BTCpuThreadTerm can
++     * leave stale TLS pointers behind. Enable only for targeted diagnostics. */
++    if (profile_enabled && getenv("PW_NATIVE_WATCH") &&
++        !strcmp(getenv("PW_NATIVE_WATCH"), "1"))
++        profile_watch_register(&thread_state);
+ #endif
+     return thread_state.status;
+ }
+-- 
+2.47.3

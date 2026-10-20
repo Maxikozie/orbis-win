@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 12 Oct 2026 20:50:00 -0700
+Subject: [PATCH] wowprospero: log the actual FalloutNV lookup caller local
+
+The exception walk previously inspected frame 2 and labeled its -0x20 local
+as the object passed to FalloutNV's RTTI conversion. Disassembly shows the
+conversion is in frame 1, returning to 0x7da98f; its -0x20 local is the result
+of the preceding lookup(0). Report that local directly and include the final
+two entries in the 34-element table dump.
+---
+--- a/wine/wowprospero/cpu.c
++++ b/wine/wowprospero/cpu.c
+@@ -393,27 +393,27 @@
+                          pair[1] - (UINT)sizeof(callsite), callsite[0], callsite[1],
+                          callsite[2], callsite[3], callsite[4], callsite[5],
+                          callsite[6], callsite[7] );
+-                /* In the observed FalloutNV chain, frame 2 is the caller at
+-                 * 0x7da970 and its local -0x20 is the source object passed to
+-                 * the RTTI conversion immediately before the null deref. */
+-                if (i == 2 && frame >= 0x20)
++                /* In the observed FalloutNV chain, frame 1 returns to
++                 * 0x7da98f. Its local -0x20 holds the result of the preceding
++                 * lookup(0), which is then used as the RTTI source object. */
++                if (i == 1 && frame >= 0x20)
+                 {
+                     UINT object, words[8];
+ 
+                     if (read_guest_bytes( frame - 0x20, &object, sizeof(object) ))
+                     {
+-                        ERR( "guest frame2 local -20 %08x: %08x\n", frame - 0x20, object );
++                        ERR( "guest frame1 lookup(0) local -20 %08x: %08x\n", frame - 0x20, object );
+                         if (object && read_guest_bytes( object, words, sizeof(words) ))
+-                            ERR( "guest frame2 object %08x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++                            ERR( "guest frame1 lookup(0) object %08x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                                  object, words[0], words[1], words[2], words[3], words[4],
+                                  words[5], words[6], words[7] );
+-                        else ERR( "guest frame2 object %08x: bytes unavailable\n", object );
++                        else ERR( "guest frame1 lookup(0) object %08x: bytes unavailable\n", object );
+                     }
+                     /* FalloutNV 1.4.0.525's lookup at 0x58db10 reads this
+                      * relocated singleton, tests manager+8 bit 3, then
+-                     * reads entry 0x15 at manager+0x6c. */
++                     * indexes the table at manager+0x18. */
+                     {
+-                        UINT manager, flags = 0, slots[32] = {0};
++                        UINT manager, flags = 0, slots[34] = {0};
+                         if (read_guest_bytes( 0x132a80c, &manager, sizeof(manager) ))
+                         {
+                             BOOL slots_ok = FALSE;
+@@ -434,6 +434,7 @@
+                                      slots[16], slots[17], slots[18], slots[19], slots[20], slots[21], slots[22], slots[23] );
+                                 ERR( "guest lookup slots 18-1f: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                                      slots[24], slots[25], slots[26], slots[27], slots[28], slots[29], slots[30], slots[31] );
++                                ERR( "guest lookup slots 20-21: %08x %08x\n", slots[32], slots[33] );
+                             }
+                         }
+                         else ERR( "guest frame2 lookup singleton unavailable\n" );
+-- 
+2.39.2

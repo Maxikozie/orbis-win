@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] win32u: trace PS4 Vulkan swapchain creation and presents
+
+The app logger's vk_shown counter covers only its fallback spinner/GDI
+presenter. It does not count a game's normal Vulkan presents. Log successful
+swapchain creation and a bounded sample of actual queue-present results so a
+black screen can be separated into no swapchain, no present, and failed
+present cases without flooding the console log.
+
+---
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index da6138ee00..2b15ec2a8f 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -1889,6 +1889,13 @@ static BOOL extents_equals( const VkExtent2D *extents, const RECT *rect )
+     return extents->width == rect->right - rect->left && extents->height == rect->bottom - rect->top;
+ }
+ 
++#ifdef __PROSPERO__
++/* vk_shown counts only the fallback spinner/GDI presenter, not title presents.
++ * Keep this trace bounded while measuring the actual Vulkan swapchain path. */
++static unsigned int ps4_swapchain_create_count;
++static unsigned int ps4_queue_present_count;
++#endif
++
+ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwapchainCreateInfoKHR *create_info,
+                                              const VkAllocationCallbacks *allocator, VkSwapchainKHR *ret )
+ {
+@@ -1973,6 +1980,18 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
+         return res;
+     }
+ 
++#ifdef __PROSPERO__
++    {
++        unsigned int count = __atomic_add_fetch( &ps4_swapchain_create_count, 1, __ATOMIC_RELAXED );
++        if (count <= 8)
++            WARN( "PS4 Vulkan swapchain created #%u client=%ux%u host=%ux%u images=%u format=%u mode=%u\n",
++                  count, create_info->imageExtent.width, create_info->imageExtent.height,
++                  create_info_host.imageExtent.width, create_info_host.imageExtent.height,
++                  create_info_host.minImageCount, create_info_host.imageFormat,
++                  create_info_host.presentMode );
++    }
++#endif
++
+     vulkan_object_init( &swapchain->obj.obj, host_swapchain );
+     swapchain->surface = surface;
+     swapchain->extents = create_info->imageExtent;
+@@ -2092,6 +2111,22 @@ static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentI
+ 
+     res = device->p_vkQueuePresentKHR( queue->host.queue, present_info );
+ 
++#ifdef __PROSPERO__
++    {
++        unsigned int count = __atomic_add_fetch( &ps4_queue_present_count, 1, __ATOMIC_RELAXED );
++        if (count <= 8 || !(count % 120))
++        {
++            VkResult swapchain_res = present_info->swapchainCount && present_info->pResults ?
++                                     present_info->pResults[0] : res;
++            unsigned int image = present_info->swapchainCount && present_info->pImageIndices ?
++                                 present_info->pImageIndices[0] : 0;
++            WARN( "PS4 Vulkan present #%u result=%d first=%d swapchains=%u waits=%u image=%u\n",
++                  count, res, swapchain_res, present_info->swapchainCount,
++                  present_info->waitSemaphoreCount, image );
++        }
++    }
++#endif
++
+     for (uint32_t i = 0; i < present_info->swapchainCount; i++)
+     {
+         struct swapchain *swapchain = swapchain_from_handle( client_swapchains[i] );

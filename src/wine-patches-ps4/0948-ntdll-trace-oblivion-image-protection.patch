@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace Oblivion image protection bookkeeping
+
+The native WoW64 run faults executing 0x004a8330. Wine records the page as
+executable, but the kernel dump reports its host page as rw-. Trace the
+mprotect_range request and result for that page to determine whether Wine
+skips the kernel protection update or the kernel drops execute permission.
+
+---
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index f83c31344e..0e7cf0377c 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2347,6 +2347,14 @@ static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear )
+     char *addr = ROUND_ADDR( base, host_page_mask );
+     int prot, next;
+     BYTE vprot;
++    int rc;
++    BOOL trace_oblivion = (ULONG_PTR)base <= 0x004a8330 &&
++                          (ULONG_PTR)base + size > 0x004a8330;
++
++    if (trace_oblivion)
++        ERR( "PS4_OBLIVION mprotect-range enter base=%p size=%Ix set=%02x clear=%02x page=%p host-vprot=%02x prot=%x\n",
++             base, size, set, clear, addr, get_host_page_vprot( addr ),
++             get_unix_prot( (get_host_page_vprot( addr ) & ~clear) | set ) );
+ 
+     size = ROUND_SIZE( base, size, host_page_mask );
+ 
+@@ -2357,12 +2365,22 @@ static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear )
+         vprot = get_host_page_vprot( addr + count * host_page_size );
+         next = get_unix_prot( (vprot & ~clear) | set );
+         if (next == prot) continue;
+-        if (mprotect_exec( addr, count * host_page_size, prot )) return -1;
++        if (mprotect_exec( addr, count * host_page_size, prot ))
++        {
++            if (trace_oblivion)
++                ERR( "PS4_OBLIVION mprotect-range fail addr=%p size=%Ix prot=%x\n",
++                     addr, count * host_page_size, prot );
++            return -1;
++        }
+         addr += count * host_page_size;
+         prot = next;
+         count = 0;
+     }
+-    return mprotect_exec( addr, count * host_page_size, prot );
++    rc = mprotect_exec( addr, count * host_page_size, prot );
++    if (trace_oblivion)
++        ERR( "PS4_OBLIVION mprotect-range leave addr=%p size=%Ix prot=%x rc=%Ix\n",
++             addr, count * host_page_size, prot, rc );
++    return rc;
+ }
+ 
+ 
+-- 
+2.43.0

@@ -1,0 +1,36 @@
+From caa6fe4658c377f91f2f17c5e13b3a5509d1d785 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Mon, 19 Oct 2026 06:36:42 -0700
+Subject: [PATCH] build: accept PS4 Wine patch 0957
+
+---
+ tools/build_wine_ps5.sh | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/tools/build_wine_ps5.sh b/tools/build_wine_ps5.sh
+index 5455498..a77b19a 100755
+--- a/tools/build_wine_ps5.sh
++++ b/tools/build_wine_ps5.sh
+@@ -153,7 +153,7 @@ fi
+     (cd "$ps5opengl_sdk" && sha256sum --status --check manifest.sha256) ||
+     fail "PS5 OpenGL SDK does not match its SHA-256 manifest"
+ 
+-# The series: NNNN-lower-case-name.patch, unique numbers through 0956, each a
++# The series: NNNN-lower-case-name.patch, unique numbers through 0957, each a
+ # mail-formatted patch with a subject. Printed in the order it is applied.
+ series() {
+     [ -d "$patches" ] || fail "no patch directory $patches"
+@@ -167,8 +167,8 @@ series() {
+             fail "patch name must be NNNN-lower-case-words.patch: $patch"
+         number=$(printf '%s' "$patch" | cut -c1-4 | sed 's/^0*//')
+         number=${number:-0}
+-        [ "$number" -ge 100 ] && [ "$number" -le 956 ] ||
+-            fail "patch number outside 0100-0956: $patch"
++        [ "$number" -ge 100 ] && [ "$number" -le 957 ] ||
++            fail "patch number outside 0100-0957: $patch"
+         [ "$number" -ne "$last" ] || fail "duplicate patch number: $patch"
+         last=$number
+         grep -q '^Subject: ' "$patches/$patch" || fail "patch has no Subject: $patch"
+-- 
+2.47.3
+

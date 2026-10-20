@@ -1,0 +1,68 @@
+Subject: [PATCH] orbis: capture shader state at the hung indexed draw
+
+The fence dump's final shader scan can report state programmed after the draw
+that failed. Snapshot PS and VS bases at each DRAW_INDEX_2 up to the CP marker,
+then print the last draw's index range and bounded first 128 dwords of each
+mapped shader image. This identifies the shader pair that was active at the
+execution-retirement boundary without changing command submission.
+
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -9595,6 +9595,10 @@
+                {"PS", 0x008, 0}, {"VS", 0x048, 0}, {"GS", 0x088, 0},
+                {"ES", 0x0C8, 0}, {"HS", 0x108, 0}, {"CS", 0x20C, 0},
+             };
++            struct { const char *name; uint64_t pgm; } draw_stages[ARRAY_SIZE(stages)] = {0};
++            uint32_t draw_dword = UINT32_MAX;
++            uint32_t draw_index_count = 0;
++            uint64_t draw_index_va = 0;
+ 
+             for (uint32_t i = 0; i + 1 < scan_to && i + 1 < hs->dwords;) {
+                const uint32_t hdr = hs->stream[i];
+@@ -9610,6 +9614,17 @@
+                         if (reg == stages[st].sh)
+                            stages[st].pgm = (uint64_t)hs->stream[k] << 8;
+                   }
++               } else if (op == 0x27 && cnt >= 6 && i + cnt <= hs->dwords) {
++                  /* Snapshot the graphics program bases immediately before this indexed draw. The
++                   * CP may have reached later state writes by the time the fence wait dumps the stream. */
++                  draw_dword = i;
++                  draw_index_va = (uint64_t)hs->stream[i + 2] |
++                                  ((uint64_t)(hs->stream[i + 3] & 0xFFFFu) << 32);
++                  draw_index_count = hs->stream[i + 4];
++                  for (unsigned st = 0; st < ARRAY_SIZE(stages); ++st) {
++                     draw_stages[st].name = stages[st].name;
++                     draw_stages[st].pgm = stages[st].pgm;
++                  }
+                }
+                i += cnt;
+             }
+@@ -9698,6 +9713,28 @@
+                }
+             }
+ 
++            if (draw_dword != UINT32_MAX) {
++               mesa_logi("orbis-drm: submit #%" PRIu64 " last DRAW_INDEX_2 before the CP marker at dword %u: "
++                         "%u indices from 0x%" PRIx64 " (PS 0x%" PRIx64 ", VS 0x%" PRIx64 ")",
++                         hung, draw_dword, draw_index_count, draw_index_va,
++                         draw_stages[0].pgm, draw_stages[1].pgm);
++               for (unsigned st = 0; st < 2; ++st) {
++                  const uint64_t pgm = draw_stages[st].pgm;
++                  if (pgm == 0)
++                     continue;
++                  if (pgm < orbis_va_base || pgm + 512 > orbis_va_end || !orbis_va_is_mapped(pgm, 512)) {
++                     mesa_logw("orbis-drm: draw %s program 0x%" PRIx64
++                               " is not fully inside a live mapping; not dumping shader bytes",
++                               draw_stages[st].name, pgm);
++                     continue;
++                  }
++                  mesa_logi("orbis-drm: submit #%" PRIu64 " DRAW_INDEX_2 %s at 0x%" PRIx64
++                            ": first 128 dwords follow",
++                            hung, draw_stages[st].name, pgm);
++                  orbis_dump_ib(hung, (const uint32_t *)(uintptr_t)pgm, 128, draw_stages[st].name, false);
++               }
++            }
++
+             unsigned dumped = 0;
+             for (unsigned st = 0; st < ARRAY_SIZE(stages); ++st) {
+                const uint64_t pgm = stages[st].pgm;

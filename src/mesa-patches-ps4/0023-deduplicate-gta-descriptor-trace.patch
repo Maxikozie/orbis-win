@@ -1,0 +1,179 @@
+--- a/src/amd/vulkan/radv_descriptor_set.c
++++ b/src/amd/vulkan/radv_descriptor_set.c
+@@ -16,15 +16,82 @@
+ #include "radv_sampler.h"
+ #include "vk_descriptors.h"
+ #include "util/log.h"
+-#include "util/u_atomic.h"
++#include "util/simple_mtx.h"
++
++#define RADV_GTA_TRACE_SLOTS 1024
++#define RADV_GTA_TRACE_EMIT_LIMIT 512
++
++struct radv_gta_trace_record {
++   uint64_t set_va;
++   uint64_t descriptor_hash;
++   uint32_t binding;
++   uint32_t array_element;
++   uint32_t offset;
++   bool valid;
++};
++
++static simple_mtx_t radv_gta_trace_lock = SIMPLE_MTX_INITIALIZER;
++static struct radv_gta_trace_record radv_gta_trace_records[RADV_GTA_TRACE_SLOTS];
++static uint32_t radv_gta_trace_emissions;
++
++static bool
++radv_gta_trace_should_log(const struct radv_descriptor_set *set, uint32_t binding, uint32_t array_element,
++                          uint32_t offset, const uint32_t *desc)
++{
++   if (!getenv("ORBIS_TRACE_GTA_DESC"))
++      return false;
++
++   uint64_t hash = set->header.va ^ ((uint64_t)binding << 32) ^ ((uint64_t)array_element << 16) ^ offset;
++   uint64_t descriptor_hash = UINT64_C(1469598103934665603);
++   for (unsigned i = 0; i < 8; i++)
++      descriptor_hash = (descriptor_hash ^ desc[i]) * UINT64_C(1099511628211);
++   hash ^= hash >> 33;
++   hash *= UINT64_C(0xff51afd7ed558ccd);
++   hash ^= hash >> 33;
++   unsigned slot = hash & (RADV_GTA_TRACE_SLOTS - 1);
++
++   simple_mtx_lock(&radv_gta_trace_lock);
++   for (unsigned probe = 0; probe < RADV_GTA_TRACE_SLOTS; probe++) {
++      struct radv_gta_trace_record *record = &radv_gta_trace_records[(slot + probe) & (RADV_GTA_TRACE_SLOTS - 1)];
++      if (!record->valid) {
++         if (radv_gta_trace_emissions >= RADV_GTA_TRACE_EMIT_LIMIT) {
++            simple_mtx_unlock(&radv_gta_trace_lock);
++            return false;
++         }
++         *record = (struct radv_gta_trace_record){
++            .set_va = set->header.va,
++            .descriptor_hash = descriptor_hash,
++            .binding = binding,
++            .array_element = array_element,
++            .offset = offset,
++            .valid = true,
++         };
++         radv_gta_trace_emissions++;
++         simple_mtx_unlock(&radv_gta_trace_lock);
++         return true;
++      }
++      if (record->set_va == set->header.va && record->binding == binding &&
++          record->array_element == array_element && record->offset == offset) {
++         if (record->descriptor_hash == descriptor_hash ||
++             radv_gta_trace_emissions >= RADV_GTA_TRACE_EMIT_LIMIT) {
++            simple_mtx_unlock(&radv_gta_trace_lock);
++            return false;
++         }
++         record->descriptor_hash = descriptor_hash;
++         radv_gta_trace_emissions++;
++         simple_mtx_unlock(&radv_gta_trace_lock);
++         return true;
++      }
++   }
++   simple_mtx_unlock(&radv_gta_trace_lock);
++   return false;
++}
+ 
+ static void
+ radv_trace_gta_image_descriptor(const struct radv_descriptor_set *set, uint32_t binding, uint32_t array_element,
+                                 VkDescriptorType type, uint32_t offset, const uint32_t *desc)
+ {
+-   static int trace_count;
+-
+-   if (!getenv("ORBIS_TRACE_GTA_DESC") || offset >= 0x100 || p_atomic_inc_return(&trace_count) > 256)
++   if (!radv_gta_trace_should_log(set, binding, array_element, offset, desc))
+       return;
+ 
+    mesa_logi("orbis-drm: GTA_DESC set_va=0x%" PRIx64 " set_size=%u binding=%u element=%u type=%u offset=0x%x "
+--- a/src/amd/vulkan/radv_descriptor_update_template.c
++++ b/src/amd/vulkan/radv_descriptor_update_template.c
+@@ -13,16 +13,83 @@
+ #include "radv_device.h"
+ #include "radv_entrypoints.h"
+ #include "util/log.h"
+-#include "util/u_atomic.h"
++#include "util/simple_mtx.h"
++
++#define RADV_GTA_TRACE_SLOTS 1024
++#define RADV_GTA_TRACE_EMIT_LIMIT 512
++
++struct radv_gta_trace_record {
++   uint64_t set_va;
++   uint64_t descriptor_hash;
++   uint32_t binding;
++   uint32_t array_element;
++   uint32_t offset;
++   bool valid;
++};
++
++static simple_mtx_t radv_gta_trace_lock = SIMPLE_MTX_INITIALIZER;
++static struct radv_gta_trace_record radv_gta_trace_records[RADV_GTA_TRACE_SLOTS];
++static uint32_t radv_gta_trace_emissions;
++
++static bool
++radv_gta_trace_should_log(const struct radv_descriptor_set *set, uint32_t binding, uint32_t array_element,
++                          uint32_t offset, const uint32_t *desc)
++{
++   if (!getenv("ORBIS_TRACE_GTA_DESC"))
++      return false;
++
++   uint64_t hash = set->header.va ^ ((uint64_t)binding << 32) ^ ((uint64_t)array_element << 16) ^ offset;
++   uint64_t descriptor_hash = UINT64_C(1469598103934665603);
++   for (unsigned i = 0; i < 8; i++)
++      descriptor_hash = (descriptor_hash ^ desc[i]) * UINT64_C(1099511628211);
++   hash ^= hash >> 33;
++   hash *= UINT64_C(0xff51afd7ed558ccd);
++   hash ^= hash >> 33;
++   unsigned slot = hash & (RADV_GTA_TRACE_SLOTS - 1);
++
++   simple_mtx_lock(&radv_gta_trace_lock);
++   for (unsigned probe = 0; probe < RADV_GTA_TRACE_SLOTS; probe++) {
++      struct radv_gta_trace_record *record = &radv_gta_trace_records[(slot + probe) & (RADV_GTA_TRACE_SLOTS - 1)];
++      if (!record->valid) {
++         if (radv_gta_trace_emissions >= RADV_GTA_TRACE_EMIT_LIMIT) {
++            simple_mtx_unlock(&radv_gta_trace_lock);
++            return false;
++         }
++         *record = (struct radv_gta_trace_record){
++            .set_va = set->header.va,
++            .descriptor_hash = descriptor_hash,
++            .binding = binding,
++            .array_element = array_element,
++            .offset = offset,
++            .valid = true,
++         };
++         radv_gta_trace_emissions++;
++         simple_mtx_unlock(&radv_gta_trace_lock);
++         return true;
++      }
++      if (record->set_va == set->header.va && record->binding == binding &&
++          record->array_element == array_element && record->offset == offset) {
++         if (record->descriptor_hash == descriptor_hash ||
++             radv_gta_trace_emissions >= RADV_GTA_TRACE_EMIT_LIMIT) {
++            simple_mtx_unlock(&radv_gta_trace_lock);
++            return false;
++         }
++         record->descriptor_hash = descriptor_hash;
++         radv_gta_trace_emissions++;
++         simple_mtx_unlock(&radv_gta_trace_lock);
++         return true;
++      }
++   }
++   simple_mtx_unlock(&radv_gta_trace_lock);
++   return false;
++}
+ 
+ static void
+ radv_trace_gta_template_image_descriptor(const struct radv_descriptor_set *set, uint32_t binding,
+                                          uint32_t array_element, VkDescriptorType type, uint32_t offset,
+                                          const uint32_t *desc)
+ {
+-   static int trace_count;
+-
+-   if (!getenv("ORBIS_TRACE_GTA_DESC") || offset >= 0x100 || p_atomic_inc_return(&trace_count) > 256)
++   if (!radv_gta_trace_should_log(set, binding, array_element, offset, desc))
+       return;
+ 
+    mesa_logi("orbis-drm: GTA_DESC_TEMPLATE set_va=0x%" PRIx64 " set_size=%u binding=%u element=%u type=%u "

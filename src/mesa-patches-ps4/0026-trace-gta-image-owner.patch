@@ -1,0 +1,130 @@
+--- a/src/amd/vulkan/radv_descriptor_set.c
++++ b/src/amd/vulkan/radv_descriptor_set.c
+@@ -34,6 +34,39 @@
+ static struct radv_gta_trace_record radv_gta_trace_records[RADV_GTA_TRACE_SLOTS];
+ static uint32_t radv_gta_trace_emissions;
+ 
++static void
++radv_trace_gta_image_owner(const struct radv_descriptor_set *set, uint32_t binding, uint32_t array_element,
++                           VkDescriptorType type, uint32_t offset, const uint32_t *desc,
++                           const VkDescriptorImageInfo *image_info)
++{
++   static unsigned owner_logs;
++   if (!getenv("ORBIS_TRACE_GTA_IMAGE_OWNER") || !image_info || !image_info->imageView || owner_logs >= 32 ||
++       desc[2] != 0x401fc07fu || desc[3] != 0x90d00facu || desc[4] != 0x000fe000u || desc[7] != 0xfffff1ffu)
++      return;
++
++   struct radv_image_view *iview = radv_image_view_from_handle(image_info->imageView);
++   if (!iview || !iview->image)
++      return;
++
++   struct radv_image *image = iview->image;
++   const unsigned bind_idx = image->disjoint ? iview->plane_id : 0;
++   const uint64_t image_base = ((uint64_t)desc[0] << 8) | ((uint64_t)(desc[1] & 0xffu) << 40);
++   const uint64_t bind_va = image->bindings[bind_idx].addr;
++   const uint32_t level = MIN2(iview->vk.base_mip_level, image->vk.mip_levels - 1);
++   const uint64_t level_offset = image->planes[iview->plane_id].surface.u.legacy.level[level].offset_256B;
++   owner_logs++;
++
++   mesa_logi("orbis-drm: GTA_IMG_OWNER set_va=0x%" PRIx64 " binding=%u element=%u type=%u offset=0x%x "
++             "imageView=%p image=%p plane=%u view_fmt=%u image_fmt=%u view_base_mip=%u view_extent=%ux%ux%u "
++             "image_extent=%ux%ux%u samples=%u bind_va=0x%" PRIx64 " level_offset_256B=0x%" PRIx64 " "
++             "desc_base=0x%" PRIx64 " words=%08x/%08x/%08x/%08x/%08x/%08x/%08x/%08x",
++             set->header.va, binding, array_element, type, offset, iview, image, iview->plane_id, iview->vk.format,
++             image->vk.format, iview->vk.base_mip_level, iview->extent.width, iview->extent.height,
++             iview->extent.depth, image->vk.extent.width, image->vk.extent.height, image->vk.extent.depth,
++             image->vk.samples, bind_va, level_offset, image_base, desc[0], desc[1], desc[2], desc[3], desc[4],
++             desc[5], desc[6], desc[7]);
++}
++
+ static bool
+ radv_gta_trace_should_log(const struct radv_descriptor_set *set, uint32_t binding, uint32_t array_element,
+                           uint32_t offset, const uint32_t *desc)
+@@ -697,6 +730,10 @@
+          case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+             radv_write_image_descriptor(ptr, radv_get_sampled_image_desc_size(pdev), writeset->descriptorType,
+                                         writeset->pImageInfo + j);
++            radv_trace_gta_image_owner(set, writeset->dstBinding, writeset->dstArrayElement + j,
++                                       writeset->descriptorType,
++                                       binding_layout->offset + binding_layout->size * (writeset->dstArrayElement + j),
++                                       ptr, writeset->pImageInfo + j);
+             radv_trace_gta_image_descriptor(set, writeset->dstBinding, writeset->dstArrayElement + j,
+                                             writeset->descriptorType,
+                                             binding_layout->offset + binding_layout->size * (writeset->dstArrayElement + j),
+@@ -711,6 +748,11 @@
+                                                             !binding_layout->immutable_samplers_offset);
+             }
+ 
++            radv_trace_gta_image_owner(set, writeset->dstBinding, writeset->dstArrayElement + j,
++                                       writeset->descriptorType,
++                                       binding_layout->offset + binding_layout->size * (writeset->dstArrayElement + j),
++                                       ptr, writeset->pImageInfo + j);
++
+             radv_trace_gta_image_descriptor(set, writeset->dstBinding, writeset->dstArrayElement + j,
+                                             writeset->descriptorType,
+                                             binding_layout->offset + binding_layout->size * (writeset->dstArrayElement + j),
+--- a/src/amd/vulkan/radv_descriptor_update_template.c
++++ b/src/amd/vulkan/radv_descriptor_update_template.c
+@@ -98,6 +98,39 @@
+              desc[4], desc[5], desc[6], desc[7]);
+ }
+ 
++static void
++radv_trace_gta_template_image_owner(const struct radv_descriptor_set *set, uint32_t binding, uint32_t array_element,
++                                    VkDescriptorType type, uint32_t offset, const uint32_t *desc,
++                                    const VkDescriptorImageInfo *image_info)
++{
++   static unsigned owner_logs;
++   if (!getenv("ORBIS_TRACE_GTA_IMAGE_OWNER") || !image_info || !image_info->imageView || owner_logs >= 32 ||
++       desc[2] != 0x401fc07fu || desc[3] != 0x90d00facu || desc[4] != 0x000fe000u || desc[7] != 0xfffff1ffu)
++      return;
++
++   struct radv_image_view *iview = radv_image_view_from_handle(image_info->imageView);
++   if (!iview || !iview->image)
++      return;
++
++   struct radv_image *image = iview->image;
++   const unsigned bind_idx = image->disjoint ? iview->plane_id : 0;
++   const uint64_t image_base = ((uint64_t)desc[0] << 8) | ((uint64_t)(desc[1] & 0xffu) << 40);
++   const uint64_t bind_va = image->bindings[bind_idx].addr;
++   const uint32_t level = MIN2(iview->vk.base_mip_level, image->vk.mip_levels - 1);
++   const uint64_t level_offset = image->planes[iview->plane_id].surface.u.legacy.level[level].offset_256B;
++   owner_logs++;
++
++   mesa_logi("orbis-drm: GTA_IMG_OWNER_TEMPLATE set_va=0x%" PRIx64 " binding=%u element=%u type=%u offset=0x%x "
++             "imageView=%p image=%p plane=%u view_fmt=%u image_fmt=%u view_base_mip=%u view_extent=%ux%ux%u "
++             "image_extent=%ux%ux%u samples=%u bind_va=0x%" PRIx64 " level_offset_256B=0x%" PRIx64 " "
++             "desc_base=0x%" PRIx64 " words=%08x/%08x/%08x/%08x/%08x/%08x/%08x/%08x",
++             set->header.va, binding, array_element, type, offset, iview, image, iview->plane_id, iview->vk.format,
++             image->vk.format, iview->vk.base_mip_level, iview->extent.width, iview->extent.height,
++             iview->extent.depth, image->vk.extent.width, image->vk.extent.height, image->vk.extent.depth,
++             image->vk.samples, bind_va, level_offset, image_base, desc[0], desc[1], desc[2], desc[3], desc[4],
++             desc[5], desc[6], desc[7]);
++}
++
+ VKAPI_ATTR VkResult VKAPI_CALL
+ radv_CreateDescriptorUpdateTemplate(VkDevice _device, const VkDescriptorUpdateTemplateCreateInfo *pCreateInfo,
+                                     const VkAllocationCallbacks *pAllocator,
+@@ -247,6 +280,10 @@
+          case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+             radv_write_image_descriptor(pDst, radv_get_sampled_image_desc_size(pdev), templ->entry[i].descriptor_type,
+                                         (struct VkDescriptorImageInfo *)pSrc);
++            radv_trace_gta_template_image_owner(
++               set, templ->entry[i].binding, templ->entry[i].array_element + j, templ->entry[i].descriptor_type,
++               (templ->entry[i].dst_offset + j * templ->entry[i].dst_stride) * 4, pDst,
++               (struct VkDescriptorImageInfo *)pSrc);
+             radv_trace_gta_template_image_descriptor(
+                set, templ->entry[i].binding, templ->entry[i].array_element + j, templ->entry[i].descriptor_type,
+                (templ->entry[i].dst_offset + j * templ->entry[i].dst_stride) * 4, pDst);
+@@ -260,6 +297,11 @@
+                                                             templ->entry[i].has_sampler);
+             }
+ 
++            radv_trace_gta_template_image_owner(
++               set, templ->entry[i].binding, templ->entry[i].array_element + j, templ->entry[i].descriptor_type,
++               (templ->entry[i].dst_offset + j * templ->entry[i].dst_stride) * 4, pDst,
++               (struct VkDescriptorImageInfo *)pSrc);
++
+             radv_trace_gta_template_image_descriptor(
+                set, templ->entry[i].binding, templ->entry[i].array_element + j, templ->entry[i].descriptor_type,
+                (templ->entry[i].dst_offset + j * templ->entry[i].dst_stride) * 4, pDst);

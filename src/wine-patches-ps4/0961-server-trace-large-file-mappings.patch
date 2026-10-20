@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Mon, 19 Oct 2026 00:00:00 -0700
+Subject: [PATCH] server: report large file-backed section mappings on Orbis
+
+The native Oblivion startup accumulates major faults and block input before
+its first window, while ordinary NtReadFile latency is low. Report a bounded
+set of large file-backed section creations with their backing path, requested
+size, file size, and flags. This lets the next hardware run identify which
+mapped game assets line up with the demand-page burst without logging every
+read or changing the mapping behavior.
+---
+ server/mapping.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/server/mapping.c b/server/mapping.c
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -1670,6 +1670,26 @@ DECL_HANDLER(create_mapping)
+         }
+         data.fd = get_obj_fd( (struct object *)file );
+     }
+ 
++#ifdef __ORBIS__
++    /* Bounded startup diagnostic: identify large file-backed sections that
++     * may be demand-paged during a title's long load. */
++    if (data.fd)
++    {
++        static unsigned int logged;
++        struct stat st;
++        int unix_fd = get_unix_fd( data.fd );
++
++        if (unix_fd != -1 && !fstat( unix_fd, &st ) &&
++            (st.st_size >= 4 * 1024 * 1024 || (req->flags & SEC_IMAGE)) && logged < 256)
++        {
++            const char *path = get_fd_unix_name( data.fd );
++            fprintf( stderr, "wine-ps4: large mapping #%u file_size=%lld requested_size=%lld flags=%#x file=%s\n",
++                     ++logged, (long long)st.st_size, (long long)req->size, req->flags,
++                     path ? path : "(unknown)" );
++        }
++    }
++#endif
++
+     reply->handle = create_named_obj_handle( current->process, &params );
+ 
+     if (file) release_object( file );
+-- 
+2.43.0

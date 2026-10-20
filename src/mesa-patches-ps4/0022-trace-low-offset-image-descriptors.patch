@@ -1,0 +1,22 @@
+--- a/src/amd/vulkan/radv_descriptor_set.c
++++ b/src/amd/vulkan/radv_descriptor_set.c
+@@ -24,7 +24,7 @@
+ {
+    static int trace_count;
+ 
+-   if (!getenv("ORBIS_TRACE_GTA_DESC") || offset != 0x18 || p_atomic_inc_return(&trace_count) > 64)
++   if (!getenv("ORBIS_TRACE_GTA_DESC") || offset >= 0x100 || p_atomic_inc_return(&trace_count) > 256)
+       return;
+ 
+    mesa_logi("orbis-drm: GTA_DESC set_va=0x%" PRIx64 " set_size=%u binding=%u element=%u type=%u offset=0x%x "
+--- a/src/amd/vulkan/radv_descriptor_update_template.c
++++ b/src/amd/vulkan/radv_descriptor_update_template.c
+@@ -22,7 +22,7 @@
+ {
+    static int trace_count;
+ 
+-   if (!getenv("ORBIS_TRACE_GTA_DESC") || offset != 0x18 || p_atomic_inc_return(&trace_count) > 64)
++   if (!getenv("ORBIS_TRACE_GTA_DESC") || offset >= 0x100 || p_atomic_inc_return(&trace_count) > 256)
+       return;
+ 
+    mesa_logi("orbis-drm: GTA_DESC_TEMPLATE set_va=0x%" PRIx64 " set_size=%u binding=%u element=%u type=%u "

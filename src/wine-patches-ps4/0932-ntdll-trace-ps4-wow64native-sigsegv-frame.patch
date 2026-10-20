@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace PS4 native WoW64 SIGBUS and SIGSEGV frames
+
+The first diagnostic build did not emit its frame trace. The fault at the
+native WoW64 iretq can arrive as SIGSEGV as well as SIGBUS, so capture both
+signals before Wine converts the host fault into a guest exception.
+
+---
+ dlls/ntdll/unix/signal_x86_64.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 4fa4b1c..b35b28c 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2825,9 +2825,9 @@ static void __attribute__((used)) segv_handler( int signal, siginfo_t *siginfo,
+ #ifdef __PROSPERO__
+     if (segv_hook && segv_hook( siginfo, _sigcontext )) return;
+     /* The native WoW64 path returned from iretq at 0x7bef14c9, but only the
+-     * resulting guest exception was visible. Capture the raw host return
+-     * frame before Wine rewrites it into an exception context. */
+-    if (signal == SIGBUS)
++     * resulting guest exception was visible. Capture SIGBUS and SIGSEGV raw
++     * host frames before Wine rewrites them into an exception context. */
++    if (signal == SIGBUS || signal == SIGSEGV)
+     {
+         static unsigned int trace_count;
+         unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
+@@ -2838,8 +2838,8 @@ static void __attribute__((used)) segv_handler( int signal, siginfo_t *siginfo,
+             unsigned int i;
+ 
+             snprintf( line, sizeof(line),
+-                      "ntdll ps4-sigbus-frame n=%u code=%d addr=%p rip=%llx rsp=%llx cs=%x ss=%x flags=%llx trap=%lld err=%llx\n",
+-                      n, siginfo ? siginfo->si_code : 0,
++                      "ntdll ps4-sig-fault-frame n=%u sig=%d code=%d addr=%p rip=%llx rsp=%llx cs=%x ss=%x flags=%llx trap=%lld err=%llx\n",
++                      n, signal, siginfo ? siginfo->si_code : 0,
+                       siginfo ? siginfo->si_addr : NULL,
+                       (unsigned long long)RIP_sig(sigcontext),
+                       (unsigned long long)RSP_sig(sigcontext),
+@@ -2851,7 +2851,7 @@ static void __attribute__((used)) segv_handler( int signal, siginfo_t *siginfo,
+             sceKernelDebugOutText( 0, line );
+             for (i = 0; i < 5; i++)
+             {
+-                snprintf( line, sizeof(line), "ntdll ps4-sigbus-stack n=%u [%u]=%016llx\n",
++                snprintf( line, sizeof(line), "ntdll ps4-sig-fault-stack n=%u [%u]=%016llx\n",
+                           n, i, (unsigned long long)frame[i] );
+                 sceKernelDebugOutText( 0, line );
+             }
+--
+2.43.0

@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Subject: [PATCH] wine64: allow an A/B build with direct server calls disabled
+
+The native Oblivion run shows the DirectSound mixer completing thousands of
+40 ms waits in a fraction of a second. Allow a diagnostic package to route
+Wine server requests through the ordinary server thread, leaving the native
+WoW64 backend and all game data unchanged.
+
+---
+ native/wine64_main.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1146,6 +1146,10 @@
+         }
+         if (PW_WINE64_WAIT_WATCHDOG)
+             extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_PS5_WAIT_WATCHDOG", "1" };
++#if PW_WINE64_SERVER_DIRECT_OFF
++        extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_PS5_SERVER_DIRECT", "0" };
++        PS5LOG_LOG("PW_WINE64 server_direct=0 (regular server thread)");
++#endif
+         /* [application] arguments follow the executable in Wine's argv. */
+         int words = pw_wine_launch_split(game->app.arguments, argument_words,
+                                          sizeof(argument_words), wine_argv + 2,
+-- 
+2.43.0

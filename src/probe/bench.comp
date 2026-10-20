@@ -1,4 +1,5 @@
 #version 450
+#extension GL_KHR_shader_subgroup_basic : require
 /* Occupancy-limited FMA benchmark.
  *
  * The point is to measure the SILICON, not what the driver claims. RADV on PS4
@@ -14,14 +15,24 @@
  * ⚠ AND THE RESULT MUST BE STORED or the whole loop is dead code the compiler
  * deletes, which measures an empty dispatch very fast.
  */
-layout(local_size_x = 64) in;                    /* one wavefront per workgroup */
+layout(local_size_x = 256) in;                   /* four waves per workgroup */
 
-layout(std430, binding = 0) buffer Out { float v[]; } outbuf;
+layout(std430, binding = 0) buffer Out { uint v[]; } outbuf;
 layout(push_constant) uniform PC { uint iters; } pc;
+
+const uint TOPOLOGY_WORD_OFFSET = 8192u * 256u;
 
 void main()
 {
     uint  id = gl_GlobalInvocationID.x;
+    if (gl_SubgroupInvocationID == 0u) {
+        uint hw = gl_SubgroupID; /* probe-only ACO hook returns SQ_WAVE_HW_ID */
+        uint se = (hw >> 13) & 0x3u;
+        uint sh = (hw >> 12) & 0x1u;
+        uint cu = (hw >> 8) & 0xfu;
+        uint bit = (se * 2u + sh) * 16u + cu;
+        atomicOr(outbuf.v[TOPOLOGY_WORD_OFFSET + (bit >> 5)], 1u << (bit & 31u));
+    }
     float a  = float(id) * 1e-6;
 
     float x0 = a + 1.0, x1 = a + 2.0, x2 = a + 3.0, x3 = a + 4.0;
@@ -33,5 +44,5 @@ void main()
         x2 = fma(x2, b, c);
         x3 = fma(x3, b, c);
     }
-    outbuf.v[id] = x0 + x1 + x2 + x3;
+    outbuf.v[id] = floatBitsToUint(x0 + x1 + x2 + x3);
 }

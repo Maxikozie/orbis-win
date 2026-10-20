@@ -1,0 +1,56 @@
+Subject: [PATCH] radv/orbis: trace raster-config source and preamble path
+
+ 
+
+The Pro run has NEO MODE / CHIP_GLADIUS in the driver log but still writes 0x2a00161a into the preamble with ORBIS_RASTER_CONFIG=0x3a00161a present. Log the identified family, topology inputs, calculated pair and environment override, then log whether ac_emit_raster_config takes the direct or harvested branch and the values it writes. This is diagnostic only; it does not change either value.
+
+--- a/src/amd/common/ac_gpu_info.c
++++ b/src/amd/common/ac_gpu_info.c
+@@ -2624,6 +2624,15 @@
+    *raster_config_1_p = raster_config_1;
+    if (se_tile_repeat_p)
+       *se_tile_repeat_p = se_tile_repeat;
++
++#ifdef HAVE_ORBIS_PLATFORM
++   mesa_logi("orbis-drm: raster config calculated family=%u pci=0x%04x gfx=%u max_se=%u rb_mask=0x%" PRIx64
++             " max_rb=%u -> 0x%08x/0x%08x (override=%s/%s)",
++             info->family, info->pci_id, info->gfx_level, info->max_se, info->enabled_rb_mask,
++             info->max_render_backends, raster_config, raster_config_1,
++             getenv("ORBIS_RASTER_CONFIG") ? getenv("ORBIS_RASTER_CONFIG") : "unset",
++             getenv("ORBIS_RASTER_CONFIG_1") ? getenv("ORBIS_RASTER_CONFIG_1") : "unset");
++#endif
+ }
+ 
+ void ac_get_harvested_configs(const struct radeon_info *info, unsigned raster_config,
+--- a/src/amd/common/ac_cmdbuf.c
++++ b/src/amd/common/ac_cmdbuf.c
+@@ -16,6 +16,8 @@
+ #include "util/log.h"
+ #endif
+ 
++#include <inttypes.h>
++
+ #define SI_GS_PER_ES 128
+ 
+ static void
+@@ -230,10 +232,20 @@
+       /* Always use the default config when all backends are enabled
+        * (or when we failed to determine the enabled backends).
+        */
++#ifdef HAVE_ORBIS_PLATFORM
++      mesa_logi("orbis-drm: raster config preamble path=direct family=%u rb_mask=0x%" PRIx64 " max_rb=%u -> "
++                "0x%08x/0x%08x", info->family, rb_mask, num_rb, info->pa_sc_raster_config,
++                info->pa_sc_raster_config_1);
++#endif
+       ac_pm4_set_reg(pm4, R_028350_PA_SC_RASTER_CONFIG, info->pa_sc_raster_config);
+       if (info->gfx_level >= GFX7)
+          ac_pm4_set_reg(pm4, R_028354_PA_SC_RASTER_CONFIG_1, info->pa_sc_raster_config_1);
+    } else {
++#ifdef HAVE_ORBIS_PLATFORM
++      mesa_logi("orbis-drm: raster config preamble path=harvested family=%u rb_mask=0x%" PRIx64 " max_rb=%u "
++                "input=0x%08x/0x%08x", info->family, rb_mask, num_rb, info->pa_sc_raster_config,
++                info->pa_sc_raster_config_1);
++#endif
+       ac_write_harvested_raster_configs(info, pm4, info->pa_sc_raster_config,
+                                         info->pa_sc_raster_config_1);
+    }

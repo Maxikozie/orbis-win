@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: report sampled thread server request state
+
+The WoW64 native PC sampler interrupts the thread whose host PC it reports.
+Include that same thread's pending Wine server request and reply-read progress
+in sparse SIGPROF records, so a separate SIGUSR1 worker cannot obscure the
+request associated with a blocked native read.
+
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 81750cd6c6..7700eb565e 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -1090,6 +1090,7 @@ PW_NATIVE_SIGNAL_ENTRY( profile )
+ static void __attribute__((used)) profile_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+ {
+     ucontext_t *context = _sigcontext;
++    struct thread_data *data = get_current_thread_data();
+     (void)signal;
+     (void)siginfo;
+     __atomic_store_n( &pw_native_pc_rip, RIP_sig(context), __ATOMIC_RELAXED );
+@@ -1101,6 +1102,21 @@ static void __attribute__((used)) profile_handler( int signal, siginfo_t *siginf
+     __atomic_store_n( &pw_native_pc_rdx, RDX_sig(context), __ATOMIC_RELAXED );
+     __atomic_store_n( &pw_native_pc_r10, R10_sig(context), __ATOMIC_RELAXED );
+     __atomic_add_fetch( &pw_native_pc_sequence, 1, __ATOMIC_RELEASE );
++    {
++        static unsigned int trace_count;
++        unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++        if (n <= 16 || !(n & (n - 1)))
++        {
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            char line[224];
++            snprintf( line, sizeof(line),
++                      "ntdll profile-sample n=%u tid=%04x teb=%p rip=%llx req_seq=%u req=%d stage=%d fd=%d remain=%u got=%u\n",
++                      n, data->tid, data->teb, (unsigned long long)RIP_sig(context),
++                      data->pw_server_seq, data->pw_server_request, data->pw_server_stage,
++                      data->pw_server_fd, data->pw_server_remaining, data->pw_server_received );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
+ }
+ #endif
+ #else

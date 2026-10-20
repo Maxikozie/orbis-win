@@ -1,0 +1,376 @@
+diff --git a/src/amd/common/nir/ac_nir_lower_intrinsics_to_args.c b/src/amd/common/nir/ac_nir_lower_intrinsics_to_args.c
+index f51b184..adc6c9f 100644
+--- a/src/amd/common/nir/ac_nir_lower_intrinsics_to_args.c
++++ b/src/amd/common/nir/ac_nir_lower_intrinsics_to_args.c
+@@ -7,8 +7,11 @@
+ #include "ac_nir.h"
+ #include "ac_nir_helpers.h"
+ #include "ac_gpu_info.h"
++#include "util/log.h"
+ 
+ #include "nir_builder.h"
++#include <stdlib.h>
++#include <string.h>
+ 
+ typedef struct {
+    const struct ac_shader_args *const args;
+@@ -111,6 +114,17 @@ lower_intrinsic_to_arg(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
+ 
+    switch (intrin->intrinsic) {
+    case nir_intrinsic_load_subgroup_id:
++      /* The dedicated PS4 topology probe asks ACO to expose SQ_WAVE_HW_ID
++       * through gl_SubgroupID. Keep this intrinsic alive until instruction
++       * selection, where the guarded probe path reads the hardware register. */
++      if (b->shader->info.stage == MESA_SHADER_COMPUTE && getenv("ORBIS_PROBE_HW_ID") &&
++          !strcmp(getenv("ORBIS_PROBE_HW_ID"), "1")) {
++         mesa_logi("radv-probe-preserve-subgroup-id stage=%u hw_stage=%u workgroup=%u wave=%u",
++                   b->shader->info.stage, s->options->hw_stage, s->options->workgroup_size,
++                   s->options->wave_size);
++         return false;
++      }
++
+       /* LLVM uses an intrinsic to get this on gfx12. */
+       if (s->options->gfx_level >= GFX12 && s->options->hw_stage == AC_HW_COMPUTE_SHADER && s->options->use_llvm)
+          return false;
+diff --git a/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp b/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp
+index 8752ae3..64ba6e1 100644
+--- a/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp
++++ b/src/amd/compiler/instruction_selection/aco_select_nir_intrinsics.cpp
+@@ -14,6 +14,8 @@
+ #include "amdgfxregs.h"
+ #include <numeric>
+ #include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
+ 
+ namespace aco {
+ namespace {
+@@ -3986,6 +3988,17 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
+ {
+    Builder bld(ctx->program, ctx->block);
+    switch (instr->intrinsic) {
++   case nir_intrinsic_load_subgroup_id:
++      /* Opt-in probe hook. HW_REG_HW_ID is register 4 on GFX6-11. */
++      if (ctx->program->stage == compute_cs && getenv("ORBIS_PROBE_HW_ID") &&
++          !strcmp(getenv("ORBIS_PROBE_HW_ID"), "1")) {
++         Temp dst = get_ssa_temp(ctx, &instr->def);
++         Temp hw_id = bld.sopk(aco_opcode::s_getreg_b32, bld.def(s1), ((32 - 1) << 11) | 4);
++         bld.copy(Definition(dst), Operand(hw_id));
++      } else {
++         isel_err(&instr->instr, "Unlowered subgroup ID intrinsic");
++      }
++      break;
+    case nir_intrinsic_load_interpolated_input: visit_load_interpolated_input(ctx, instr); break;
+    case nir_intrinsic_store_output: visit_store_output(ctx, instr); break;
+    case nir_intrinsic_load_input:
+diff --git a/src/amd/vulkan/radv_pipeline.c b/src/amd/vulkan/radv_pipeline.c
+index 37f8499..188dc80 100644
+--- a/src/amd/vulkan/radv_pipeline.c
++++ b/src/amd/vulkan/radv_pipeline.c
+@@ -14,6 +14,7 @@
+ #include "nir/radv_nir.h"
+ #include "tools/radv_rmv.h"
+ #include "util/u_atomic.h"
++#include "util/log.h"
+ #include "radv_pipeline_rt.h"
+ #include "radv_shader.h"
+ #include "radv_shader_args.h"
+@@ -26,6 +27,18 @@
+ #include "aco_interface.h"
+ #include "vk_shader_module.h"
+ 
++static void
++radv_probe_dump_nir(const char *stage, nir_shader *nir)
++{
++   const char *probe_hw_id = getenv("ORBIS_PROBE_HW_ID");
++   if (!probe_hw_id || strcmp(probe_hw_id, "1") || nir->info.stage != MESA_SHADER_COMPUTE)
++      return;
++
++   mesa_logi("radv-probe-%s-begin", stage);
++   nir_log_shaderi(nir);
++   mesa_logi("radv-probe-%s-end", stage);
++}
++
+ bool
+ radv_pipeline_skip_shaders_cache(const struct radv_device *device, const struct radv_pipeline *pipeline)
+ {
+@@ -488,13 +501,18 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
+    if (!use_llvm)
+       ac_nir_optimize_uniform_atomics(stage->nir);
+ 
+-   NIR_PASS(_, stage->nir, nir_opt_uniform_subgroup,
+-            &(struct nir_lower_subgroups_options){
+-               .subgroup_size = stage->info.wave_size,
+-               .ballot_bit_size = stage->info.wave_size,
+-               .ballot_components = 1,
+-               .lower_ballot_bit_count_to_mbcnt_amd = true,
+-            });
++   const char *probe_hw_id = getenv("ORBIS_PROBE_HW_ID");
++   bool probe_hw_id_compute = probe_hw_id && !strcmp(probe_hw_id, "1") &&
++                              stage->stage == MESA_SHADER_COMPUTE;
++   if (!probe_hw_id_compute) {
++      NIR_PASS(_, stage->nir, nir_opt_uniform_subgroup,
++               &(struct nir_lower_subgroups_options){
++                  .subgroup_size = stage->info.wave_size,
++                  .ballot_bit_size = stage->info.wave_size,
++                  .ballot_components = 1,
++                  .lower_ballot_bit_count_to_mbcnt_amd = true,
++               });
++   }
+ 
+    NIR_PASS(_, stage->nir, nir_opt_idiv_const, 8);
+ 
+@@ -514,7 +532,9 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
+          .use_llvm = use_llvm,
+          .load_grid_size_from_user_sgpr = compiler_info->key.load_grid_size_from_user_sgpr,
+       });
++   radv_probe_dump_nir("after-intrinsics-to-args", stage->nir);
+    NIR_PASS(_, stage->nir, radv_nir_lower_abi, gfx_level, stage, gfx_state, compiler_info->hw.address32_hi);
++   radv_probe_dump_nir("after-lower-abi", stage->nir);
+ 
+    if (!stage->key.optimisations_disabled) {
+       NIR_PASS(_, stage->nir, nir_opt_dce);
+@@ -539,10 +559,14 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
+       };
+       NIR_PASS(_, stage->nir, nir_opt_load_store_vectorize, &late_vectorize_opts);
+    }
++   radv_probe_dump_nir("after-early-optimizations", stage->nir);
+ 
+    NIR_PASS(_, stage->nir, ac_nir_lower_mem_access_bit_sizes, gfx_level, use_llvm);
++   radv_probe_dump_nir("after-lower-mem-access-bit-sizes", stage->nir);
+    NIR_PASS(_, stage->nir, ac_nir_lower_global_access, gfx_level);
++   radv_probe_dump_nir("after-lower-global-access", stage->nir);
+    NIR_PASS(_, stage->nir, nir_lower_int64);
++   radv_probe_dump_nir("after-lower-int64", stage->nir);
+ 
+    if (compiler_info->key.mitigate_smem_with_null_prt)
+       NIR_PASS(_, stage->nir, ac_nir_fixup_smem_loads_null_prt, compiler_info->hw.address_prt_wa_control_bit);
+@@ -556,11 +580,15 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
+    if (opt_intrinsics) /* optimize inot(inverse_ballot) */
+       NIR_PASS(_, stage->nir, nir_opt_intrinsics);
+ 
+-   NIR_PASS(_, stage->nir, nir_opt_uub, &(nir_opt_uub_options){0});
++   if (!probe_hw_id_compute)
++      NIR_PASS(_, stage->nir, nir_opt_uub, &(nir_opt_uub_options){0});
++   radv_probe_dump_nir("after-opt-uub", stage->nir);
++   radv_probe_dump_nir("before-radv-optimize-algebraic", stage->nir);
+ 
+    radv_optimize_nir_algebraic(
+       stage->nir, io_to_mem || lowered_ngg || stage->stage == MESA_SHADER_COMPUTE || stage->stage == MESA_SHADER_TASK,
+       gfx_level >= GFX8, gfx_level);
++   radv_probe_dump_nir("after-radv-optimize-algebraic", stage->nir);
+ 
+    if (stage->nir->info.cs.has_cooperative_matrix)
+       NIR_PASS(_, stage->nir, radv_nir_opt_cooperative_matrix, gfx_level);
+@@ -614,13 +642,18 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
+          NIR_PASS(_, stage->nir, nir_opt_vectorize, ac_nir_opt_vectorize_cb, &gfx_level);
+       }
+    }
++   radv_probe_dump_nir("after-bit-size-and-vectorization", stage->nir);
+ 
+    /* cleanup passes */
+    NIR_PASS(_, stage->nir, nir_lower_alu_width, ac_nir_opt_vectorize_cb, &gfx_level);
++   radv_probe_dump_nir("after-lower-alu-width", stage->nir);
+ 
+    NIR_PASS(_, stage->nir, nir_lower_load_const_to_scalar);
++   radv_probe_dump_nir("after-lower-load-const-to-scalar", stage->nir);
+    NIR_PASS(_, stage->nir, nir_opt_copy_prop);
++   radv_probe_dump_nir("after-cleanup-copy-prop", stage->nir);
+    NIR_PASS(_, stage->nir, nir_opt_dce);
++   radv_probe_dump_nir("after-cleanup-optimizations", stage->nir);
+ 
+    if (!stage->key.optimisations_disabled) {
+       sink_opts |= nir_move_comparisons | nir_move_load_ubo | nir_move_load_ssbo | nir_move_alu;
+@@ -638,6 +671,7 @@ radv_postprocess_nir(const struct radv_compiler_info *compiler_info, const struc
+    }
+ 
+    stage->info.nir_shared_size = stage->nir->info.shared_size;
++   radv_probe_dump_nir("pipeline-end", stage->nir);
+ }
+ 
+ bool
+diff --git a/src/amd/vulkan/radv_pipeline_compute.c b/src/amd/vulkan/radv_pipeline_compute.c
+index 76440a4..eb69196 100644
+--- a/src/amd/vulkan/radv_pipeline_compute.c
++++ b/src/amd/vulkan/radv_pipeline_compute.c
+@@ -12,6 +12,7 @@
+ #include "nir/nir.h"
+ #include "nir/radv_nir.h"
+ #include "tools/radv_rmv.h"
++#include "util/log.h"
+ #include "util/mesa-blake3.h"
+ #include "util/os_time.h"
+ #include "util/u_atomic.h"
+@@ -26,6 +27,9 @@
+ #include "aco_interface.h"
+ #include "sid.h"
+ 
++#include <stdlib.h>
++#include <string.h>
++
+ uint32_t
+ radv_get_compute_resource_limits(const struct radv_physical_device *pdev, const struct radv_shader_info *info)
+ {
+@@ -93,10 +97,28 @@ radv_compile_cs(const struct radv_compiler_info *compiler_info, struct radv_shad
+    /* Compile SPIR-V shader to NIR. */
+    cs_stage->nir = radv_shader_spirv_to_nir(compiler_info, cs_stage, NULL, is_internal);
+ 
++   const char *probe_hw_id = getenv("ORBIS_PROBE_HW_ID");
++   bool probe_dump = probe_hw_id && !strcmp(probe_hw_id, "1");
++   if (probe_dump) {
++      mesa_logi("radv-probe-nir-after-spirv-begin");
++      nir_log_shaderi(cs_stage->nir);
++      mesa_logi("radv-probe-nir-after-spirv-end");
++   }
++
+    NIR_PASS(_, cs_stage->nir, ac_nir_lower_indirect_derefs);
+    NIR_PASS(_, cs_stage->nir, nir_lower_vars_to_ssa);
+ 
+-   radv_optimize_nir(cs_stage->nir, cs_stage->key.optimisations_disabled);
++   /* The topology probe needs load_subgroup_id to reach the opt-in ACO
++    * lowering hook. Its ordinary optimizer path currently folds it to zero.
++    */
++   if (!probe_dump)
++      radv_optimize_nir(cs_stage->nir, cs_stage->key.optimisations_disabled);
++
++   if (probe_dump) {
++      mesa_logi("radv-probe-nir-after-optimize-begin");
++      nir_log_shaderi(cs_stage->nir);
++      mesa_logi("radv-probe-nir-after-optimize-end");
++   }
+ 
+    /* Run the shader info pass. */
+    radv_nir_shader_info_init(cs_stage->stage, MESA_SHADER_NONE, &cs_stage->info);
+@@ -111,6 +133,14 @@ radv_compile_cs(const struct radv_compiler_info *compiler_info, struct radv_shad
+    /* Postprocess NIR. */
+    radv_postprocess_nir(compiler_info, NULL, cs_stage);
+ 
++   /* The topology probe's subgroup ID unexpectedly disappeared before ACO.
++    * Log final NIR to the same retrievable Mesa log as the disassembly. */
++   if (probe_dump) {
++      mesa_logi("radv-probe-nir-begin");
++      nir_log_shaderi(cs_stage->nir);
++      mesa_logi("radv-probe-nir-end");
++   }
++
+    dbg->dump_shader = radv_can_dump_shader(compiler_info, cs_stage->nir);
+    bool dump_nir = dbg->dump_shader && compiler_info->debug.dump_nir;
+ 
+diff --git a/src/amd/vulkan/radv_shader.c b/src/amd/vulkan/radv_shader.c
+index 65931d0..3864a95 100644
+--- a/src/amd/vulkan/radv_shader.c
++++ b/src/amd/vulkan/radv_shader.c
+@@ -55,6 +55,18 @@
+ #include "ac_llvm_util.h"
+ #endif
+ 
++static void
++radv_probe_dump_nir(const char *stage, nir_shader *nir)
++{
++   const char *probe_hw_id = getenv("ORBIS_PROBE_HW_ID");
++   if (!probe_hw_id || strcmp(probe_hw_id, "1"))
++      return;
++
++   mesa_logi("radv-probe-nir-%s-begin", stage);
++   nir_log_shaderi(nir);
++   mesa_logi("radv-probe-nir-%s-end", stage);
++}
++
+ static void
+ get_nir_options_for_stage(struct radv_compiler_info *compiler_info, mesa_shader_stage stage)
+ {
+@@ -539,6 +551,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct
+       };
+       nir = spirv_to_nir(spirv, stage->spirv.size / 4, spec, stage->stage, stage->entrypoint, &spirv_options,
+                          &compiler_info->nir_options[stage->stage]);
++      radv_probe_dump_nir("raw-spirv-to-nir", nir);
+       nir->info.internal |= is_internal;
+       assert(nir->info.stage == stage->stage);
+ 
+@@ -559,6 +572,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct
+          .primitive_id = nir->info.stage == MESA_SHADER_FRAGMENT,
+       };
+       NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
++      radv_probe_dump_nir("after-sysvals-to-varyings", nir);
+ 
+       /* We have to lower away local constant initializers right before we
+        * inline functions.  That way they get properly initialized at the top
+@@ -647,6 +661,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct
+       NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+ 
+       NIR_PASS(_, nir, nir_lower_vars_to_ssa);
++      radv_probe_dump_nir("after-vars-to-ssa", nir);
+ 
+       NIR_PASS(_, nir, nir_propagate_invariant, true);
+ 
+@@ -676,6 +691,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct
+       NIR_PASS(_, nir, nir_lower_view_index_to_device_index);
+ 
+    NIR_PASS(_, nir, nir_lower_system_values);
++   radv_probe_dump_nir("after-lower-system-values", nir);
+ 
+    if (compiler_info->ac->gfx_level < GFX12 && nir->info.derivative_group == DERIVATIVE_GROUP_QUADS) {
+       nir_lower_compute_system_values_options csv_options = {
+@@ -784,6 +800,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct
+                .lower_boolean_reduce = !use_llvm,
+                .lower_boolean_shuffle = true,
+             });
++   radv_probe_dump_nir("after-lower-subgroups", nir);
+ 
+    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
+    NIR_PASS(_, nir, nir_opt_shrink_stores, !compiler_info->key.disable_shrink_image_store);
+@@ -795,6 +812,10 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct
+    };
+    NIR_PASS(_, nir, nir_opt_access, &opt_access_options);
+ 
++   const char *probe_hw_id = getenv("ORBIS_PROBE_HW_ID");
++   bool probe_hw_id_compute = probe_hw_id && !strcmp(probe_hw_id, "1") &&
++                              nir->info.stage == MESA_SHADER_COMPUTE;
++
+    if (!stage->key.optimisations_disabled) {
+       /* Only run this pass once before nir_lower_var_copies is called,
+       * so that we don't introduce any new copy_deref instructions later.
+@@ -802,7 +823,12 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct
+       NIR_PASS(_, nir, nir_opt_find_array_copies);
+       NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+ 
+-      radv_optimize_nir(nir, false);
++      /* Keep load_subgroup_id intact for the opt-in HW_ID probe. The normal
++       * compute optimizer currently folds it to zero before ACO can lower it.
++       */
++      if (!probe_hw_id_compute)
++         radv_optimize_nir(nir, false);
++      radv_probe_dump_nir("after-radv-optimize", nir);
+ 
+       NIR_PASS(_, nir, nir_opt_memcpy);
+       NIR_PASS(_, nir, nir_opt_deref);
+@@ -3479,6 +3505,12 @@ radv_shader_nir_to_asm(const struct radv_compiler_info *compiler_info, struct ra
+       dump_shader |= radv_can_dump_shader(compiler_info, shaders[i]);
+ 
+    struct radv_shader_binary *binary = NULL;
++   const char *probe_hw_id = getenv("ORBIS_PROBE_HW_ID");
++   if (stage == MESA_SHADER_COMPUTE && probe_hw_id && !strcmp(probe_hw_id, "1")) {
++      mesa_logi("radv-probe-pre-aco-begin");
++      nir_log_shaderi(shaders[shader_count - 1]);
++      mesa_logi("radv-probe-pre-aco-end");
++   }
+ #if AMD_LLVM_AVAILABLE
+    if (compiler_info->key.use_llvm || dump_shader || pl_stage->key.keep_executable_info)
+       ac_init_llvm_once();
+@@ -3526,6 +3558,16 @@ radv_shader_dump_asm(const struct radv_compiler_info *compiler_info, struct radv
+       }
+ 
+       fprintf(stderr, "\ndisasm:\n%s\n", debug->disasm_string);
++
++      /* stderr is not observable from a PS4 title. The dedicated topology
++       * probe routes this same assembly through Mesa's configured log file so
++       * the ACO HW_ID read can be verified over the known-path FTP channel. */
++      const char *probe_hw_id = getenv("ORBIS_PROBE_HW_ID");
++      if (probe_hw_id && !strcmp(probe_hw_id, "1")) {
++         mesa_logi("radv-probe-asm-begin");
++         mesa_log_multiline(MESA_LOG_INFO, debug->disasm_string);
++         mesa_logi("radv-probe-asm-end");
++      }
+    }
+ }
+ 

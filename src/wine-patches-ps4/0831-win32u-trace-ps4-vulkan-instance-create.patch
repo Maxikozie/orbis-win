@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Subject: [PATCH] win32u: Trace the PS4 Vulkan instance creation boundary
+
+The hang after DXVK lists instance extensions occurs before any physical-device
+format or device-extension log. Mark the conversion and host vkCreateInstance
+boundaries so a console log distinguishes Wine-side conversion from a RADV
+call that does not return.
+
+The messages use the vulkan debug channel; enable warn+vulkan for the target
+profile during this diagnostic.
+
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -610,8 +610,13 @@
+     list_init( &instance->utils_messengers );
+     list_init( &instance->report_callbacks );
+ 
++    WARN( "PS4 Vulkan instance phase=convert-begin extensions=%u layers=%u\n",
++          create_info->enabledExtensionCount, create_info->enabledLayerCount );
+     if ((res = convert_instance_create_info( &pool, create_info, instance ))) goto failed;
++    WARN( "PS4 Vulkan instance phase=convert-end res=%d\n", res );
++    WARN( "PS4 Vulkan instance phase=host-create-begin\n" );
+     if ((res = p_vkCreateInstance( create_info, NULL /* allocator */, &host_instance ))) goto failed;
++    WARN( "PS4 Vulkan instance phase=host-create-end res=%d host=%p\n", res, host_instance );
+ 
+     vulkan_object_init_ptr( &instance->obj.obj, (UINT_PTR)host_instance, &client_instance->obj );
+     instance->obj.p_insert_object = vulkan_instance_insert_object;

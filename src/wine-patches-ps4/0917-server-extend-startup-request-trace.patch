@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Subject: [PATCH] server: keep startup request trace through native WoW64 init
+
+The current 3000-request diagnostic ends immediately before the request whose
+reply was traced in ORBW00050. Extend the bounded trace so the next stalled
+request is visible; this only changes diagnostic coverage.
+
+---
+diff --git a/server/request.c b/server/request.c
+index 1b71aae2d5..1b71aae2d5 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -419,5 +419,5 @@ static void call_req_handler( struct thread *thread )
+         extern int sceKernelDebugOutText( int channel, const char *text );
+-        static int left = 3000;
++        static int left = 10000;
+         if (left > 0)
+         {
+             char line[64];
+-- 
+2.43.0

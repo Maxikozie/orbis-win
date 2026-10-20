@@ -1,0 +1,53 @@
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 4a41098..eec0218 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -59,6 +59,10 @@
+ #define PW_TITLE_ID "PPSA99995"
+ #define PW_APP_NAME "prospero-win-wine64"
+ 
++/* The system suspend path waits for the GNM driver's per-frame submission
++ * completion notification, including frames submitted through Vulkan/AGC. */
++extern int32_t sceGnmSubmitDone(void);
++
+ /* Where the title's Wine runtime can be seen: /app0 inside the sandbox;
+  * once /data is granted the process sees the real root, where /app0 does
+  * not exist (measured), and the sandbox's view of app0 is used instead. */
+@@ -1410,7 +1410,17 @@ int main(int argc, char **argv)
+         } else if (frame_shown && __atomic_load_n(&display_closed, __ATOMIC_ACQUIRE)) {
+             if (!vulkan_frames.resolved) vulkan_frames_resolve(&vulkan_frames, start.descriptor);
+             (void)vulkan_frames_show(&vulkan_frames, &shown_sequence, scaling, &loading, now, started);
+         }
++        /* Tell the system driver that this frame's command buffers have all
++         * been submitted. Without this, Shell suspend can time out with
++         * CPU_FAULT_SUBMITDONE_TIMEOUT_IN_SUSPEND_ASYNC, even while idle. */
++        {
++            static int logged_submit_done;
++            int submit_done = sceGnmSubmitDone();
++            if (!logged_submit_done || submit_done)
++                PS5LOG_LOG("PW_WINE64 gnm submit_done rc=%d", submit_done);
++            logged_submit_done = 1;
++        }
+         if (!presented) usleep(PW_WINE64_TICK_US);
+ 
+         /* Closing: Options+Create held for a second, or the deadline, asks
+diff --git a/tests/test_native_contract.py b/tests/test_native_contract.py
+index 04c740b..597b2be 100644
+--- a/tests/test_native_contract.py
++++ b/tests/test_native_contract.py
+@@ -128,6 +128,15 @@ def test_agc_submit_establishes_a_suspend_point() -> None:
+     assert "sceAgcSuspendPoint);" in adapter
+     assert "int32_t sceAgcSuspendPoint(void)" in stub
+ 
++
++def test_title_reports_gnm_frame_submit_done() -> None:
++    main = read("native/wine64_main.c")
++    builder = (ROOT.parent / "scripts/build-app-ps4.sh").read_text()
++    assert "extern int32_t sceGnmSubmitDone(void);" in main
++    assert "int submit_done = sceGnmSubmitDone();" in main
++    assert "-lSceGnmDriver" in builder
++
++
+ def main() -> int:
+     tests = [value for name, value in sorted(globals().items())
+              if name.startswith("test_") and callable(value)]

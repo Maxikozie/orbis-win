@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: apply Prospero execute protection after mmap
+
+On PS4 a successful executable mmap does not guarantee that the hardware page
+table grants instruction fetch. Wine records the requested PROT_EXEC bits as
+known immediately, so the later set_vprot() mprotect is skipped as unchanged.
+Force libkernel's mprotect path after executable mmaps and only cache the
+protection if that call succeeds. This covers PE image pages as well as the
+anonymous mappings already handled by the PS4 direct-memory glue.
+
+---
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 0000000..0000000 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -204,8 +204,24 @@ static inline void *counted_mmap( void *addr, size_t len, int prot, int flags, int fd, off_t off )
+     void *ret = host_mmap( addr, len, prot, flags, fd, off );
+
+     vm_stat_add( VM_STAT_MMAP, 1 );
+-    if (ret != MAP_FAILED) host_prot_record( ret, len, prot | HOST_PROT_KNOWN );
++    if (ret != MAP_FAILED)
++    {
++#ifdef __PROSPERO__
++        /* mmap's requested permissions are not authoritative for execute
++         * access on PS4. Apply them through libkernel before marking known;
++         * otherwise the later set_vprot() sees a cache hit and skips it. */
++        if (prot & PROT_EXEC)
++        {
++            vm_stat_add( VM_STAT_MPROTECT, 1 );
++            vm_stat_add( VM_STAT_MPROTECT_BYTES, len );
++            if (host_mprotect( ret, len, prot )) host_prot_record( ret, len, 0 );
++            else host_prot_record( ret, len, prot | HOST_PROT_KNOWN );
++        }
++        else
++#endif
++            host_prot_record( ret, len, prot | HOST_PROT_KNOWN );
++    }
+     return ret;
+ }
+
+ static inline int counted_munmap( void *addr, size_t len )
+-- 
+2.43.0

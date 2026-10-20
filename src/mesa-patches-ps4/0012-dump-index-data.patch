@@ -1,0 +1,63 @@
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -1843,7 +1843,7 @@
+ {
+    uint64_t ps = 0, vs = 0, vs_inputs = 0;
+    uint64_t draw_ps = 0, draw_vs = 0, draw_vs_inputs = 0, index_va = 0;
+-   uint32_t draw_at = UINT32_MAX, index_count = 0;
++   uint32_t draw_at = UINT32_MAX, max_index_count = 0, index_count = 0;
+ 
+    for (uint32_t i = 0; i + 1 < dwords;) {
+       const uint32_t hdr = stream[i];
+@@ -1869,6 +1869,7 @@
+          }
+       } else if (op == 0x27 && cnt >= 6) {
+          draw_at = i;
++         max_index_count = stream[i + 1];
+          index_va = (uint64_t)stream[i + 2] | ((uint64_t)(stream[i + 3] & 0xffffu) << 32);
+          index_count = stream[i + 4];
+          draw_ps = ps;
+@@ -1882,17 +1883,39 @@
+       return;
+ 
+    mesa_logi("orbis-drm: submit #%" PRIu64 " HUNG-WAIT last DRAW_INDEX_2 at dword %u: "
+-             "%u indices from 0x%" PRIx64 " (PS 0x%" PRIx64 ", VS 0x%" PRIx64 ")",
+-             seq, draw_at, index_count, index_va, draw_ps, draw_vs);
++             "%u indices (allocation bound %u) from 0x%" PRIx64 " (PS 0x%" PRIx64 ", VS 0x%" PRIx64 ")",
++             seq, draw_at, index_count, max_index_count, index_va, draw_ps, draw_vs);
+    uint64_t lo = 0, hi = 0;
+    uint32_t bo = 0;
+-   if (orbis_va_mapping_of(index_va, &lo, &hi, &bo))
++   if (orbis_va_mapping_of(index_va, &lo, &hi, &bo)) {
+       mesa_logi("orbis-drm: submit #%" PRIu64 " HUNG-WAIT index BO %u mapping "
+                 "0x%" PRIx64 "..0x%" PRIx64 " (%" PRIu64 " bytes after base)",
+                 seq, bo, lo, hi, hi - index_va);
+-   else
++      if (index_count != 0 && index_count <= max_index_count && index_va <= hi &&
++          (uint64_t)index_count * sizeof(uint32_t) <= hi - index_va) {
++         const uint16_t *indices16 = (const uint16_t *)(uintptr_t)index_va;
++         const uint32_t *indices32 = (const uint32_t *)(uintptr_t)index_va;
++         uint16_t min16 = UINT16_MAX, max16 = 0;
++         uint32_t min32 = UINT32_MAX, max32 = 0;
++         for (uint32_t i = 0; i < index_count; ++i) {
++            if (indices16[i] < min16) min16 = indices16[i];
++            if (indices16[i] > max16) max16 = indices16[i];
++            if (indices32[i] < min32) min32 = indices32[i];
++            if (indices32[i] > max32) max32 = indices32[i];
++         }
++         mesa_logi("orbis-drm: submit #%" PRIu64 " index values if UINT16: min %u max %u; "
++                   "if UINT32: min %u max %u (index type is a separate context register)",
++                   seq, min16, max16, min32, max32);
++         orbis_dump_ib(seq, (const uint32_t *)(uintptr_t)index_va, 8, "DRAW_INDEX_2 raw index data", false);
++      } else {
++         mesa_logw("orbis-drm: submit #%" PRIu64 " cannot safely scan index data: count %u, "
++                   "allocation bound %u, bytes after base %" PRIu64,
++                   seq, index_count, max_index_count, hi - index_va);
++      }
++   } else {
+       mesa_loge("orbis-drm: submit #%" PRIu64 " HUNG-WAIT index buffer 0x%" PRIx64
+                 " is not in a live mapping", seq, index_va);
++   }
+ 
+    uint64_t main_vs = draw_vs_inputs;
+    const char *source = "direct VS prolog input";

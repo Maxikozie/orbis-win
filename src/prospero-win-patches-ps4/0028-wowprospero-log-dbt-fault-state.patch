@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Subject: [PATCH] wowprospero: log DBT state at guest memory faults
+
+Log the translator's fault address and width alongside guest registers, live
+instruction bytes, and the failed block's register-residency contract. Keep
+each record under the PS4 logger's 255-byte limit so concurrent profile output
+cannot truncate the diagnostic.
+
+--- a/wine/wowprospero/unix.c
++++ b/wine/wowprospero/unix.c
+@@ -383,6 +383,44 @@
+     return source_view_writable( opaque, pc, source, bytes, &writable_from );
+ }
+ 
++/* At a guest memory fault, log the DBT state before Wine turns it into an
++ * exception context. This lets the reported access be checked against the
++ * live instruction, register residency and the block that actually failed. */
++static void log_guest_fault_state( struct pw_thread *thread, int status )
++{
++    static int reports;
++    PwX86State *state = &thread->state;
++    const uint8_t *source = NULL;
++    uint8_t instruction[8] = {0};
++    size_t bytes = 0, available = 0;
++    int report = __atomic_add_fetch( &reports, 1, __ATOMIC_RELAXED );
++
++    if (report > 8) return;
++    if (source_view( NULL, state->eip, &source, &available ) == PW_OK)
++    {
++        bytes = available < sizeof(instruction) ? available : sizeof(instruction);
++        memcpy( instruction, source, bytes );
++    }
++    PW_WOW_NOTE( "wowprospero fault[%d]: status=%d pc=%08x access=%08x/%u write=%u "
++                 "eax=%08x ecx=%08x edx=%08x ebx=%08x\n",
++                 report, status, state->eip, state->fault_address, state->fault_width,
++                 state->fault_write, state->gpr[0], state->gpr[1], state->gpr[2], state->gpr[3] );
++    PW_WOW_NOTE( "wowprospero fault[%d]: esp=%08x ebp=%08x esi=%08x edi=%08x flags=%08x "
++                 "block=%08x insns=%u retired=%u resident=%02x\n",
++                 report, state->gpr[4], state->gpr[5], state->gpr[6], state->gpr[7],
++                 state->eflags, thread->engine.fault_block_pc,
++                 thread->engine.fault_block_instructions, state->step_retired,
++                 thread->engine.fault_block_resident_mask );
++    PW_WOW_NOTE( "wowprospero fault[%d]: map=%d,%d,%d,%d,%d,%d,%d,%d\n",
++                 report, thread->engine.fault_block_map[0], thread->engine.fault_block_map[1],
++                 thread->engine.fault_block_map[2], thread->engine.fault_block_map[3],
++                 thread->engine.fault_block_map[4], thread->engine.fault_block_map[5],
++                 thread->engine.fault_block_map[6], thread->engine.fault_block_map[7] );
++    PW_WOW_NOTE( "wowprospero fault[%d]: bytes=%zu %02x %02x %02x %02x %02x %02x %02x %02x\n",
++                 report, bytes, instruction[0], instruction[1], instruction[2], instruction[3],
++                 instruction[4], instruction[5], instruction[6], instruction[7] );
++}
++
+ /* Zeroed memory above the guest's 4 GiB, from Wine's own virtual memory
+  * (host_memory.h), committed, or only reserved (type MEM_RESERVE); NULL
+  * when there is none. */
+@@ -1841,6 +1879,8 @@
+             reset_thread_engine( thread );
+             continue;
+         }
++        if (status == PW_ERR_VM || status == PW_ERR_NOT_FOUND)
++            log_guest_fault_state( thread, status );
+         pw_wow_report_error(params, status, state->eip, state->fault_address, state->fault_write);
+         break;
+     }
+-- 

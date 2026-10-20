@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ps4-gladius <ps4-gladius@invalid>
+Subject: [PATCH] ntdll: report PS4 physical memory and available pools
+
+Orbis sysctl does not provide the memory totals Wine expects. Reporting only
+the 440 MiB flexible-memory pool made Windows believe the console had less
+than half a GiB of physical memory, even though Wine also backs anonymous
+memory from direct memory. Report the PS4's 8 GiB physical memory and the
+currently available flexible memory plus the largest available direct-memory
+block. The direct-memory query is intentionally treated as a conservative
+lower bound: the kernel reports its largest block, not the sum of all free
+blocks. Keep SYSTEM_BASIC_INFORMATION consistent with physical RAM.
+
+---
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index a8b593934f..8a9df0e54f 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -2773,6 +2773,32 @@ static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
+     }
+ #endif
+ 
++#ifdef __PROSPERO__
++    /* Orbis sysctl reports no usable physical-memory or commit limit.  The
++     * 449 MiB flexible pool is only one pool: ntdll also backs anonymous
++     * mappings from direct memory.  Report the console's physical RAM, and
++     * the free amounts we can query. sceKernelAvailableDirectMemorySize
++     * reports the largest free block, so this deliberately undercounts
++     * fragmented direct memory rather than claiming more than is available. */
++    {
++        extern int sceKernelAvailableFlexibleMemorySize( size_t *size );
++        extern int sceKernelAvailableDirectMemorySize( off_t start, off_t end, size_t alignment,
++                                                       off_t *phys_out, size_t *size_out );
++        extern size_t sceKernelGetDirectMemorySize(void);
++        size_t flexible = 0, direct = 0;
++        off_t direct_phys = 0;
++
++        totalram = 8ULL * 1024 * 1024 * 1024;
++        freeram = 0;
++        if (!sceKernelAvailableFlexibleMemorySize( &flexible )) freeram += flexible;
++        if (!sceKernelAvailableDirectMemorySize( 0, sceKernelGetDirectMemorySize(), 0x200000,
++                                                 &direct_phys, &direct )) freeram += direct;
++        freeram = min( freeram, totalram );
++        totalswap = page_size;
++        freeswap = 0;
++    }
++#endif
++
+     /* Titan Quest refuses to run if TotalPageFile <= TotalPhys */
+     if (!totalswap) totalswap = page_size;
+ 
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index fad5384d26..1689e6e769 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4268,6 +4268,11 @@ void virtual_get_system_info( SYSTEM_BASIC_INFORMATION *info, BOOL wow64 )
+     info->MmHighestPhysicalPage = 0x7fffffff / page_size;
+ #endif
+ 
++#ifdef __PROSPERO__
++    /* This is installed physical RAM, not the flexible-memory pool. */
++    info->MmHighestPhysicalPage = (8ULL * 1024 * 1024 * 1024) / page_size + 1;
++#endif
++
+     info->unknown                 = 0;
+     info->KeMaximumIncrement      = 0;  /* FIXME */
+     info->PageSize                = page_size;

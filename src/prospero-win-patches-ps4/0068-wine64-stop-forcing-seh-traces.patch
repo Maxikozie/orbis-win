@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Subject: [PATCH] native: stop forcing WoW64 SEH trace logging
+
+The native WoW64 callback returns through STATUS_LONGJUMP (0x80000026).
+Appending +seh to every game's WINEDEBUG list logs each callback unwind,
+flooding the PS4 log sink during startup. Keep DLL-load diagnostics, but do
+not force SEH traces on profiles that did not request them.
+---
+ native/wine64_main.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1117,9 +1117,9 @@ int main(int argc, char **argv)
+         /* [debug] winedebug: this game's channels in place of the title's. */
+         if (game->winedebug[0]) {
+-            /* Keep backend and exception diagnostics while avoiding per-file
+-             * traces, which add substantial logging overhead during gameplay. */
++            /* Keep DLL-load diagnostics without enabling the WoW64
++             * STATUS_LONGJUMP traces for every callback return. */
+             snprintf(diagnostic_winedebug, sizeof(diagnostic_winedebug),
+-                     "%s,+seh,+loaddll", game->winedebug);
++                     "%s,+loaddll", game->winedebug);
+             extra[0].value = diagnostic_winedebug;
+             PS5LOG_LOG("PW_WINE64 winedebug=%s", diagnostic_winedebug);
+         }
+-- 
+2.43.0

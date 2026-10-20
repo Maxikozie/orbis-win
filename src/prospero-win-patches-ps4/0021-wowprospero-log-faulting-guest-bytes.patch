@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Mon, 12 Oct 2026 18:00:00 -0700
+Subject: [PATCH] wowprospero: log bytes at the faulting guest instruction
+
+The repeated FalloutNV fault reports EIP 0x6b945a and address 0x4, while
+the executable disassembly appears to load from [EBP-4]. Log the live guest
+instruction bytes and the value at [EBP-4] from the fault context so a run
+can distinguish a stale disassembly from incorrect translated fault state.
+Bound both reads to one committed, accessible memory region.
+---
+ wine/wowprospero/cpu.c | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/wine/wowprospero/cpu.c b/wine/wowprospero/cpu.c
+--- a/wine/wowprospero/cpu.c
++++ b/wine/wowprospero/cpu.c
+@@ -328,6 +328,24 @@
+     else flush( addr, 0 );
+ }
+ 
++/* Read only bytes wholly contained in one committed guest region. Exception
++ * diagnostics must not raise a second fault while inspecting the first one. */
++static BOOL read_guest_bytes( UINT address, void *buffer, SIZE_T size )
++{
++    MEMORY_BASIC_INFORMATION info;
++    ULONG_PTR base, end, at = address;
++
++    if (!size || NtQueryVirtualMemory( GetCurrentProcess(), ULongToPtr( address ),
++                                       MemoryBasicInformation, &info, sizeof(info), NULL ) ||
++        info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return FALSE;
++    base = (ULONG_PTR)info.BaseAddress;
++    if (info.RegionSize > ~(ULONG_PTR)0 - base) return FALSE;
++    end = base + info.RegionSize;
++    if (at < base || at > end || size > end - at) return FALSE;
++    memcpy( buffer, ULongToPtr( address ), size );
++    return TRUE;
++}
++
+ static void raise_guest_exception( I386_CONTEXT *ctx, DWORD code, UINT address, UINT write )
+ {
+     static LONG logged;
+@@ -339,10 +357,21 @@
+     {
+         MEMORY_BASIC_INFORMATION info;
+         const UINT *stack = ULongToPtr( ctx->Esp );
++        BYTE instruction[8];
++        UINT ebp_minus_4;
+ 
+         ERR( "guest exception %#lx at eip %#lx esp %#lx ebp %#lx eax %#lx ebx %#lx ecx %#lx edx %#lx esi %#lx edi %#lx address %#x write %u\n",
+              code, ctx->Eip, ctx->Esp, ctx->Ebp, ctx->Eax, ctx->Ebx, ctx->Ecx,
+              ctx->Edx, ctx->Esi, ctx->Edi, address, write );
++        if (read_guest_bytes( ctx->Eip, instruction, sizeof(instruction) ))
++            ERR( "guest instruction %08lx: %02x %02x %02x %02x %02x %02x %02x %02x\n",
++                 ctx->Eip, instruction[0], instruction[1], instruction[2], instruction[3],
++                 instruction[4], instruction[5], instruction[6], instruction[7] );
++        else ERR( "guest instruction %08lx: bytes unavailable\n", ctx->Eip );
++        if (ctx->Ebp >= sizeof(ebp_minus_4) &&
++            read_guest_bytes( ctx->Ebp - sizeof(ebp_minus_4), &ebp_minus_4, sizeof(ebp_minus_4) ))
++            ERR( "guest [ebp-4] %08lx: %08x\n", (ULONG)(ctx->Ebp - sizeof(ebp_minus_4)), ebp_minus_4 );
++        else ERR( "guest [ebp-4] unavailable (ebp %08lx)\n", ctx->Ebp );
+         /* The top of the i386 stack, for the callers' return addresses. */
+         if (!NtQueryVirtualMemory( GetCurrentProcess(), stack, MemoryBasicInformation, &info, sizeof(info), NULL ) &&
+             info.State == MEM_COMMIT && !(info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
+-- 
+2.45.0

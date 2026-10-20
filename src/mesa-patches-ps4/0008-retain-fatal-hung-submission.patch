@@ -1,0 +1,67 @@
+Subject: [PATCH] orbis: retain the fatal submission until the fence-slot wait
+
+The 500 ms fence-slot diagnostic caught submission #19353 at label 19352,
+while submission #19369 was newest. The eight-slot ring had already replaced
+#19353 with #19361. Retain 20 recent streams so the observed 16-submit gap is
+covered, and cap each diagnostic copy at 16K dwords (64 KiB). A later run
+retained fatal submission #20005 (1312 dwords) and dumped it at the wait path.
+That run also showed unrelated streams up to 24808 dwords; these are warned
+about and skipped rather than copied past the slot.
+
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -2884,21 +2884,23 @@
+  * WHAT IDENTIFIES IT WITHOUT A GUESS: the fence label. Every submission ends with an end-of-pipe packet writing its
+  * own sequence number, so `label` is the last one that FINISHED and `label + 1` is the one the GPU is stuck in. A
+  * ring of the last few streams therefore always contains it, keyed by nothing but arithmetic.
+  *
+- * COST: one memcpy of the flattened stream per submission - a few hundred dwords typically, 7136 at the largest
+- * measured - and ORBIS_HUNG_RING slots of .bss. Enabled by DEFAULT, and that is deliberate: a hang that produces no
+- * dump has cost this project more than half a megabyte of memory ever will. ORBIS_DUMP_HUNG=0 turns it off. */
+-#define ORBIS_HUNG_RING 8
++ * COST: one bounded memcpy of the flattened stream per submission - the fatal stream in #20005 was 1312 dwords,
++ * though other streams in that run reached 24808. The fatal wait was 16 submissions behind the newest; keep 20
++ * slots, each with 16K dwords (64 KiB) rather than the full 2 MiB staging size. Larger streams are reported and
++ * skipped rather than overrunning a slot. ORBIS_DUMP_HUNG=0 turns it off. */
++#define ORBIS_HUNG_RING 20
++#define ORBIS_HUNG_STREAM_DWORDS 16384
+ 
+ /* How many distinct hangs one process will dump. The dumper re-arms whenever the fence label moves
+  * again, so this is the only thing bounding a run that stalls repeatedly. */
+ #define ORBIS_HUNG_DUMP_MAX 4
+ 
+ struct orbis_hung_slot {
+    uint64_t seq;
+    uint32_t dwords;
+-   uint32_t stream[ORBIS_FENCE_CB_BYTES / 4];
++   uint32_t stream[ORBIS_HUNG_STREAM_DWORDS];
+ };
+ static struct orbis_hung_slot orbis_hung_ring[ORBIS_HUNG_RING];
+ 
+ /* Time spent in the fence-slot throttle since the last periodic sample, and the totals the WSI's idle wait keeps.
+@@ -10245,12 +10247,21 @@
+        * than referenced: the staging slot it lives in is reused ORBIS_FENCE_CB_SLOTS submissions later, and by the
+        * time a hang is noticed the original would be somebody else's stream. */
+       if (orbis_dump_hung_enabled()) {
+          struct orbis_hung_slot *const hs = &orbis_hung_ring[seq % ORBIS_HUNG_RING];
+-         hs->dwords = (uint32_t)(dw - cb);
+-         memcpy(hs->stream, cb, (size_t)hs->dwords * 4);
+-         /* Last, so a reader can never see a size that does not match the sequence number. */
+-         hs->seq = seq;
++         const uint32_t stream_dwords = (uint32_t)(dw - cb);
++         if (stream_dwords > ORBIS_HUNG_STREAM_DWORDS) {
++            mesa_logw("orbis-drm: submit #%" PRIu64 " is %u dwords, above the %u-dword hung-ring slot; "
++                      "the stream will not be retained",
++                      seq, stream_dwords, ORBIS_HUNG_STREAM_DWORDS);
++            hs->dwords = 0;
++            hs->seq = seq;
++         } else {
++            hs->dwords = stream_dwords;
++            memcpy(hs->stream, cb, (size_t)hs->dwords * 4);
++            /* Last, so a reader can never see a size that does not match the sequence number. */
++            hs->seq = seq;
++         }
+       }
+    }
+ 
+    ORBIS_SUBMIT_STAGE("fence packet built, calling Sony");

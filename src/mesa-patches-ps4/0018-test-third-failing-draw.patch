@@ -1,0 +1,21 @@
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -1483,12 +1483,13 @@
+       }
+ 
+       memcpy(dst, src + i, (size_t)words * 4);
+-      /* Diagnostic A/B: the fatal Neo stream stopped inside indexed draws with
+-       * 4770 and 5961 UINT16 indices, both with a 6144-index bound. Keep the
+-       * packet shape and state intact, but allow those exact counts to be
+-       * reduced to one triangle. This is opt-in and tightly constrained. */
++      /* Diagnostic A/B: prior fatal Neo streams stopped inside indexed draws
++       * with counts 4770 and 5961 (6144-index bound), then 2760 (4096-index
++       * bound). Keep the packet shape and state intact, but reduce only these
++       * exact draws to one triangle. This is opt-in and tightly constrained. */
+       if (getenv("ORBIS_SHRINK_DRAW") != NULL && op == 0x27 /* DRAW_INDEX_2 */ &&
+-          words >= 6 && src[i + 1] == 6144 && (src[i + 4] == 4770 || src[i + 4] == 5961)) {
++          words >= 6 && ((src[i + 1] == 6144 && (src[i + 4] == 4770 || src[i + 4] == 5961)) ||
++                         (src[i + 1] == 4096 && src[i + 4] == 2760))) {
+          const uint64_t index_va = (uint64_t)src[i + 2] | ((uint64_t)src[i + 3] << 32);
+          mesa_logw("orbis-drm: ORBIS_SHRINK_DRAW matched DRAW_INDEX_2 at IB dword %u: "
+                    "%u -> 3 indices, index VA 0x%" PRIx64,

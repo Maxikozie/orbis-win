@@ -87,12 +87,13 @@ half the GPU regardless of this patch.
   not run anything that would show it. Treat the pair as untested, not vindicated.
 - **No CTS run** on the Gladius path. Only the compute benchmark and the
   bundle's triangle example.
-- **SQ_WAVE_HW_ID still has not been read.** The knee says how many SIMDs absorb
-  work; it does not enumerate `[se][sh]` the way `cu_bitmap` wants. If the real
-  topology is not 4×1×9, this measurement cannot tell you.
+- **SQ_WAVE_HW_ID has now been read in two independent launches.** The compute probe observed four SEs,
+  SH0 only, and CU mask `0x03ef` on each SE (nine active IDs: 0-3 and 5-9),
+  matching 36 observed `(SE, SH, CU)` pairs. A second independent launch
+  reproduced the bitmap. This direct result supports the 4×1×9 topology
+  assumption; the throughput knee remains a separate performance measurement.
 - `num_shader_arrays_per_engine = 1` and `num_cu_per_sh = 9` were left alone.
-  Only the engine count changed, so 4×1×9 is an assumption that happens to
-  produce the right total.
+  The direct probe now supports 4×1×9, with CU ID 4 absent from the active mask.
 
 ## Reproducing it
 

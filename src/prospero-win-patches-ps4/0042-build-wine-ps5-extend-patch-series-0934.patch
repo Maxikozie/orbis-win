@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] build: accept PS4 Wine patch 0934
+
+The PS4 Wine queue now includes the Prospero SIGSYS dispatcher fix. Extend
+the local ordered-patch limit by one so the standard build and patch check
+can apply it.
+
+diff --git a/tools/build_wine_ps5.sh b/tools/build_wine_ps5.sh
+index 0000000..0000000 100755
+--- a/tools/build_wine_ps5.sh
++++ b/tools/build_wine_ps5.sh
+@@ -168,7 +168,7 @@ series() {
+         number=$(printf '%s' "$patch" | cut -c1-4 | sed 's/^0*//')
+         number=${number:-0}
+-        [ "$number" -ge 100 ] && [ "$number" -le 933 ] ||
+-            fail "patch number outside 0100-0933: $patch"
++        [ "$number" -ge 100 ] && [ "$number" -le 934 ] ||
++            fail "patch number outside 0100-0934: $patch"
+         [ "$number" -ne "$last" ] || fail "duplicate patch number: $patch"
+         last=$number
+         grep -q '^Subject: ' "$patches/$patch" || fail "patch has no Subject: $patch"

@@ -1,0 +1,59 @@
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -1974,14 +1974,12 @@
+ #define ORBIS_FOLLOW_CAP 8192
+ 
+ static void
+-orbis_follow_sh_pointers(uint64_t seq, const uint32_t *w, uint32_t n)
++orbis_follow_sh_pointers(uint64_t seq, const uint32_t *w, uint32_t n, bool verbose)
+ {
+    /* ⚠ THE DEAD-POOL CHECK RUNS WHETHER OR NOT THE VERBOSE DUMP IS ARMED, and the knob now only controls
+     * the printing. A use-after-free is not a curiosity to switch on when you happen to suspect it - it is
+     * the defect this hunt is left with, it costs one ranged compare per pointer, and the run that needed it
+     * is always the run where nobody thought to arm it. The dump is what is expensive; the check is not. */
+-   const bool verbose = getenv("ORBIS_FOLLOW_SH") != NULL;
+-
+    static uint64_t seen[ORBIS_FOLLOW_CAP];
+    const char *const cap_s = getenv("ORBIS_FOLLOW_MAX");
+    unsigned          cap = cap_s != NULL ? (unsigned)strtoul(cap_s, NULL, 10) : 512;
+@@ -10143,7 +10141,8 @@
+           *
+           * They read the stream and the memory it points at, both of which the host arm has. */
+          for (unsigned i = 0; i < n_dcb; i++)
+-            orbis_follow_sh_pointers(seq, (const uint32_t *)dcb[i], dcb_bytes[i] / 4);
++            orbis_follow_sh_pointers(seq, (const uint32_t *)dcb[i], dcb_bytes[i] / 4,
++                                     getenv("ORBIS_FOLLOW_SH") != NULL);
+          orbis_api_time(ORBIS_ID_ARM_BUILD_FLAT, os_time_get_nano() - orbis_flat_t0);
+          orbis_api_count(ORBIS_ID_ARM_BUILD_FLAT, 1);
+          if (end != NULL)
+@@ -10212,6 +10211,10 @@
+                   mesa_logw("orbis-drm: dumping submit #%" PRIu64 ", the one the label never reached.", hung);
+                   orbis_dump_ib(hung, hs->stream, hs->dwords, "HUNG-WAIT", true);
+                   orbis_dump_indexed_draw(hung, hs->stream, hs->dwords);
++                  /* Follow only the fatal stream: the full-frame pointer walk can
++                   * emit thousands of descriptors on every submission. */
++                  if (getenv("ORBIS_FOLLOW_HUNG") != NULL)
++                     orbis_follow_sh_pointers(hung, hs->stream, hs->dwords, true);
+                } else {
+                   mesa_logw("orbis-drm: submit #%" PRIu64 " has already left the %u-slot hung ring (it holds "
+                             "#%" PRIu64 ") - nothing to dump. Raise ORBIS_HUNG_RING.",
+@@ -10627,7 +10630,8 @@
+          mesa_logi("orbis-drm: submit #%" PRIu64 " is the first over %u dwords - dumping it whole", seq,
+                    threshold);
+          orbis_dump_ib(seq, (const uint32_t *)dcb[0], dcb_bytes[0] / 4, "BIG", true);
+-         orbis_follow_sh_pointers(seq, (const uint32_t *)dcb[0], dcb_bytes[0] / 4);
++         orbis_follow_sh_pointers(seq, (const uint32_t *)dcb[0], dcb_bytes[0] / 4,
++                                  getenv("ORBIS_FOLLOW_SH") != NULL);
+       }
+    }
+ 
+@@ -10649,7 +10653,8 @@
+        * which is the dangerous part: a diagnostic that runs too often looks like one that works. */
+       if (dump != NULL && (want == 0 || (seq >= want && seq < want + (count > 0 ? count : 1)))) {
+          orbis_dump_ib(seq, (const uint32_t *)dcb[0], dcb_bytes[0] / 4, "stream", true);
+-         orbis_follow_sh_pointers(seq, (const uint32_t *)dcb[0], dcb_bytes[0] / 4);
++         orbis_follow_sh_pointers(seq, (const uint32_t *)dcb[0], dcb_bytes[0] / 4,
++                                  getenv("ORBIS_FOLLOW_SH") != NULL);
+       }
+    }
+ 

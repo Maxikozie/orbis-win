@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] build: accept PS4 Wine patch 0940
+
+Allow the Orbis raw #DB trap-number correction as the next ordered PS4 Wine
+patch.
+
+---
+--- a/tools/build_wine_ps5.sh
++++ b/tools/build_wine_ps5.sh
+@@ -167,8 +167,8 @@
+             fail "patch name must be NNNN-lower-case-words.patch: $patch"
+         number=$(printf '%s' "$patch" | cut -c1-4 | sed 's/^0*//')
+         number=${number:-0}
+-        [ "$number" -ge 100 ] && [ "$number" -le 939 ] ||
+-            fail "patch number outside 0100-0939: $patch"
++        [ "$number" -ge 100 ] && [ "$number" -le 940 ] ||
++            fail "patch number outside 0100-0940: $patch"
+         [ "$number" -ne "$last" ] || fail "duplicate patch number: $patch"
+         last=$number
+         grep -q '^Subject: ' "$patches/$patch" || fail "patch has no Subject: $patch"
+-- 
+2.43.0

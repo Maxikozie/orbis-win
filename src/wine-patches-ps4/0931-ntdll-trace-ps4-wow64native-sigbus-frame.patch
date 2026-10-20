@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace PS4 native WoW64 SIGBUS return frame
+
+The corrected Orbis signal mapping exposes a fault at wow64native's
+iretq return path. Log the raw signal context and five stack words
+before Wine converts the host fault into a guest exception.
+
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index f45778a277..1fece690a6 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2824,6 +2824,39 @@ static void __attribute__((used)) segv_handler( int signal, siginfo_t *siginfo,
+ 
+ #ifdef __PROSPERO__
+     if (segv_hook && segv_hook( siginfo, _sigcontext )) return;
++    /* The native WoW64 path returned from iretq at 0x7bef14c9, but only the
++     * resulting guest exception was visible. Capture the raw host return
++     * frame before Wine rewrites it into an exception context. */
++    if (signal == SIGBUS)
++    {
++        static unsigned int trace_count;
++        unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++        if (n <= 4)
++        {
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            uint64_t *frame = (uint64_t *)(uintptr_t)RSP_sig(sigcontext);
++            char line[192];
++            unsigned int i;
++
++            snprintf( line, sizeof(line),
++                      "ntdll ps4-sigbus-frame n=%u code=%d addr=%p rip=%llx rsp=%llx cs=%x ss=%x flags=%llx trap=%lld err=%llx\n",
++                      n, siginfo ? siginfo->si_code : 0,
++                      siginfo ? siginfo->si_addr : NULL,
++                      (unsigned long long)RIP_sig(sigcontext),
++                      (unsigned long long)RSP_sig(sigcontext),
++                      CS_sig(sigcontext), SS_sig(sigcontext),
++                      (unsigned long long)EFL_sig(sigcontext),
++                      (long long)TRAP_sig(sigcontext),
++                      (unsigned long long)ERROR_sig(sigcontext) );
++            sceKernelDebugOutText( 0, line );
++            for (i = 0; i < 5; i++)
++            {
++                snprintf( line, sizeof(line), "ntdll ps4-sigbus-stack n=%u [%u]=%016llx\n",
++                          n, i, (unsigned long long)frame[i] );
++                sceKernelDebugOutText( 0, line );
++            }
++        }
++    }
+     /* ⚠ DIAGNOSTIC. Everything past this point belongs to a Wine thread: the
+      * fault is raised as an exception, which walks setup_raise_exception,
+      * send_debug_event, NtTerminateProcess and wine_server_call, and the last

@@ -1,0 +1,47 @@
+Subject: [PATCH] orbis: dump the fatal fence-slot hang before HP3D kills the title
+
+Sony's HP3D watchdog kills the title after roughly one second, but the
+fence-slot throttle uses the general five-second wait cap. The fatal path
+therefore never reaches its label report or hung-IB dump. Give this one
+hard-capped wait a separate 500 ms deadline, leaving the five-second cadence
+for caller waits and other diagnostics unchanged.
+
+--- a/src/amd/common/ac_orbis_drm.c
++++ b/src/amd/common/ac_orbis_drm.c
+@@ -186,6 +186,13 @@
+  * FIVE SECONDS because it is far past any legitimate submission on this hardware (the whole 64x64 draw
+  * completed in microseconds) and short enough that a human sees a log line rather than a dead console. */
+ #define ORBIS_WAIT_CAP_NS (5ull * 1000 * 1000 * 1000)
++
++/* The console's HP3D watchdog kills a hung title in about one second. Keep the
++ * submit-lock fence-slot diagnostic below that window so its label and IB dump
++ * can reach the log before Sony terminates the process. This deadline applies
++ * only to the hard-capped fence-slot throttle; long wait reporting keeps its
++ * five-second cadence above. */
++#define ORBIS_FENCE_SLOT_CAP_NS (500ull * 1000 * 1000)
+ 
+ static int64_t
+ orbis_deadline(uint64_t abs_timeout_ns, const char *what)
+@@ -9977,7 +9984,7 @@
+           *
+           * The report names the numbers, because "the GPU hung" is not actionable and "the label
+           * stopped at N while slot S was owed to N+16" is. */
+-         const int64_t slot_deadline = orbis_deadline(OS_TIMEOUT_INFINITE, "fence-slot");
++         const int64_t slot_deadline = (int64_t)(slot_t0 + ORBIS_FENCE_SLOT_CAP_NS);
+          bool slot_free = true;
+          while ((int32_t)(*orbis_fence_label - owner) < 0) {
+             if (os_time_get_nano() >= (uint64_t)slot_deadline) {
+@@ -9989,11 +9996,11 @@
+          orbis_slot_wait_ns += os_time_get_nano() - slot_t0;
+ 
+          if (!slot_free) {
+-            mesa_loge("orbis-drm: fence slot %u is still owed to submission %u after %llu s - the label "
++            mesa_loge("orbis-drm: fence slot %u is still owed to submission %u after %llu ms - the label "
+                       "is at %u and the newest submission handed out is %llu. The GPU has not retired "
+                       "%u submission(s); this is a hang, and waiting longer would hold the submit lock "
+                       "against every other thread.",
+-                      slot, owner, (unsigned long long)(ORBIS_WAIT_CAP_NS / 1000000000ull),
++                      slot, owner, (unsigned long long)(ORBIS_FENCE_SLOT_CAP_NS / 1000000ull),
+                       *orbis_fence_label, (unsigned long long)orbis_submit_seq_no,
+                       (unsigned)(owner - *orbis_fence_label));
+ 

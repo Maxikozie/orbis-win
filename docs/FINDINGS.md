@@ -175,11 +175,11 @@ with the log call site patched, which is a much larger job than this stage needs
 
 ## 2026-10-06 — first contact with the console
 
-Preflight passed cleanly against `10.168.2.52`:
+Preflight passed cleanly against `$PS4_HOST`:
 
 ```
-  console                10.168.2.52 up
-  this host              10.168.2.47 via eth0
+  console                `$PS4_HOST` up
+  this host              `$BUILD_HOST` via eth0
   ftp 2121               220 GoldHEN FTP server v2.2
   ftp 1337               no answer
   ftp 21                 no answer
@@ -1846,7 +1846,7 @@ measured it.
 Known already: lftp's anonymous login kills GoldHEN. Today's addition is that it
 is not the *login* that does it -- **one unexpected byte is enough**.
 
-    echo > /dev/tcp/10.168.2.52/2121     # kills it
+    echo > /dev/tcp/${PS4_HOST}/2121     # kills it
 
 That opens the control socket and writes a newline. Both GoldHEN services (FTP
 2121 and klog 3232) stopped accepting connections immediately afterwards while
@@ -3929,10 +3929,12 @@ from one number that may not mean what it is being read to mean.
 
 * `radv_init_dcc()` (`radv_cmd_buffer.c:15962`) is the one metadata path with a
   subtraction that can underflow (`meta_size - size`), and it is the obvious
-  Neo-shaped suspect. **It is gated on `gfx_level == GFX8` and cannot run here:**
-  `amd_family.h` places `CHIP_LIVERPOOL` and `CHIP_GLADIUS` between `CHIP_KAVERI`
-  and `CHIP_KABINI`, so *both* Sony parts are **GFX7**. Neo is not a different
-  gfx level from the base PS4, only a different topology.
+  Neo-shaped suspect. It is gated on `gfx_level == GFX8` and does not run under
+  the current Orbis setup: `ac_drm_query_hw_ip_info()` hardcodes GFX IP version
+  7.2 in both modes, so RADV selects enum `GFX7` (ordinal 9). This is the
+  driver's chosen generation, not proof that Gladius lacks Polaris-era
+  features. Neo changes topology in this winsys, while gfx level is currently
+  forced to the Liverpool-compatible path.
 * `ac_surface.c` and the RADV sources contain **no** `CHIP_GLADIUS` or
   `CHIP_LIVERPOOL` arms at all -- surface layout goes through the generic GFX7
   addrlib paths, parameterised by `info`. So a Gladius surface bug would have to
@@ -3959,3 +3961,535 @@ across 4 engines implies 1024 buffers against 256 allocated. GTA IV is 2008-era
 D3D9 through DXVK and almost certainly never tessellates, so a mis-sized tess
 ring would be allocated and never written -- which is why this stays a lead and
 not a hypothesis.
+
+## The Pro raster-config override reached the preamble, but did not prevent the cutscene crash (2026-10-09)
+
+The first 0004 run was invalid: the captured command stream still wrote
+`0x2a00161a`. A diagnostic-only follow-up, `0005-raster-config-path-diagnostics.patch`,
+was built into a Neo package and deployed. The console's `radv.env` explicitly
+contained both overrides before launch. Its `radv.log` confirmed:
+
+    raster config calculated family=57 pci=0x9924 gfx=9 max_se=4 rb_mask=0xff max_rb=8
+      -> 0x3a00161a/0x0000002e (override=0x3a00161a/0x0000002e)
+    raster config preamble path=direct family=57 rb_mask=0xff max_rb=8
+      -> 0x3a00161a/0x0000002e
+    c0026900 000000d4 3a00161a 0000002e
+
+So the override is active, and `ac_cmdbuf.c` takes the direct path; the harvested
+path and a later value overwrite are ruled out for this run. The user reported
+the same crash at the intro cutscene. The latest runtime stream disconnected at
+13:58:45 after `PW_WINE64 alive tick=10800`; it contained no
+`VK_ERROR_DEVICE_LOST`. The local klog receiver captured no crash reason.
+`radv.log` recorded GPU stalls at submissions `#5023`, `#5039`, `#13099`, and
+`#17416`. The final snapshot is in
+`build-ps4-logs/radv-final-20261009-1358.log` (ignored by git).
+
+Conclusion: the four-SE raster-config change was genuinely tested and did not
+fix the Neo hang. Do not repeat it as an untested hypothesis. A direct
+`SQ_WAVE_HW_ID` measurement has since been taken; it reports 4 SE x 1 SH x 9
+active CU IDs, with the same CU bitmap on each SE. This resolves the silicon
+topology question; an independent second launch reproduced the same masks. It
+does not change the raster-config negative result.
+
+### Hardware-ID topology probe prepared and uploaded (2026-10-09)
+
+The older `GLDS10002` probe reported Vulkan shader-core properties from RADV;
+it did not read the physical GPU topology. Its Neo run reported 4 SE x 9 CU =
+36 CUs, while its FMA throughput result was about 1.9 TFLOP/s. Neither alone
+settles whether all Pro CUs are enabled.
+
+The new `0006-probe-sq-wave-hw-id.patch` adds an opt-in compiler hook used only
+by the probe process. `gl_SubgroupID` in its compute shader is mapped to
+`s_getreg_b32` for `SQ_WAVE_HW_ID`; the shader atomically sets a bitmap bit for
+each observed `(SE_ID, SH_ID, CU_ID)`. The native probe decodes and prints the
+four bitmap words and a CU mask for each SE/SH pair. SPIR-V inspection confirmed
+`SubgroupId` survives as a built-in at local size 256, the RADV lowering point
+was identified, and the modified RADV archive compiled successfully.
+
+The first six Neo runs returned only `bitmap[0]=0x00000001` and were invalid.
+The shader dump showed that `nir_opt_uub` folded the values derived from
+`load_subgroup_id` to zero, even while the intrinsic remained textually in NIR.
+A probe-only bypass for UUB preserved the use chain. The successful run's ACO
+output contains `s_getreg_b32 imm:-2044` (the `SQ_WAVE_HW_ID` selector); its
+bitmap is `0x000003ef` for each of SE0 through SE3, with SH1 empty. That is nine
+active CU IDs per SE (0-3, 5-9), 36 observed pairs total. This is the first
+direct silicon topology result, reproduced by a second independent app launch.
+The raster-config change remains a separate tested negative result.
+
+## Two-SE Mesa topology and raster A/B still hangs at the same draw (2026-10-09)
+
+After the measured-CU-mask A/B also failed, a no-rebuild run set
+`ORBIS_NUM_SE=2` and the matching two-SE raster pair
+`0x2a00161a/0x00000000` in `/data/prospero-win/radv.env`. The retrieved RADV log
+confirms this reached initialization, raster preamble, tess-ring sizing, and
+the fatal command stream. Mesa reported `SE=2`, 18 CUs, and used the two-SE
+raster pair. This changes Mesa's topology inputs; it does not physically
+disable two of the four shader engines measured by `SQ_WAVE_HW_ID`.
+
+The run still failed at the same indexed draw. Submit #21317 was 1448 dwords;
+the CP reached dword 1220 and execution retired through 1080. The last
+`DRAW_INDEX_2` was at dword 1097, with 4770 indices from a mapped allocation
+bounded at 6144; the captured UINT16 values were 0-915. Runtime logging showed
+`VK_ERROR_DEVICE_LOST` at 17:09:06 and disconnected ten seconds later. See
+`build-ps4-logs/radv-20261009-two-se-run.log`.
+
+Together with the 4-SE control and sparse-CU-enable B run, this rules out the
+tested Mesa SE-count/raster settings and explicit sparse CU-enable mask as
+standalone fixes. The same draw and CP/EOP positions recur across all three.
+The failure remains in or after that draw, but the logs do not yet identify
+which shader stage or hardware wave is stuck.
+
+The follow-up run set `ORBIS_FORCE_NEO=0`, removing the experimental SE and
+raster overrides while keeping the same Pro hardware and Neo-built package.
+RADV confirmed base mode (`device_id=0x9920`, Liverpool, 2 SE, 18 CUs, CU masks
+`0x1ff`, raster pair `0x2a00161a/0x00000000`). This is a software-personality
+test, not base-PS4 silicon. It still failed at submit #18834, the same 1448
+dword stream, CP dword 1220 / retired dword 1080, and indexed draw at dword
+1097. Runtime reported `VK_ERROR_DEVICE_LOST` at 17:13:31. See
+`build-ps4-logs/radv-20261009-force-base-run.log`.
+
+The fatal stream contains `PKT3_INDEX_TYPE` (`opcode 0x2a`) with value zero
+before the draw. On this GFX7 packet path that selects `VGT_INDEX_16`, resolving
+the earlier ambiguity: the actual indices range 0-915, within the 6144-index
+allocation bound. The first 128 dwords of the draw's pixel shader and resolved
+main VS are identical in the four-SE control, two-SE Neo, and forced-base
+captures. The available evidence now points inside draw execution or its
+vertex/texture data accesses rather than to a 32-bit index interpretation or
+shader-code variation between these RADV identities.
+
+Across the four-SE Neo control, sparse-CU B run, two-SE Neo run, and forced-base
+run, Mesa topology and raster settings changed but the failure stayed at the
+same draw. Stop treating CU count, mask, SE count, raster pair, or the Mesa
+device identity as standalone explanations. The remaining diagnostic gap is
+the active hardware wave state at the draw: the existing dumps capture shader
+programs and CP/EOP progress, but not a stuck wave's PC/status. The standard
+RADV MMIO read callback is explicitly refused by `ac_drm_read_mm_registers`,
+so its normal hang-register dump cannot fill this gap without a separate
+hardware-readable path.
+
+## Forced-base run reproduced the same hang; fatal-only descriptor walk staged (2026-10-09)
+
+The app ran again with `ORBIS_FORCE_NEO=0` on the same PS4 Pro and the same
+Neo-built package. RADV selected Liverpool/base identity (device `0x9920`, 2 SE,
+18 CUs, `0x1ff` CU masks) but the GPU still stopped at the same draw. Runtime
+reported `VK_ERROR_DEVICE_LOST` at 17:22:50; klog recorded the HP3D watchdog at
+17:22:53 and the app disconnected at 17:22:59. The fatal stream is submit
+**#18663**, 1448 dwords, with CP progress at dword 1220, EOP retired through
+1080, and `DRAW_INDEX_2` at dword 1097. It again uses 4770 UINT16 indices
+(0-915) from a mapped BO with a 6144-index bound. See
+`build-ps4-logs/radv-20261009-current-run.log` and the current runtime/klog
+captures.
+
+Patch **0015** adds `ORBIS_FOLLOW_HUNG=1`: after the existing fatal timeout
+captures the retained stream and indexed draw, it follows user-data pointers
+from that fatal stream only. This reuses the guarded live-mapping/freed-range
+checks and avoids enabling `ORBIS_FOLLOW_SH` across every submission, which can
+produce thousands of descriptor entries per frame. The patch reverse-applies
+to the current Mesa tree and compiled successfully; the RADV archive, PRX, and
+Neo package were rebuilt. The package was uploaded to `/data/pkg/wine-app.pkg`
+and installed before the next launch. Its SHA-256 is
+`42ed4d4286d175ec685066c2de8b37514a3bc18db6dc84a8336eb5f9df553858`.
+
+The known `/data/prospero-win/radv.env` now retains the forced-base identity and
+progress/EOP settings and adds `ORBIS_FOLLOW_HUNG=1`; a no-login FTP GET verified
+the uploaded file at `build-ps4-logs/radv-20261009-follow-hung-verified.env`.
+The next launch ran the fatal-only descriptor walk to classify user-data
+pointers. It still does not read the GPU's stuck-wave PC/status.
+
+## Fatal descriptor walk ran; freed-range warnings are address-reuse false positives (2026-10-09)
+
+The new package was installed and reproduced the same hang. Runtime reported
+`VK_ERROR_DEVICE_LOST` at 17:35:29 with `frames_put=7`, `shown=0`. Fatal submit
+#18540 again stopped in the 1448-dword stream around the indexed draw at dword
+1097. See `build-ps4-logs/radv-20261009-follow-hung-run.log` and
+`build-ps4-logs/ps5log-20261009-111351.log`.
+
+Do not treat 0015's `USE AFTER FREE` text as a confirmed lifetime bug. Its
+graveyard records only old address ranges, not allocation generations or the
+current owner. The scanner flagged SH `0x04e` at `0x883271a00`, yet the same
+walk resolves that address to BO4's live main VS code; SH `0x240` resolves to
+zeroed BO5, and SH `0x00c` to BO34. These establish address reuse and false
+positives in the current classifier, while leaving open whether any submitted
+pointer is stale. The other walked user-data buffers include BO59 (3296 KiB)
+and BO63 (16 KiB), which carry descriptor-shaped data and are more promising
+places to locate the actual faulting base.
+
+At submit 18432 the one-shot scan found the exact address once, at BO34 offset
+80. The surrounding words encode base `0xff0000000` and size `0x3fc00` (261120
+bytes), matching the tessellation factor-ring descriptor RADV intentionally
+builds in `radv_queue.c`. It is expected data, not an identified cause of the
+draw hang. The scan took 17850 ms to read 253 MiB and skipped 227 MiB of the
+480 MiB mapped, so it cannot establish uniqueness.
+
+The same run then failed at submit #20653, again dword 1097, with CP progress
+1220 / EOP 1080 and the in-bounds UINT16 index range 0-915. Runtime reported
+`VK_ERROR_DEVICE_LOST` at 17:42:58 and disconnected at 17:43:07. Its fatal-only
+walk again labels reused addresses as freed and identifies BO70 (16 KiB) and
+BO89 (3296 KiB) among user-data buffers. The complete RADV capture is
+`build-ps4-logs/radv-20261009-target-scan-final.log`.
+
+The verified remote RADV environment now raises `ORBIS_SCAN_MAX_MIB` to 512
+while retaining the one-shot exact scan at submit 18432. This should cover the
+480 MiB mapped in the last run; estimated scan time is about 34 seconds.
+
+The next launch stalled at submit #4948, before the scan trigger, so it yielded
+no address-scan result. The runtime remained alive but stopped progressing the
+present sink (`frames_put=7`, `shown=0`). The next-run RADV environment is now
+verified with `ORBIS_SCAN_AT=4096` and the same 512 MiB cap, ahead of the
+observed stall. Captures are `build-ps4-logs/radv-20261009-full-scan-progress.log`
+and `build-ps4-logs/ps5log-20261009-111351.log`; verified env is
+`build-ps4-logs/radv-20261009-scan-before-hang-verified.env`.
+
+That next run completed the scan at #4096: it found only the known BO34 offset
+80 factor-ring descriptor (`VA 0x8833ac050`), reading all 256 MiB mapped then
+with no skipped BOs in 15744 ms. Later RADV warnings marked submits #9719 and
+#12426 as stalled, then the fatal repeat at #18639. This was again the
+1448-dword stream, CP progress 1220 / EOP 1080, with the same `DRAW_INDEX_2` at
+dword 1097 and 4770 valid UINT16 indices (0-915). Runtime reported
+`VK_ERROR_DEVICE_LOST` at 17:56:18 and disconnected at 17:56:26. See
+`build-ps4-logs/radv-20261009-scan4096-progress.log`; klog independently
+confirms the HP3D watchdog killed Shell UI at 17:56:22 in
+`build-ps4-logs/ps4-klog-20261009-1730.log`.
+
+The next-run environment has since been restored to `ORBIS_SCAN_AT=18432` and
+`ORBIS_SCAN_MAX_MIB=512` to capture the larger late-run BO map shortly before
+#18639. Verified copy: `build-ps4-logs/radv-20261009-full-scan-next-verified.env`.
+
+The #18432 scan then read all 480 MiB mapped across 103 BOs in 34380 ms, with
+no skipped BOs, and found only BO34 offset 80 (`VA 0x8833ac050`), the expected
+factor-ring descriptor. The same fatal stream followed at submit #22591:
+1448 dwords, CP 1220 / EOP 1080, indexed draw at dword 1097, 4770 UINT16 indices
+0-915 within the 6144-index bound. Runtime reported device loss at 18:24:18;
+klog recorded the HP3D watchdog killing Shell UI at 18:24:22 and the title crash
+at 18:24:26. The complete RADV log is
+`build-ps4-logs/radv-20261009-scan18432-progress.log`.
+
+The current remote environment removes `ORBIS_SCAN_VA64` and `ORBIS_SCAN_AT`;
+`ORBIS_FOLLOW_HUNG=1` and progress/EOP logging remain. This avoids repeating
+the 34-second scan now that the complete late-run map contains only the
+expected descriptor. Verified copy:
+`build-ps4-logs/radv-20261009-hung-only-next-verified.env`.
+
+With the scan disabled, the next launch again reached a persistent fence timeout
+at submit #19844. Earlier 4-submission warnings (#4975, #8729, #13727, #13757)
+recovered; #19844 remained owed and its wait dump points to the same indexed
+draw at dword 1097 with 4770 in-bounds UINT16 indices. Runtime reported device
+loss at 18:28:20, and klog recorded HP3D killing Shell UI at 18:28:23 followed
+by the title crash at 18:28:27. This confirms the diagnostic scan was not the
+cause. Capture: `build-ps4-logs/radv-20261009-hung-only-progress.log`.
+
+The next launch again timed out at submit #18574, with the 1448-dword stream,
+CP 1220 / EOP 1080, and indexed draw at dword 1097 (4770 UINT16 indices,
+range 0-915, bound 6144). The CP address audit was clean (0/16 DMA_DATA
+addresses unmapped). Runtime reported device loss at 18:33:31; klog recorded
+the HP3D kill at 18:33:34 and crash report at 18:33:38. Capture:
+`build-ps4-logs/radv-20261009-hung-only-progress.log`.
+## 0019 reproduces hang; draw-bound sampled-image slot resolves outside VA (2026-10-09)
+
+Patch 0019 reproduced the GPU hang at submit #18935. The final indexed draw
+uses 2232 UINT16 indices (maximum 909) with a 4096-index bound. Its vertex
+input descriptor at SH `0x04e` points to `0x88a296000`, stride 36, and 910
+records; the base resolves inside live BO31 with ample remaining bytes. The
+vertex access range therefore fits the observed indices.
+
+The draw-bound pixel shader at `0x88cc7f400` loads eight dwords from
+`s[2:3] + 0x18` and then executes `image_sample_lz`. SH `0x00e` is set to
+`0x894600bc0`, while the shader prolog sets `s3=8`, making the actual load
+address `0x894600bd8`. The fatal descriptor walk captured the loaded words as
+`00000000 fffff1ff 00000000 00000000 00000000 00000000 00000000 00000000`.
+The log's `gfx=9` is the raw enum ordinal, which means `GFX7` in this Mesa
+tree. The base-address fields in `ac_set_mutable_tex_desc_fields()` use the
+same encoding on both sides of the GFX9 split: word 0 carries `va >> 8`, and
+word 1's high-address field carries `va >> 40`. On that basis these bytes
+decode to `0xff0000000000`, outside the mapped VA window. This remains a
+candidate, not a proven cause: its Vulkan binding is unknown and the title may
+have submitted an unused or partially initialized descriptor.
+
+An earlier reading attributed `0xc0046900/0x31f` from the PM4 stream to this
+image descriptor and calculated an unmapped address `0x1fc004690000`. That was
+incorrect: those words are in the command-stream dump. The actual shader load
+from BO89 instead decodes to `0xff0000000000` using the common image-base
+encoding. Do not
+carry forward the earlier address. Also, the captured active-wave PS/VS snapshots differ
+from the draw-bound pair, so they do not identify the exact faulting PC. The
+next useful step is to trace the shader's descriptor slot through shader
+metadata and RADV descriptor-set updates, then log the originating Vulkan
+binding and descriptor contents at submit time. Do not mutate the descriptor
+before identifying its owner. Full capture and analysis are in
+`docs/HANDOFF-2026-10-09.md`, section “0019: check descriptor candidate bases
+against live BOs”.
+
+The same 0019 package was launched again with `ORBIS_FORCE_NEO=0` on the Pro.
+It again used device ID `0x9920`, raw gfx enum=9 (`GFX7`) and 18 CUs, and hung
+at submit #18677:
+640 dwords, fence slot 4 owed after 500 ms, CP reached and retired through
+dword 518. All three draw-shrink targets matched, yet the final draw was still
+2232 indices at dword 370 (UINT16 maximum 909, bound 4096). The draw-bound
+PS/VS addresses and code matched the previous run. SH `0x00e` moved to
+`0x885600bc0`, while its data was byte-for-byte identical, including the
+sampled-image words `00000000 fffff1ff` followed by six zeros. Under the
+common image-base encoding the base is again `0xff0000000000`. This strengthens the invalid
+descriptor lead, but the run does not prove the descriptor is consumed at the
+faulting PC or identify its Vulkan binding. Full capture:
+`build-ps4-logs/radv-20261009-repeat-final.log`. Runtime reported device loss at
+20:54:00.986 and disconnected at 20:54:10.073; Shell resumed by 20:54:28 with
+no full reboot or watchdog kill evident in klog.
+
+## 2026-10-10 correction: PS scalar-load offsets map to three valid descriptor slots
+
+The GFX9 `s_load_dwordx*` immediates in `submit-18935-draw-ps.disasm` are
+DWORD offsets. Reading the image load at `0x18` as byte offset `+0x18` was
+incorrect. Converting the three image/sampler pairs to bytes gives image
+offsets `0x60`, `0`, and `0xc0`, and sampler offsets `0xb0`, `0x50`, and
+`0x110`. These exactly match the captured set-0 layout: three 96-byte
+combined-image-sampler descriptors at `0`, `0x60`, and `0xc0`, with each
+sampler at byte `0x50` within its descriptor. Thus the earlier claimed
+`0xff0000000000` image descriptor at the fatal draw was an artifact of the
+offset-units mistake. The fatal dump did not include enough bytes to inspect
+bindings 1 and 2. The next useful Mesa diagnostic is to dump all three full
+descriptors at the fatal submission and correlate their contents with their
+descriptor writes/copies. This settles resource validity without assuming an
+offset-lowering bug.
+
+## 2026-10-13: non-split Pinball run succeeds; split comparison is inconclusive
+
+The non-split PS4 package rebuilt with the custom `pw_dso_handle_ps4.c`
+relocation helper removed launched Pinball successfully. The live log reached
+584 submitted 800x600 frames and 940 audible audio buffers. The package was
+uploaded to `/data/pkg/wine-app.pkg` for installation. This confirms that the
+custom relocation helper was not required for this working title.
+
+The first split package (`wine-orbis`, built 18:21) omitted RADV's
+`libvulkan.prx` from both runtime locations. The later `wine-orbis-with-mesa`
+and `wine-orbis-allocator-fallback` packages include it, so that omission does
+not explain the later no-frame run. The later split run reached
+`wine startup: server connected` at 19:57:37.514, then its log disconnected
+at 19:57:47.092 without any frame or audio. The successful non-split run did
+not submit its first frame until about 12 seconds after `server connected`,
+and then reached 584 submitted 800x600 frames and 940 audible buffers. The
+split capture ended before that point, and the log does not say whether the
+app crashed or was closed. It is therefore inconclusive about whether the
+split package can render Pinball; repeat it and keep the run alive for at least
+15–20 seconds after `server connected`.
+
+The later split package has the same runtime paths as the working non-split
+package but 1,623 differing file contents; notable differences include
+`win32u.prx` (2,854,800 to 2,638,272 bytes), `winevulkan.dll` (both PE
+architectures substantially larger), `wowprospero.dll` (45,056 to 139,746
+bytes), and `eboot.bin` (715,408 to 683,264 bytes). These are comparison leads,
+not identified causes. The working non-split package SHA-256 is
+`89170ce06947e69e64af26a6c832b09f568191911399d70ac153379dbd43a5ff`.
+
+## 2026-10-13: package assembly A/B and split build provenance
+
+The known-good non-split payload was repackaged under the split app ID
+`ORBW00001` as `/data/pkg/wine-orbis-baseline.pkg`. The staged package has the
+same 1,783 files as the working package. Every file is byte-identical except
+`sce_sys/param.sfo`, which has the new ID and title; the package size is also
+identical at 443,088,896 bytes. The user installed and launched this package
+and reported that it worked. The new ID and package builder can therefore
+launch the known-good payload. This does not yet identify which rebuilt split
+binary causes the other package's failure.
+
+Two more packages isolate the changed executable from the changed Wine runtime:
+
+| ID | Console package | Executable | Wine runtime |
+| --- | --- | --- | --- |
+| `ORBW00002` | `/data/pkg/wine-orbis-split-title.pkg` | split | known-good non-split |
+| `ORBW00003` | `/data/pkg/wine-orbis-split-runtime.pkg` | known-good non-split | split `wine-orbis-allocator-fallback` |
+
+Both were uploaded and their staged manifests checked against their source
+packages: each has 1,783 files; only `eboot.bin` and `param.sfo` differ from
+its runtime source. `ORBW00002` ran Pinball to at least 2,895 frame puts and
+1,215 audible audio buffers. `ORBW00003` connected to wineserver but stopped
+after eight sink calls, zero frames and zero audio. Its split `ntdll.prx`
+reported `virtual_setup_exception stack overflow 384 bytes` and then aborted;
+the PS4 recorded a SIGILL and coredump. The abort site is `abort_process` at
+offset `0x99109` in the unstripped split NTDLL. This isolates the failure to
+the split Wine runtime, though not yet to its PE DLLs or PRX modules.
+
+`ORBW00004` (`/data/pkg/wine-orbis-split-prx.pkg`) combines the known-good
+executable and PE DLLs with the split PRX modules. `ORBW00005`
+(`/data/pkg/wine-orbis-split-pe.pkg`) combines the known-good executable and
+PRX modules with the split PE DLLs. Both are uploaded for the next Pinball
+hardware comparison. In the first `ORBW00004` run, Pinball stayed at spinning
+dots for at least 30 seconds: 12 sink calls, zero frames and zero audio, with
+the Wine process still alive. This implicates the split PRX side independently
+of the split PE DLLs. In the first `ORBW00005` run, Pinball crashed about two
+seconds after wineserver connection with the same `virtual_setup_exception`
+stack-overflow diagnostic as `ORBW00003`; klog recorded SIGSYS and a coredump.
+Thus the split PE files also fail against the known-good PRXs. The split Orbis
+Wine configure command used `--without-freetype` and did not set the
+FreeType/Vulkan library sonames. The working build has
+`SONAME_LIBFREETYPE=libfreetype.so` and `SONAME_LIBVULKAN=libvulkan.so` in its
+generated config, while the split build has neither. This is a concrete
+configuration gap that can explain the PRX-only Pinball stall. The split
+build script now requires a PS4 FreeType archive and configures both sonames;
+the rebuilt config now defines both sonames. The resulting `win32u.prx` grew
+from 2,638,272 to 2,854,832 bytes, within 32 bytes of the working build.
+`ORBW00006` packages the rebuilt split PRXs with the known-good EBOOT, PE DLLs,
+and FreeType PRX for a focused hardware test. Its local package is
+`pkgout/orbis-freetype-prx/IV0000-ORBW00006_00-ORBW000060000000.pkg`; an
+initial upload failed while the console was offline, then a direct FTP retry
+succeeded at `/data/pkg/wine-orbis-freetype-prx.pkg`. The console installed and
+ran it. Pinball startup was very slow: it showed one game frame after roughly
+104 seconds, then reached 7,988 submitted frames, 1,049 displayed frames, and
+1,331 audible buffers by roughly 136 seconds. The runtime eventually renders
+at normal speed; the prolonged startup needs its own comparison. The split
+port can also build
+its own `libfreetype.prx` from the PS4 FreeType archive, but that new module is
+held for a separate test. Separately, the
+split launcher rejects the MDK profile because it does not recognize
+`nglide_resolution = desktop`; that obsolete key has
+been removed from the local MDK profile and uploaded to
+`/data/prospero-win/profiles/mdk.profile`. The next launcher scan counted eight
+games instead of seven and emitted no MDK refusal, confirming the parser fix.
+It does not affect the Pinball comparison.
+
+The console then reran `ORBW00004`, the split PRXs built without FreeType or
+Vulkan configure sonames. Pinball also loaded: its first game frame appeared
+after roughly 82 seconds, and by roughly 127 seconds it had submitted 5,294
+frames, displayed 696, and produced 1,003 audible buffers. `ORBW00006` first
+drew at roughly 85 seconds and similarly reached normal rendering speed.
+Thus enabling FreeType and Vulkan in the PRX build did not change the slow
+startup; the earlier observation of zero frames at 50 seconds was premature.
+
+The split full-build driver had a separate stale-output risk: it skipped the
+host Wine PE build whenever the build tool and install directory existed,
+regardless of changes to `wine/orbis/base-patches` or Vulkan staging inputs.
+The split checkout now calls the host builder on every full build; that builder
+compares an input stamp and reuses the PE install only when it matches. The
+first stamped rebuild was interrupted by the OS killing `cc1` during `mshtml`
+with six compile jobs. A two-job continuation exposed another build-script bug:
+Vulkan staging was applied again to already-staged source and failed its
+single-match assertion. The script now records a source-stage stamp and only
+restages after resetting the source when an input changes. The existing staged
+tree was verified and stamped so `make` could resume incrementally with two
+jobs. That rebuild exposed a missing `pw_vk_batch_allocator` definition in
+the staged 32-bit Vulkan PE source; the generated classifier was restored and
+the build resumed. The rebuilt host PE runtime completed with two jobs; its
+hardware result remains pending. `ORBW00007`
+packages only those PE files with the known-good EBOOT and PRXs; its local
+package is `pkgout/orbis-rebuilt-pe/IV0000-ORBW00007_00-ORBW000070000000.pkg`
+and was uploaded to `/data/pkg/wine-orbis-rebuilt-pe.pkg` for hardware testing.
+`ORBW00008` combines that PE runtime with the rebuilt split PRXs and the new
+split `libfreetype.prx`, keeping the known-good EBOOT and Mesa Vulkan PRX. Its
+local package is
+`pkgout/orbis-coherent-runtime/IV0000-ORBW00008_00-ORBW000080000000.pkg`
+and it was uploaded to `/data/pkg/wine-orbis-full-runtime.pkg`. Both package
+stages were checked against their intended source hashes. Test `ORBW00007`
+first to isolate the PE result, then `ORBW00008`. Hardware proved both packages
+invalid before Wine startup: `ORBW00007` and `ORBW00008` failed with
+`PRX_SCE_MODULE_LOAD_ERROR` because the one-off package construction omitted
+`sce_module/libc.prx` and `sce_module/libSceFios2.prx`. The normal split
+`build_app_orbis.sh` already requires them; the ad hoc A/B packager did not.
+Their invalid local package directories were later removed to free build space;
+the hardware and packaging findings remain recorded here.
+Corrected packages `ORBW00009` (PE only) and `ORBW00010` (full runtime) include
+both byte-identical platform PRXs from the working package and were uploaded
+to `/data/pkg/wine-orbis-pe-corrected.pkg` and
+`/data/pkg/wine-orbis-full-corrected.pkg`. `ORBW00009` was launched: it
+connected to wineserver, then logged `virtual_setup_exception stack overflow
+384 bytes` about 1.5 seconds into game startup, followed by PS4 SIGSYS.
+Rebuilding the host PE runtime did not cure the early failure. `ORBW00010`
+was later tested and failed with the same stack-overflow diagnostic. The old split PE runtime
+predates patch 0900, which only edits the server, so staleness
+is a build-system fault rather than an established cause of the application
+failure.
+
+The imported patch `0900-server-log-pollfds-before-poll` writes a klog line
+before every wineserver `poll()`. It was enabled in both `ORBW00004` and
+`ORBW00006`, unlike the known-good base PRXs. Their klogs contain a flood of
+those lines, making this a concrete candidate for the ~82–85-second startup
+versus ~11 seconds in the known-good split-EBOOT/base-runtime control. The
+klog contains 1,198 per-poll lines during `ORBW00006`'s first-frame interval
+and 1,193 during `ORBW00004`'s corresponding interval. This is correlation,
+not yet proof that the logging accounts for the delay. The
+patch has been moved out of `wine/orbis/base-patches` into
+`wine/orbis/diagnostic-patches`; its change was reverse-applied to the build
+source, and the PRXs rebuilt successfully. Only `wineserver.prx` changed
+relative to `ORBW00006` among the runtime PRXs, so a single-module package
+can test the logging hypothesis directly. `ORBW00011` is that package:
+`pkgout/orbis-no-poll-log/IV0000-ORBW00011_00-ORBW000110000000.pkg`, uploaded
+to `/data/pkg/wine-orbis-no-poll-log.pkg`. Its payload was compared bytewise
+against `ORBW00006`; only the two copies of `wineserver.prx` and package
+metadata changed. On hardware, `ORBW00011` reached its first Pinball frame in
+about 11 seconds and had audible buffers by about 13 seconds, matching the
+known-good control. This confirms the per-poll wineserver logging caused the
+82–85-second startup delay.
+`ORBW00012` combines the corrected full runtime from `ORBW00010` with the
+no-poll-log wineserver; it was built with the guarded A/B packager, which
+verified 1,780 payload hashes, and uploaded to
+`/data/pkg/wine-orbis-full-no-poll-log.pkg`. Its local package is
+`pkgout/orbis-full-no-poll-log/IV0000-ORBW00012_00-ORBW000120000000.pkg`.
+On hardware, `ORBW00012` connected to wineserver and logged the same
+`virtual_setup_exception stack overflow 384 bytes` at 07:06:13.652, about
+1.6 seconds after game boot. Klog identified SIGSYS and title `ORBW00012`.
+`ORBW00010` also failed with the same stack-overflow diagnostic at
+07:06:49.245, about 6.4 seconds after game boot; klog identified SIGILL and
+title `ORBW00010`. The extra delay matches its per-poll logging overhead.
+Thus the early failure remains with a coherent rebuilt PE and PRX runtime,
+independent of the poll logger.
+
+Two more guarded A/B packages use working `ORBW00011` as the base. `ORBW00013`
+replaces only the i386 and x86_64 PE `ntdll.dll` files from the rebuilt host
+runtime; it is uploaded as `/data/pkg/wine-orbis-ntdll-pe-only.pkg`.
+`ORBW00014` replaces only x86_64 PE `wowprospero.dll`; it is uploaded as
+`/data/pkg/wine-orbis-wow-pe-only.pkg`. Both stages passed full payload hash
+verification. On hardware, `ORBW00013` reached at least 1,319 Pinball frame
+puts and 1,219 audible buffers by about 20 seconds. `ORBW00014` reached at
+least 523 frame puts and 801 audible buffers by about 18 seconds. Neither
+isolated replacement reproduces the startup crash. `ORBW00015` combines those
+three replacement DLLs in the working base package; its 1,781 payload files
+passed hash verification and it was uploaded to
+`/data/pkg/wine-orbis-ntdll-wow-pe.pkg`.
+On hardware, `ORBW00015` ran Pinball with the three rebuilt PE modules
+(`i386`/`x86_64` `ntdll.dll` and x86_64 `wowprospero.dll`) and the rest of the
+working runtime. It reached 3,902 frame puts and 1,031 audible buffers by
+07:21:33. These replacements work together when the known-good `wow64.dll`
+remains installed, further isolating the `ORBW00018` failure to that DLL.
+
+`ORBW00018` isolates the leading PE suspect. It uses the working `ORBW00011`
+stage and replaces only `x86_64-windows/wow64.dll` with the rebuilt copy.
+The stage verified 1,781 payload hashes and was uploaded to
+`/data/pkg/wine-orbis-wow64-pe-only.pkg`. On hardware it connected to
+wineserver at 07:17:56.008, then produced the exact familiar
+`virtual_setup_exception stack overflow 384 bytes addr 0 stack 1000123e80`
+at 07:17:57.074. Klog recorded SIGSYS and a coredump for `ORBW00018`. This
+proves the rebuilt PE `wow64.dll` alone is sufficient to reproduce the early
+failure, while rebuilt `ntdll.dll` and `wowprospero.dll` alone are not.
+PE import-table inspection shows the working `wow64.dll` imports only
+`ntdll.dll`; the rebuilt one also imports `kernel32.dll`. The extra import came
+from patch `0613-wow64-import-kernel32-debug-helper.patch`, which changed
+`dlls/wow64/Makefile.in` so calls to `debugstr_w()` in `dlls/wow64/syscall.c`
+could link against `IsBadStringPtrW`. That patch is now replaced and renamed
+to `0613-wow64-avoid-kernel32-debug-helper.patch`. It removes those debug
+helper calls while retaining backend diagnostics with a numeric candidate
+index. The rebuilt candidate `ORBW00019` imports only `ntdll.dll`, was packaged
+from the working `ORBW00011` stage, passed all 1,781 payload hash checks, and
+uploaded to `/data/pkg/wine-orbis-wow64-no-kernel32.pkg`. It ran successfully,
+confirming the repair in the known-good split runtime.
+
+The complete host PE runtime was then rebuilt at pinned Wine commit
+`490f6d5dcbb2a5047345b8af88d114bbcaad69a8` with the corrected
+`0613-wow64-avoid-kernel32-debug-helper.patch`. The clean build exposed a
+malformed patch hunk and a diagnostic-string mismatch with the preceding
+`0611` patch; correcting the hunk to replace the pinned source's `wow64: CPU
+%s` `debugstr_w()` call made the patch series apply cleanly. The full PE build
+completed at four jobs after eight jobs exceeded available RAM. The resulting
+`x86_64-windows/wow64.dll` imports only `ntdll.dll`.
+
+`ORBW00020` replaces all 1,598 matching i386/x86_64 PE files in the working
+`ORBW00011` package stage with files from that rebuilt host runtime. It retains
+the proven split EBOOT, PS4 `wowprospero.dll`, and PRXs, isolating the test to
+the full PE set. All 1,781 staged payload hashes passed, and it was uploaded as
+`/data/pkg/wine-orbis-full-pe-rebuilt.pkg`. Pinball ran on hardware for about
+60 seconds; the latest report showed 29,861 frame submissions, 2,554 shown
+frames, and 3,605 audible buffers, with no early stack overflow, signal, or
+coredump. This confirms the complete rebuilt PE set works with the retained
+split EBOOT and PRXs.
+
+Future A/B packages should use `scripts/repackage-orbis-ab.py` with a known-good
+complete `pkg-stage` and explicit `--replace REL=SOURCE` values. It refuses a
+base stage without the two required platform PRXs and verifies every copied
+payload file after packaging, preventing the omission in `ORBW00007/8`.
