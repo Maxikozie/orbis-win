@@ -1,0 +1,40 @@
+From: Codex <codex@local>
+Subject: wow64native: leave transition profiling off by default
+
+The PS4 diagnostic build forced profiling on for every native thread. Each
+WOW64 transition then updated counters and each thread exit emitted profile
+records, even when the title profile had diagnostics disabled. Tie that work
+to the explicit sampler settings so normal native runs retain only the
+functional FS switching and signal TCB setup.
+
+---
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -95,9 +95,9 @@
+     const struct pw_native_profile *p = (void *)state->profile;
+     unsigned int sys_end, unix_end;
++    if (!p) return;
+     profile_read(state, &host_calls, &guest_calls, &host_ticks, &guest_ticks,
+                  &unix_calls, &syscall_calls, &last_tsc);
+     WINE_MESSAGE("PW_NATIVE_PROFILE version=2 teb=%llx tsc=%llu host_calls=%llu guest_calls=%llu host_sysarch_ticks=%llu guest_sysarch_ticks=%llu unix_calls=%llu syscall_calls=%llu\n",
+                  state->guest_fs, last_tsc, host_calls, guest_calls,
+                  host_ticks, guest_ticks, unix_calls, syscall_calls);
+-    if (!p) return;
+     sys_end = (unsigned int)(syscall_calls >> PW_NATIVE_PROFILE_SAMPLE_SHIFT);
+@@ -360,8 +360,12 @@
+         params->fs_set_proc = (unsigned long long)sysarch;
+         params->transitions_ready = 1;
+         process_ready = 1;
+-        /* ORBW00040 diagnostic build: collect FS-transition counters and
+-         * report them periodically and when the native thread exits. */
+-        profile_enabled = 1;
++        /* Keep the hot transition path free of profiling unless explicitly
++         * requested by the game's diagnostic profile. */
++        {
++            const char *watch = getenv("PW_NATIVE_WATCH");
++            const char *pc = getenv("PW_NATIVE_PC");
++            profile_enabled = (watch && !strcmp(watch, "1")) || (pc && !strcmp(pc, "1"));
++        }
+         WINE_MESSAGE("PW_NATIVE_STAGE process_init ready fs_set_proc=%p profile=%d\n",
+                      (void *)(ULONG_PTR)params->fs_set_proc, profile_enabled);
+         return STATUS_SUCCESS;

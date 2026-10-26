@@ -1,0 +1,26 @@
+diff --git a/src/vulkan/runtime/vk_command_buffer.h b/src/vulkan/runtime/vk_command_buffer.h
+index b6cc177..decdeb0 100644
+--- a/src/vulkan/runtime/vk_command_buffer.h
++++ b/src/vulkan/runtime/vk_command_buffer.h
+@@ -29,6 +29,7 @@
+ #include "vk_log.h"
+ #include "vk_meta_object_list.h"
+ #include "vk_object.h"
++#include "util/log.h"
+ #include "util/list.h"
+ #include "util/u_dynarray.h"
+ 
+@@ -236,8 +237,12 @@ __vk_command_buffer_set_error(struct vk_command_buffer *command_buffer,
+ {
+    assert(error != VK_SUCCESS);
+    error = __vk_errorf(command_buffer, error, file, line, NULL);
+-   if (command_buffer->record_result == VK_SUCCESS)
++   if (command_buffer->record_result == VK_SUCCESS) {
++       if (error == VK_ERROR_OUT_OF_HOST_MEMORY)
++           mesa_loge("RADV_CMD_OOM first command-buffer host OOM at %s:%d cmd=%p", file, line,
++                     (const void *)command_buffer);
+        command_buffer->record_result = error;
++   }
+    return error;
+ }
+ 

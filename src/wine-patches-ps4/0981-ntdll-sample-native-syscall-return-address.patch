@@ -1,0 +1,60 @@
+From: Codex <codex@local>
+Subject: ntdll: snapshot native syscall caller return address
+
+The native PC sampler repeatedly landed in libkernel after the syscall
+instruction, but its 32-bit frame walker cannot read the native 64-bit stack.
+Snapshot the top word at the interrupted RSP in the signal handler. For a
+libkernel syscall stub this is the caller return address; expose it through the
+existing opt-in profile query for offline module attribution.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 3b32adb34d..0820fb5dee 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -101,6 +101,7 @@ static volatile unsigned long long pw_native_pc_sequence;
+ static volatile unsigned long long pw_native_pc_rip, pw_native_pc_rsp, pw_native_pc_cs;
+ static volatile unsigned long long pw_native_pc_rax, pw_native_pc_rdi, pw_native_pc_rsi;
+ static volatile unsigned long long pw_native_pc_rdx, pw_native_pc_r10, pw_native_pc_rbp;
++static volatile unsigned long long pw_native_pc_rsp0;
+ 
+ __attribute__((visibility("default")))
+ unsigned int __wine_prospero_native_wow64_caps( unsigned int version )
+@@ -118,7 +119,8 @@ unsigned int __wine_prospero_native_profile_sample( unsigned long long *sequence
+                                                      unsigned long long *rsi,
+                                                      unsigned long long *rdx,
+                                                      unsigned long long *r10,
+-                                                     unsigned long long *rbp )
++                                                     unsigned long long *rbp,
++                                                     unsigned long long *rsp0 )
+ {
+     unsigned long long seq = __atomic_load_n( &pw_native_pc_sequence, __ATOMIC_ACQUIRE );
+     if (sequence) *sequence = seq;
+@@ -131,6 +133,7 @@ unsigned int __wine_prospero_native_profile_sample( unsigned long long *sequence
+     if (rdx) *rdx = __atomic_load_n( &pw_native_pc_rdx, __ATOMIC_RELAXED );
+     if (r10) *r10 = __atomic_load_n( &pw_native_pc_r10, __ATOMIC_RELAXED );
+     if (rbp) *rbp = __atomic_load_n( &pw_native_pc_rbp, __ATOMIC_RELAXED );
++    if (rsp0) *rsp0 = __atomic_load_n( &pw_native_pc_rsp0, __ATOMIC_RELAXED );
+     return 1;
+ }
+ 
+@@ -1104,6 +1107,17 @@ static void __attribute__((used)) profile_handler( int signal, siginfo_t *siginf
+     __atomic_store_n( &pw_native_pc_rdx, RDX_sig(context), __ATOMIC_RELAXED );
+     __atomic_store_n( &pw_native_pc_r10, R10_sig(context), __ATOMIC_RELAXED );
+     __atomic_store_n( &pw_native_pc_rbp, RBP_sig(context), __ATOMIC_RELAXED );
++    {
++        unsigned long long rsp = RSP_sig(context), rsp0 = 0;
++
++        /* At a libkernel syscall stub, RSP still points at the wrapper's
++         * caller return address. Snapshot that word while the interrupted
++         * thread's stack is stable; the watcher can then map the call site. */
++        if ((CS_sig(context) & 0xffff) == 0x43 && rsp && !(rsp & 7) &&
++            rsp <= ~0ull - sizeof(rsp0))
++            rsp0 = *(const volatile unsigned long long *)(uintptr_t)rsp;
++        __atomic_store_n( &pw_native_pc_rsp0, rsp0, __ATOMIC_RELAXED );
++    }
+     __atomic_add_fetch( &pw_native_pc_sequence, 1, __ATOMIC_RELEASE );
+     {
+         static unsigned int trace_count;
+-- 
+2.43.0

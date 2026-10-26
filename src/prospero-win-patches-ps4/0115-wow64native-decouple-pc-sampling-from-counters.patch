@@ -1,0 +1,42 @@
+From: Codex <codex@local>
+Subject: wow64native: separate PC sampling from transition counters
+
+Keep opt-in SIGPROF PC sampling available without putting the profile pointer
+on each native transition. This leaves the hot transition path counter-free
+while still allowing a low-rate sampling diagnostic when requested.
+
+---
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -20,3 +20,4 @@
+ static int process_ready;
+ static int profile_enabled;
++static int profile_watch_enabled;
+ static __thread struct pw_native_profile thread_profile;
+@@ -221,5 +222,5 @@
+             changed = !entry->samples || host_calls != entry->host_calls ||
+                       guest_calls != entry->guest_calls || unix_calls != entry->unix_calls ||
+                       syscall_calls != entry->syscall_calls;
+-            if (changed || !(entry->samples % 5))
++            if (entry->state->profile && (changed || !(entry->samples % 5)))
+                 WINE_MESSAGE("PW_NATIVE_PROFILE version=3 teb=%llx tsc=%llu cpu_ns=%llu cpu_delta_ns=%llu host_calls=%llu guest_calls=%llu host_sysarch_ticks=%llu guest_sysarch_ticks=%llu unix_calls=%llu syscall_calls=%llu samples=%u changed=%d\n",
+@@ -363,5 +364,8 @@
+         {
++            const char *profile = getenv("PW_NATIVE_PROFILE");
+             const char *watch = getenv("PW_NATIVE_WATCH");
+             const char *pc = getenv("PW_NATIVE_PC");
+-            profile_enabled = (watch && !strcmp(watch, "1")) || (pc && !strcmp(pc, "1"));
++            profile_enabled = profile && !strcmp(profile, "1");
++            profile_watch_enabled = (watch && !strcmp(watch, "1")) ||
++                                    (pc && !strcmp(pc, "1"));
+         }
+@@ -454,7 +457,6 @@
+     /* The optional watcher samples thread-local state from another thread.
+      * Keep it off by default: threads that exit outside BTCpuThreadTerm can
+      * leave stale TLS pointers behind. Enable only for targeted diagnostics. */
+-    if (profile_enabled && getenv("PW_NATIVE_WATCH") &&
+-        !strcmp(getenv("PW_NATIVE_WATCH"), "1"))
++    if (profile_watch_enabled)
+         profile_watch_register(&thread_state);
+ #endif
+

@@ -200,3 +200,57 @@ bindings with a live-mapping check and an eight-set cap. The trigger is narrow
 so it does not expand routine descriptor logging.
 
 0028 logs the caller and requested size before `linear_alloc_child()` dereferences a null context. The 2026-10-19 Oblivion run faulted at `libvulkan.prx+0xffde23`, the first `ctx->offset` load in this helper, with `si_addr=0x4`; the package's matching link ELF resolves that instruction to `linear_alloc_child`. The trace keeps the fatal behavior unchanged and is intended to identify the caller in the next reproduction.
+
+0029 adds the opt-in `ORBIS_WSI_FORCE_COPY=1` A/B. It bypasses registering the
+application's linear swapchain images directly with VideoOut and instead uses
+Mesa-owned scan-out buffers with the existing copy path. This isolates whether
+zero-copy VideoOut ownership is involved when `vkAcquireNextImageKHR` stops
+returning. Default behavior is unchanged. Package 10126 keeps
+`ORBIS_WSI_NO_DEFER=1` from the preceding A/B and adds force-copy, so only the
+zero-copy registration policy changes relative to that run. See
+`docs/HANDOFF-2026-10-20.md` for the confirmed 10125/10126 traces and package.
+
+0030 adds a one-shot warning when `vkAcquireNextImageKHR` has found no free image
+for at least one second. It records the host/device busy-image bitmasks, swapchain
+image count, direct-registration mode, app-owned deferred image, flip queue count,
+and VideoOut pending-flip count. This distinguishes leaked app/device ownership
+from a display flip queue that failed to retire. It is diagnostic only and does
+not change acquire behavior. Package 10127 combines it with the 10126 forced-copy
+A/B, so install that package for the next run.
+
+0031 adds a startup marker identifying the WSI diagnostic build and logs the
+first eight acquire entry/return pairs. This makes the next run prove both that
+this PRX is active and whether `vkAcquireNextImageKHR` reaches WSI and returns.
+The trace is bounded; later acquires are silent. It does not alter rendering or
+synchronization.
+
+0032 traces the common Vulkan acquire stages after the headless backend returns:
+image callback, semaphore signal, fence signal, memory ownership, and common
+return. It logs the first eight acquisitions and every acquisition from #1024
+onward, so a late stuck call is bounded while showing exactly which stage did
+not return. Patch 0031's startup marker confirms the diagnostic PRX is active.
+
+On 2026-10-24, package 10129's trace reached acquisition #1995 and every
+logged common stage returned `VK_SUCCESS`. This rules out acquire starvation
+for the tested Titan Quest run. The post-freeze RADV budget had zero presents
+and zero render passes/draws over 5.563 seconds while process CPU use remained
+high, so the next diagnostic should locate why rendering/presentation stops
+after successful acquisition rather than add more acquire tracing. See
+`docs/HANDOFF-2026-10-20.md` for the full result and current next step.
+
+0033 adds bounded `radv_queue_submit()` entry/return records to `/data/prospero-win/radv.log`. Each sampled record includes the submission number, command-buffer count, wait/signal counts, result, and whether it was an empty submission. The first 16 and every 120th submission are logged, with all failures logged. This distinguishes semaphore-only submits from game command buffers and shows whether RADV was entered and returned around the Titan Quest Create freeze. It does not alter queue behavior. Package 10163 combines this with the corrected Wine server `create_mapping` klog trace; install **Orbis Wine 10163 RADV Submit Trace** for the next run.
+
+0034 logs every Orbis `radv_CreateGraphicsPipelines()` item at entry and return, including stage count/mask, create flags, result, and elapsed microseconds. An unmatched entry at the freeze identifies a call that did not return from RADV pipeline creation; continued returns mean the stall is earlier or later in the DXVK/game path. It changes no rendering behavior. Package 10165 retains the known-good 10153 wineserver PRX and includes both 0033 queue tracing and 0034 pipeline tracing. Install **Orbis Wine 10165 RADV Pipeline Trace** for the next Titan Quest Create reproduction.
+
+0035 increases queue-submit trace density around the observed Titan Quest
+freeze window: it records every radv_queue_submit() from #3001 through #4096,
+in addition to the first 16, periodic samples, and failures. This closes the
+gap left by 0033's every-120th sampling after #3000. An unmatched entry
+identifies a submit stuck inside RADV; no entry after #3000 means execution
+stopped above the queue boundary. Package 10166 includes 0033, 0034, and 0035.
+
+0036 removes the submit-number windows for the follow-up test and logs every
+RADV queue-submit entry and return from process startup. The 10166 trace showed
+the same render stop at a different point than the 0035 window, so the full
+trace avoids guessing a stable call number. Package 10167 includes 0033, 0034,
+and 0036.

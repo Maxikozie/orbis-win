@@ -1,0 +1,29 @@
+From: Codex <codex@local>
+Subject: server: identify poisoned object release caller on PS4
+
+The AFD fd releases return normally, then release_object faults while reading a
+pointer filled with Wine's 0x55 uninitialized-memory pattern. Log only that
+sentinel pointer and its caller before the existing fault, avoiding a broad
+object trace.
+
+---
+diff --git a/server/object.c b/server/object.c
+index ede1b14a4e..e140de0113 100644
+--- a/server/object.c
++++ b/server/object.c
+@@ -619,6 +619,15 @@ struct object *grab_object( void *ptr )
+ void release_object( void *ptr )
+ {
+ #ifdef __PROSPERO__
++    if ((uintptr_t)ptr == (uintptr_t)0x5555555555555555ULL)
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        char line[160];
++        snprintf( line, sizeof(line),
++                  "wineserver: release_object poison ptr=%p caller=%p anchor=%p\n",
++                  ptr, __builtin_return_address(0), (void *)(uintptr_t)&release_object );
++        sceKernelDebugOutText( 0, line );
++    }
+     /* ⚠ DIAGNOSTIC. init_directories() passes the result of each create_*()
+      * straight to release_object(), assuming none can fail. On this console
+      * some do, and the null dereference here is the first anyone hears of it --

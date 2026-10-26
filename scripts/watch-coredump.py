@@ -28,6 +28,15 @@ def main() -> int:
     klog = Path(klog_name)
     destination = Path(out_dir)
     destination.mkdir(parents=True, exist_ok=True)
+    log_path = destination / f"coredump-watch-{title_id}-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    # This watcher is normally launched in the background while a console run
+    # is in progress. Keep its own durable log so it survives a closed terminal
+    # or app-server pipe; otherwise the first status print can raise
+    # BrokenPipeError exactly when the crash notification arrives.
+    log_stream = log_path.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = log_stream
+    sys.stderr = log_stream
+    print(f"watch log: {log_path}", flush=True)
     offset = klog.stat().st_size
     print(f"watching {klog} from byte {offset} for {title_id}", flush=True)
 

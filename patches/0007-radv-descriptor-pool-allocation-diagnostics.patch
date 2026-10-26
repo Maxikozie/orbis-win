@@ -1,0 +1,58 @@
+diff --git a/src/amd/vulkan/radv_descriptor_pool.c b/src/amd/vulkan/radv_descriptor_pool.c
+index 0d22dbb..12a703f 100644
+--- a/src/amd/vulkan/radv_descriptor_pool.c
++++ b/src/amd/vulkan/radv_descriptor_pool.c
+@@ -234,9 +234,16 @@ radv_create_descriptor_pool(struct radv_device *device, const VkDescriptorPoolCr
+       size += sizeof(struct radv_descriptor_range) * range_count;
+    }
+ 
++   mesa_logi("RADV_DESCRIPTOR_POOL request maxSets=%u poolSizeCount=%u flags=0x%x host_size=%llu bo_size=%llu ranges=%llu",
++             pCreateInfo->maxSets, pCreateInfo->poolSizeCount, pCreateInfo->flags, (unsigned long long)size,
++             (unsigned long long)bo_size, (unsigned long long)range_count);
++
+    pool = vk_zalloc2(&device->vk.alloc, pAllocator, size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+-   if (!pool)
++   if (!pool) {
++      mesa_loge("RADV_DESCRIPTOR_POOL_FAIL stage=host-object result=%d host_size=%llu", VK_ERROR_OUT_OF_HOST_MEMORY,
++                (unsigned long long)size);
+       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
++   }
+ 
+    vk_object_base_init(&device->vk, &pool->base, VK_OBJECT_TYPE_DESCRIPTOR_POOL);
+ 
+@@ -262,18 +269,25 @@ radv_create_descriptor_pool(struct radv_device *device, const VkDescriptorPoolCr
+ 
+          result = radv_bo_create(device, &pool->base, bo_size, 32, RADEON_DOMAIN_VRAM, flags,
+                                  RADV_BO_PRIORITY_DESCRIPTOR, 0, false, &pool->bo);
+-         if (result != VK_SUCCESS)
++         if (result != VK_SUCCESS) {
++            mesa_loge("RADV_DESCRIPTOR_POOL_FAIL stage=bo-create result=%d bo_size=%llu", result,
++                      (unsigned long long)bo_size);
+             goto fail;
++         }
+ 
+          pool->mapped_ptr = (uint8_t *)radv_buffer_map(device->ws, pool->bo);
+          if (!pool->mapped_ptr) {
+             result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
++            mesa_loge("RADV_DESCRIPTOR_POOL_FAIL stage=bo-map result=%d bo_size=%llu", result,
++                      (unsigned long long)bo_size);
+             goto fail;
+          }
+       } else {
+          pool->host_bo = vk_alloc2(&device->vk.alloc, pAllocator, bo_size, 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+          if (!pool->host_bo) {
+             result = VK_ERROR_OUT_OF_HOST_MEMORY;
++            mesa_loge("RADV_DESCRIPTOR_POOL_FAIL stage=host-bo result=%d bo_size=%llu", result,
++                      (unsigned long long)bo_size);
+             goto fail;
+          }
+          pool->mapped_ptr = pool->host_bo;
+@@ -292,6 +306,8 @@ radv_create_descriptor_pool(struct radv_device *device, const VkDescriptorPoolCr
+    return result;
+ 
+ fail:
++   mesa_loge("RADV_DESCRIPTOR_POOL_FAIL stage=cleanup result=%d host_size=%llu bo_size=%llu", result,
++             (unsigned long long)size, (unsigned long long)bo_size);
+    radv_destroy_descriptor_pool(device, pAllocator, pool);
+    return vk_error(device, result);
+ }

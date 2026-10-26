@@ -1,0 +1,85 @@
+From: Codex <codex@localhost>
+Subject: ws2_32: trace the empty-hostname local adapter path on PS4
+
+Log the hostname result and the legacy adapter query used by Wine's
+gethostbyname("") implementation. The existing NetCtl fallback covers
+GetAdaptersAddresses, but Wine's local-host branch also calls GetAdaptersInfo
+and the route table. These markers identify whether that branch succeeds or
+falls back into the PS4 resolver before Titan Quest exits.
+
+---
+diff --git a/dlls/iphlpapi/iphlpapi_main.c b/dlls/iphlpapi/iphlpapi_main.c
+index a4a5c9464b..0089024350 100644
+--- a/dlls/iphlpapi/iphlpapi_main.c
++++ b/dlls/iphlpapi/iphlpapi_main.c
+@@ -609,12 +609,15 @@ DWORD WINAPI GetAdaptersInfo( IP_ADAPTER_INFO *info, ULONG *size )
+     IN_ADDR gw, mask;
+ 
+     TRACE( "info %p, size %p\n", info, size );
++    MESSAGE( "PW_ADAPTERS_INFO enter info=%p sizep=%p size=%lu\n", info, size, size ? *size : 0 );
+     if (!size) return ERROR_INVALID_PARAMETER;
+ 
+     err = NsiAllocateAndGetTable( 1, &NPI_MS_NDIS_MODULEID, NSI_NDIS_IFINFO_TABLE,
+                                   (void **)&if_keys, sizeof(*if_keys), (void **)&if_rw, sizeof(*if_rw),
+                                   NULL, 0, (void **)&if_stat, sizeof(*if_stat), &if_count, 0 );
+ 
++    MESSAGE( "PW_ADAPTERS_INFO nsi-interfaces err=%lu count=%lu\n", err, err ? 0 : if_count );
++
+     if (err) return err;
+     for (i = 0; i < if_count; i++)
+     {
+@@ -2260,6 +2263,8 @@ DWORD WINAPI GetIpAddrTable( MIB_IPADDRTABLE *table, ULONG *size, BOOL sort )
+     struct nsi_ip_unicast_rw *rw;
+ 
+     TRACE( "table %p, size %p, sort %d\n", table, size, sort );
++    MESSAGE( "PW_FORWARD_TABLE enter table=%p sizep=%p size=%lu sort=%u\n",
++             table, size, size ? *size : 0, sort );
+     if (!size) return ERROR_INVALID_PARAMETER;
+ 
+     err = NsiAllocateAndGetTable( 1, &NPI_MS_IPV4_MODULEID, NSI_IP_UNICAST_TABLE, (void **)&keys, sizeof(*keys),
+@@ -2381,6 +2386,7 @@ DWORD WINAPI GetIpForwardTable( MIB_IPFORWARDTABLE *table, ULONG *size, BOOL sor
+     err = NsiAllocateAndGetTable( 1, &NPI_MS_IPV4_MODULEID, NSI_IP_FORWARD_TABLE, (void **)&keys, sizeof(*keys),
+                                   (void **)&rw, sizeof(*rw), (void **)&dyn, sizeof(*dyn),
+                                   (void **)&stat, sizeof(*stat), &count, 0 );
++    MESSAGE( "PW_FORWARD_TABLE nsi err=%lu count=%lu\n", err, err ? 0 : count );
+     if (err) return err;
+ 
+     needed = FIELD_OFFSET( MIB_IPFORWARDTABLE, table[count] );
+diff --git a/dlls/ws2_32/protocol.c b/dlls/ws2_32/protocol.c
+index fd8123a0c2..5b0925ed51 100644
+--- a/dlls/ws2_32/protocol.c
++++ b/dlls/ws2_32/protocol.c
+@@ -1020,17 +1020,23 @@ struct hostent * WINAPI gethostbyname( const char *name )
+ 
+     if ((ret = WS_CALL( gethostname, &params )))
+     {
++        MESSAGE( "PW_HOSTBYNAME hostname-error name=%s ret=%d\n", name ? name : "(null)", ret );
+         SetLastError( ret );
+         return NULL;
+     }
+ 
++    MESSAGE( "PW_HOSTBYNAME enter name=%s hostname=%s\n", name ? name : "(null)", hostname );
++
+     if (!name || !name[0])
+         name = hostname;
+ 
+     /* If the hostname of the local machine is requested then return the
+      * complete list of local IP addresses */
+     if (!strcmp( name, hostname ))
++    {
+         host = get_local_ips( hostname );
++        MESSAGE( "PW_HOSTBYNAME local-result hostname=%s host=%p\n", hostname, host );
++    }
+ 
+     /* If any other hostname was requested (or the routing table lookup failed)
+      * then return the IP found by the host OS */
+@@ -1049,6 +1055,9 @@ struct hostent * WINAPI gethostbyname( const char *name )
+                 break;
+         }
+ 
++        MESSAGE( "PW_HOSTBYNAME unix-result name=%s ret=%d host=%p size=%u\n",
++                 name ? name : "(null)", ret, params.host, size );
++
+         SetLastError( ret );
+         return ret ? NULL : params.host;
+     }

@@ -10,13 +10,10 @@
  * be -- there is no libvulkan.so to find and no icd.d to read.
  *
  * ⚠ This is the PS4 arm of wine/ps5/pw_vulkan_radv.c, not a copy of it. That
- * one also bridges presentation, forwarding pw_videoout_* to PS5_Mesa's
- * wsi_videoout_idle / _show_tiled / _present_rect. This Mesa has no such
- * symbols -- the PS4 build carries the stock Mesa WSI instead, 64 wsi_* entry
- * points including wsi_CreateSwapchainKHR -- so there is nothing to forward
- * to, and nothing imports pw_videoout_* here either (win32u.shared.elf names
- * none of them). Presentation is its own problem; this gets the driver
- * loadable, which is what every part of the graphics stack is waiting on. */
+ * one also bridges presentation to PS5_Mesa's WSI. This PS4 build carries
+ * stock Mesa WSI instead. The pw_videoout_cursor export below is the narrow
+ * bridge Wine needs: it forwards a transient cursor image into PS4 WSI, where
+ * the image is copied and composited into the next scan-out frame. */
 #include <vulkan/vulkan_core.h>
 #include <stddef.h>
 #include <string.h>
@@ -24,6 +21,16 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>      /* snprintf, for the stack-size note below */
+
+extern int wsi_orbis_cursor_update(const uint32_t *argb, uint32_t width, uint32_t height,
+                                  int32_t x, int32_t y, uint32_t screen_width, uint32_t screen_height);
+
+__attribute__((visibility("default")))
+int pw_videoout_cursor(const uint32_t *argb, uint32_t width, uint32_t height,
+                       int32_t x, int32_t y, uint32_t screen_width, uint32_t screen_height)
+{
+    return wsi_orbis_cursor_update(argb, width, height, x, y, screen_width, screen_height);
+}
 
 PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
 PFN_vkVoidFunction VKAPI_CALL vk_common_GetDeviceProcAddr(VkDevice device, const char *name);
@@ -295,15 +302,18 @@ int __wrap_scePthreadCreate(pthread_t *thread, const pthread_attr_t *attr,
  * work. pw_ps4_setenv writes into this PRX's environment and publishes it, and
  * because RADV is linked into this same PRX its getenv reads exactly that.
  *
- * /data/prospero-win/radv.env, one NAME=VALUE per line, # for a comment:
+ * RADV's messages normally go to stderr, which the console doesn't capture for
+ * this PRX. Give the next diagnostic run a retrievable log by default, then
+ * let /data/prospero-win/radv.env override either value. The runtime config is
+ * loaded after these defaults, before Mesa's first option lookup:
  *
- *     ORBIS_TESS_RING_WATERMARK=1
- *     ORBIS_TESS_WORKGROUPS=512
+ *     MESA_LOG_FILE=/data/prospero-win/radv.log
+ *     MESA_LOG_LEVEL=info
  *
  * ⚠ A file rather than the title's environment on purpose. Nothing can hand a
  * variable across to a private environment, and a file is also the pattern the
  * rest of this port already uses for switches it cannot pass (pw_wow_profile,
- * pw_sched, pw_image_view_fd_release). Absent file: nothing set, as before. */
+ * pw_sched, pw_image_view_fd_release). */
 int pw_ps4_setenv(const char *name, const char *value);
 
 static void pw_radv_load_env(void)
@@ -313,6 +323,11 @@ static void pw_radv_load_env(void)
     FILE *file;
 
     if (loaded++) return;
+    /* Mesa's default logger sends PRX stderr to a sink. Keep the diagnostics
+     * from this OOM investigation in a file that can be retrieved after a
+     * failed title run. Explicit values in radv.env still take precedence. */
+    pw_ps4_setenv("MESA_LOG_FILE", "/data/prospero-win/radv.log");
+    pw_ps4_setenv("MESA_LOG_LEVEL", "info");
     if (!(file = fopen("/data/prospero-win/radv.env", "r"))) return;
     while (fgets(line, sizeof(line), file)) {
         char *equals, *end;

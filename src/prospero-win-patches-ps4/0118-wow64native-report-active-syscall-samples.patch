@@ -1,0 +1,97 @@
+From: Codex <codex@local>
+Subject: wow64native: report active syscall samples
+
+Expose rolling guest syscall samples while a thread is alive. Include the syscall ID, the guest syscall PC, and the existing guest stack arg1 sample (not a return address). Emit only for threads that consumed more than 100 ms of CPU in the two-second profiling interval.
+
+---
+--- a/wine/wow64native/cpu.c
++++ b/wine/wow64native/cpu.c
+@@ -131,7 +131,8 @@
+ C_ASSERT(offsetof(struct pw_native_profile, syscall_samples) == 72);
+ C_ASSERT(offsetof(struct pw_native_profile, unix_samples) == 328);
+ C_ASSERT(offsetof(struct pw_native_profile, syscall_caller_samples) == 584);
+-C_ASSERT(sizeof(struct pw_native_profile) == 840);
++C_ASSERT(offsetof(struct pw_native_profile, syscall_id_samples) == 840);
++C_ASSERT(sizeof(struct pw_native_profile) == 1096);
+ 
+ /* No C or TLS lookup before host FS. Preserve guest flags/registers; the
+  * profile pointer is checked on every entry and is NULL by default. */
+@@ -407,10 +408,12 @@
+                    /* Record the 32-bit guest instruction that entered the
+                     * syscall thunk. RAX is not a reliable syscall ID at
+                     * this boundary on every WOW64 dispatch path. */
+-                   PW_PROFILE_ENTRY("40", "584",
++                   PW_PROFILE_ENTRY("40", "840",
+                                     "movl 0xb8(%r13),%ecx\n\t"
+                                     "movl %ecx,72(%rax,%rdx,4)\n\t"
+-                                    "movl 4(%r14),%ecx\n\t")
++                                    "movl 4(%r14),%ecx\n\t"
++                                    "movl %ecx,584(%rax,%rdx,4)\n\t"
++                                    "movl 16(%rsp),%ecx\n\t")
+                    "call pw_native_restore_host_fs\n\t"
+                    "movq %rax,%rcx\n\t"         /* syscall number */
+                    "leaq 8(%r14),%rdx\n\t"      /* parameters */
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -88,6 +88,41 @@
+     *last_tsc = __atomic_load_n(&p->last_tsc, __ATOMIC_RELAXED);
+ }
+ 
++static void profile_report_active_syscalls(const struct pw_native_thread_state *state,
++                                           unsigned long long syscall_calls)
++{
++    const struct pw_native_profile *p = (void *)state->profile;
++    unsigned int end;
++    if (!p) return;
++    end = (unsigned int)(syscall_calls >> PW_NATIVE_PROFILE_SAMPLE_SHIFT);
++    WINE_MESSAGE("PW_NATIVE_ACTIVE_SYSCALLS teb=%llx calls=%llu pc=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x arg1=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x id=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
++                 state->guest_fs, syscall_calls,
++                 p->syscall_samples[(end - 0) & 63], p->syscall_samples[(end - 1) & 63],
++                 p->syscall_samples[(end - 2) & 63], p->syscall_samples[(end - 3) & 63],
++                 p->syscall_samples[(end - 4) & 63], p->syscall_samples[(end - 5) & 63],
++                 p->syscall_samples[(end - 6) & 63], p->syscall_samples[(end - 7) & 63],
++                 p->syscall_samples[(end - 8) & 63], p->syscall_samples[(end - 9) & 63],
++                 p->syscall_samples[(end - 10) & 63], p->syscall_samples[(end - 11) & 63],
++                 p->syscall_samples[(end - 12) & 63], p->syscall_samples[(end - 13) & 63],
++                 p->syscall_samples[(end - 14) & 63], p->syscall_samples[(end - 15) & 63],
++                 p->syscall_caller_samples[(end - 0) & 63], p->syscall_caller_samples[(end - 1) & 63],
++                 p->syscall_caller_samples[(end - 2) & 63], p->syscall_caller_samples[(end - 3) & 63],
++                 p->syscall_caller_samples[(end - 4) & 63], p->syscall_caller_samples[(end - 5) & 63],
++                 p->syscall_caller_samples[(end - 6) & 63], p->syscall_caller_samples[(end - 7) & 63],
++                 p->syscall_caller_samples[(end - 8) & 63], p->syscall_caller_samples[(end - 9) & 63],
++                 p->syscall_caller_samples[(end - 10) & 63], p->syscall_caller_samples[(end - 11) & 63],
++                 p->syscall_caller_samples[(end - 12) & 63], p->syscall_caller_samples[(end - 13) & 63],
++                 p->syscall_caller_samples[(end - 14) & 63], p->syscall_caller_samples[(end - 15) & 63],
++                 p->syscall_id_samples[(end - 0) & 63], p->syscall_id_samples[(end - 1) & 63],
++                 p->syscall_id_samples[(end - 2) & 63], p->syscall_id_samples[(end - 3) & 63],
++                 p->syscall_id_samples[(end - 4) & 63], p->syscall_id_samples[(end - 5) & 63],
++                 p->syscall_id_samples[(end - 6) & 63], p->syscall_id_samples[(end - 7) & 63],
++                 p->syscall_id_samples[(end - 8) & 63], p->syscall_id_samples[(end - 9) & 63],
++                 p->syscall_id_samples[(end - 10) & 63], p->syscall_id_samples[(end - 11) & 63],
++                 p->syscall_id_samples[(end - 12) & 63], p->syscall_id_samples[(end - 13) & 63],
++                 p->syscall_id_samples[(end - 14) & 63], p->syscall_id_samples[(end - 15) & 63]);
++}
++
+ static void profile_report(void *arg)
+ {
+     const struct pw_native_thread_state *state = arg;
+@@ -227,6 +262,8 @@
+                              entry->state->guest_fs, last_tsc, cpu_ns, cpu_delta_ns,
+                              host_calls, guest_calls, host_ticks, guest_ticks, unix_calls, syscall_calls,
+                              entry->samples, changed);
++            if (entry->state->profile && cpu_delta_ns > 100000000ull)
++                profile_report_active_syscalls(entry->state, syscall_calls);
+             entry->cpu_ns = cpu_ns;
+             entry->host_calls = host_calls;
+             entry->guest_calls = guest_calls;
+--- a/wine/wow64native/wow64native.h
++++ b/wine/wow64native/wow64native.h
+@@ -49,6 +49,8 @@
+     /* Guest return addresses for sampled syscall stubs, parallel to
+      * syscall_samples. */
+     unsigned int syscall_caller_samples[PW_NATIVE_PROFILE_SAMPLE_COUNT];
++    /* Native syscall numbers parallel to sampled guest syscall PCs. */
++    unsigned int syscall_id_samples[PW_NATIVE_PROFILE_SAMPLE_COUNT];
+ };
+ /* Unix-owned thread state; accessing Unix TLS requires host FS. */
+ struct pw_native_thread_state

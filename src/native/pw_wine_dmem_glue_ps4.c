@@ -33,6 +33,7 @@
 #include "pw_wine_dmem.h"
 #include "pw_wine_heap.h"
 #include <errno.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -50,6 +51,19 @@ extern int sceKernelVirtualQuery(const void *address, int flags, void *info, siz
 extern int sceKernelDebugOutText(int channel, const char *text);
 extern int sceKernelMunmap(void *address, size_t bytes);
 extern int sceKernelReleaseDirectMemory(int64_t offset, size_t bytes);
+extern int sceKernelAvailableDirectMemorySize(off_t start, off_t end, size_t alignment,
+                                              off_t *phys_out, size_t *size_out);
+extern size_t sceKernelGetDirectMemorySize(void);
+
+static void force_exec_trace(const char *format, ...)
+{
+    char line[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    sceKernelDebugOutText(0, line);
+}
 
 enum {
     PAGE = 0x4000,
@@ -274,6 +288,104 @@ static PwWineDmemRun runs[RUNS];
 /* 0 before the self-check, 1 in use, -1 refused: every call passes. */
 static int state;
 
+/* Wine's Unix heap also consumes flexible memory, including allocations made
+ * by Mesa. Keep at least 64 MiB of the largest direct-memory block available
+ * for ntdll and other runtime users. If the query or allocation fails, the
+ * generic heap falls back to its existing anonymous mmap path. */
+enum { HEAP_SLOTS = 1 << 17, HEAP_DIRECT_HEADROOM = 64 * 1024 * 1024 };
+typedef struct HeapBlock { uintptr_t address; size_t bytes; int64_t offset; } HeapBlock;
+static HeapBlock heap_blocks[HEAP_SLOTS];
+static unsigned heap_block_count;
+static int heap_direct_fallback_logged;
+
+static size_t heap_slot(uintptr_t address)
+{
+    return (size_t)((address / PAGE) * UINT64_C(0x9e3779b97f4a7c15) >> 47) & (HEAP_SLOTS - 1);
+}
+
+static void heap_log_fallback(size_t bytes, size_t available, const char *why)
+{
+    if (__atomic_exchange_n(&heap_direct_fallback_logged, 1, __ATOMIC_RELAXED)) return;
+    char line[192];
+    snprintf(line, sizeof(line),
+             "wine-ps4: direct heap fallback reason=%s request=%zu available=%zu reserve=%u\n",
+             why, bytes, available, (unsigned)HEAP_DIRECT_HEADROOM);
+    sceKernelDebugOutText(0, line);
+}
+
+static void *heap_map(void *context, size_t bytes)
+{
+    size_t span, available = 0, slot;
+    off_t phys = 0;
+    int64_t offset;
+    void *at = NULL;
+    (void)context;
+
+    if (getenv("WINE_PS5_HEAP_FLEXIBLE")) return NULL;
+    if (bytes > SIZE_MAX - (PAGE - 1)) return NULL;
+    span = (bytes + PAGE - 1) & ~(size_t)(PAGE - 1);
+    if (heap_block_count >= HEAP_SLOTS / 2) {
+        heap_log_fallback(span, available, "table-full");
+        return NULL;
+    }
+    if (sceKernelAvailableDirectMemorySize(0, (off_t)sceKernelGetDirectMemorySize(),
+                                          PAGE, &phys, &available) ||
+        available < span || available - span < HEAP_DIRECT_HEADROOM) {
+        heap_log_fallback(span, available, "headroom");
+        return NULL;
+    }
+    if (allocate(NULL, span, &offset)) {
+        heap_log_fallback(span, available, "allocate");
+        return NULL;
+    }
+    if (sceKernelMapDirectMemory(&at, span, map_protection, 0, offset, PAGE) || !at) {
+        (void)release(NULL, offset, span);
+        heap_log_fallback(span, available, "map");
+        return NULL;
+    }
+    for (slot = heap_slot((uintptr_t)at); heap_blocks[slot].address;
+         slot = (slot + 1) & (HEAP_SLOTS - 1)) {}
+    heap_blocks[slot] = (HeapBlock){ (uintptr_t)at, span, offset };
+    heap_block_count++;
+    return at;
+}
+
+static int heap_unmap(void *context, void *address, size_t bytes)
+{
+    size_t slot, hole, next;
+    (void)context;
+    (void)bytes;
+    for (slot = heap_slot((uintptr_t)address); heap_blocks[slot].address;
+         slot = (slot + 1) & (HEAP_SLOTS - 1)) {
+        HeapBlock block = heap_blocks[slot];
+        if (block.address != (uintptr_t)address) continue;
+        (void)sceKernelMunmap((void *)block.address, block.bytes);
+        (void)sceKernelReleaseDirectMemory(block.offset, block.bytes);
+        heap_block_count--;
+        heap_blocks[slot].address = 0;
+        for (hole = slot, next = (slot + 1) & (HEAP_SLOTS - 1);
+             heap_blocks[next].address; next = (next + 1) & (HEAP_SLOTS - 1)) {
+            size_t home = heap_slot(heap_blocks[next].address);
+            if (((next - home) & (HEAP_SLOTS - 1)) >= ((next - hole) & (HEAP_SLOTS - 1))) {
+                heap_blocks[hole] = heap_blocks[next];
+                heap_blocks[next].address = 0;
+                hole = next;
+            }
+        }
+        return 0;
+    }
+    return 1;
+}
+
+static void heap_use_direct_memory(void)
+{
+    static const PwWineHeapBacking heap_backing = { NULL, heap_map, heap_unmap };
+    if (!getenv("WINE_PS5_HEAP_FLEXIBLE")) {
+        pw_wine_heap_set_backing(&heap_backing);
+        sceKernelDebugOutText(0, "wine-ps4: Unix heap prefers direct memory; 64 MiB headroom guard active\n");
+    }
+}
+
 /* A direct-memory RX request can return success without changing the effective
  * permission. Move that allocation granule to flexible memory, preserving its
  * contents, only when the kernel query confirms RX did not take. */
@@ -415,6 +527,7 @@ static int protect_exec_page(unsigned int call, uintptr_t page, int protection)
 {
     PwPs4VirtualQueryInfo info;
     int protect_rc, query_rc, migrate_rc = -2, retry_rc = -2;
+    int host_retry_rc = -2;
     int effective = -1;
     size_t dmem_bytes;
     char line[256];
@@ -433,6 +546,17 @@ static int protect_exec_page(unsigned int call, uintptr_t page, int protection)
     if (!query_rc) effective = info.protection;
     dmem_bytes = pw_wine_dmem_backed(&dmem, page, PAGE);
 
+    /* A caller-backed mapping can report success from libkernel while the
+     * effective protection still omits execute. In that case retry through
+     * libc's mprotect wrapper once and verify the kernel's final mapping. */
+    if (!query_rc && !(effective & PROT_EXEC) && !dmem_bytes)
+    {
+        host_retry_rc = mprotect((void *)page, PAGE, protection);
+        memset(&info, 0, sizeof(info));
+        query_rc = sceKernelVirtualQuery((const void *)page, 1, &info, sizeof(info));
+        effective = query_rc ? -1 : info.protection;
+    }
+
     if (!query_rc && !(effective & PROT_EXEC) && dmem_bytes == PAGE)
     {
         migrate_rc = migrate_exec_page_to_flex(page);
@@ -447,12 +571,13 @@ static int protect_exec_page(unsigned int call, uintptr_t page, int protection)
         }
     }
 
-    if (protect_rc || query_rc || !(effective & PROT_EXEC) || migrate_rc != -2)
+    if (protect_rc || query_rc || !(effective & PROT_EXEC) || migrate_rc != -2 ||
+        host_retry_rc != -2)
     {
         snprintf(line, sizeof(line),
-                 "wine-ps4: exec-protect-verify build=0974 call=%u page=%p dmem-before=%zu protect=%d query=%d effective=%#x migrate=%d retry=%d\n",
+                 "wine-ps4: exec-protect-verify build=0975 call=%u page=%p dmem-before=%zu protect=%d query=%d effective=%#x host-retry=%d migrate=%d retry=%d\n",
                  call, (void *)page, dmem_bytes, protect_rc, query_rc,
-                 effective, migrate_rc, retry_rc);
+                 effective, host_retry_rc, migrate_rc, retry_rc);
         sceKernelDebugOutText(0, line);
     }
 
@@ -671,6 +796,7 @@ void __wine_ps5_dmem_region(void *base, size_t size)
         state = self_check((uintptr_t)base) ? 1 : -1;
         fprintf(stderr, "wine-ps5: direct memory %s for anonymous memory (region %p, %zu MiB)\n",
                 state > 0 ? "in use" : "refused", base, size >> 20);
+        if (state > 0) heap_use_direct_memory();
     }
 }
 
@@ -746,8 +872,9 @@ int __wine_ps5_mprotect(void *address, size_t bytes, int protection)
     int status = 0;
     unsigned call = __atomic_fetch_add(&trace_calls, 1, __ATOMIC_RELAXED) + 1;
     uintptr_t start = (uintptr_t)address;
+    int trace_force_exec = start < 0x1000110000ULL && end > 0x1000000000ULL;
     int fault_page = start <= 0x004a8330u && bytes > 0x004a8330u - start;
-    int trace = call <= 16;
+    int trace = call <= 16 || trace_force_exec;
     int exec_migration_allowed = bytes <= PW_PS4_EXEC_MIGRATE_MAX_BYTES;
 
     if ((protection & PROT_EXEC) && start < 0x100000000ULL &&
@@ -799,24 +926,46 @@ int __wine_ps5_mprotect(void *address, size_t bytes, int protection)
         return status;
     }
     for (; at < end; at += piece)
-        if (pw_wine_dmem_split(&dmem, at, end - at, &piece))
+    {
+        int backed;
+        if (trace_force_exec)
+            force_exec_trace("wine-ps4: force-exec mprotect split begin addr=%p remaining=%zu prot=%#x\n",
+                             (void *)at, (size_t)(end - at), protection);
+        backed = pw_wine_dmem_split(&dmem, at, end - at, &piece);
+        if (trace_force_exec)
+            force_exec_trace("wine-ps4: force-exec mprotect split result addr=%p bytes=%zu backed=%d\n",
+                             (void *)at, piece, backed);
+        if (backed)
         {
             int rc = 0;
 
+            if (trace_force_exec)
+                force_exec_trace("wine-ps4: force-exec dmem protect begin addr=%p bytes=%zu prot=%#x\n",
+                                 (void *)at, piece, protection);
             if ((protection & PROT_EXEC) && exec_migration_allowed)
                 rc = protect_exec_range(call, at, piece, protection);
             else
                 rc = pw_wine_dmem_protect(&dmem, at, piece,
                                           (unsigned)protection & 7);
+            if (trace_force_exec)
+                force_exec_trace("wine-ps4: force-exec dmem protect result addr=%p bytes=%zu rc=%d\n",
+                                 (void *)at, piece, rc);
             trace_oblivion_rx_result(call, caller, at, piece, protection, "dmem", rc);
             status |= rc;
         }
         else
         {
+            if (trace_force_exec)
+                force_exec_trace("wine-ps4: force-exec host protect begin addr=%p bytes=%zu prot=%#x\n",
+                                 (void *)at, piece, protection);
             int rc = ps4_host_mprotect((void *)at, piece, protection);
+            if (trace_force_exec)
+                force_exec_trace("wine-ps4: force-exec host protect result addr=%p bytes=%zu rc=%d\n",
+                                 (void *)at, piece, rc);
             trace_oblivion_rx_result(call, caller, at, piece, protection, "host", rc);
             status |= rc;
         }
+    }
     if (status) errno = ENOMEM;
     status = status ? -1 : 0;
     if (trace)

@@ -1,0 +1,68 @@
+diff --git a/src/d3d9/d3d9_common_texture.cpp b/src/d3d9/d3d9_common_texture.cpp
+index f9fecd4..ebf9aca 100644
+--- a/src/d3d9/d3d9_common_texture.cpp
++++ b/src/d3d9/d3d9_common_texture.cpp
+@@ -302,7 +302,22 @@ namespace dxvk {
+ 
+     const DxvkFormatInfo* formatInfo = m_mapping.FormatColor != VK_FORMAT_UNDEFINED
+       ? lookupFormatInfo(m_mapping.FormatColor)
+-      : m_device->UnsupportedFormatInfo(m_desc.Format);
++      : [&] {
++          Logger::info(str::format("D3D9CommonTexture::GetMipSize: unsupported format texture=0x",
++            std::hex, reinterpret_cast<uintptr_t>(this), " device=0x",
++            reinterpret_cast<uintptr_t>(m_device), " format=0x", uint32_t(m_desc.Format),
++            " pool=0x", uint32_t(m_desc.Pool), " usage=0x", m_desc.Usage));
++          return m_device->UnsupportedFormatInfo(m_desc.Format);
++        }();
++
++    if (unlikely(formatInfo == nullptr)) {
++      Logger::err(str::format("D3D9CommonTexture::GetMipSize: null format info texture=0x",
++        std::hex, reinterpret_cast<uintptr_t>(this), " device=0x",
++        reinterpret_cast<uintptr_t>(m_device), " d3dFormat=0x", uint32_t(m_desc.Format),
++        " vkFormat=0x", uint32_t(m_mapping.FormatColor), " pool=0x", uint32_t(m_desc.Pool),
++        " usage=0x", m_desc.Usage));
++      throw DxvkError("D3D9CommonTexture::GetMipSize: null format info");
++    }
+ 
+     const VkExtent3D mipExtent = util::computeMipLevelExtent(
+       GetExtent(), MipLevel);
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index c451009..18efdf0 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -62,6 +62,10 @@ namespace dxvk {
+     , m_d3d9Interop        ( this )
+     , m_d3d9On12           ( this )
+     , m_d3d8Bridge         ( this ) {
++    Logger::info(str::format("D3D9DeviceEx: created device=0x", std::hex,
++      reinterpret_cast<uintptr_t>(this), " adapter=0x",
++      reinterpret_cast<uintptr_t>(pAdapter)));
++
+     // If we can SWVP, then we use an extended constant set
+     // as SWVP has many more slots available than HWVP.
+     bool canSWVP = CanSWVP();
+@@ -4750,12 +4754,24 @@ namespace dxvk {
+ 
+   D3D9_VK_FORMAT_MAPPING D3D9DeviceEx::LookupFormat(
+     D3D9Format            Format) const {
++    if (!m_adapter) {
++      Logger::err(str::format("D3D9DeviceEx::LookupFormat: null adapter device=0x",
++        std::hex, reinterpret_cast<uintptr_t>(this), " format=0x",
++        uint32_t(Format)));
++      throw DxvkError("D3D9DeviceEx::LookupFormat: null adapter");
++    }
+     return m_adapter->GetFormatMapping(Format);
+   }
+ 
+ 
+   const DxvkFormatInfo* D3D9DeviceEx::UnsupportedFormatInfo(
+     D3D9Format            Format) const {
++    if (!m_adapter) {
++      Logger::err(str::format("D3D9DeviceEx::UnsupportedFormatInfo: null adapter device=0x",
++        std::hex, reinterpret_cast<uintptr_t>(this), " format=0x",
++        uint32_t(Format)));
++      throw DxvkError("D3D9DeviceEx::UnsupportedFormatInfo: null adapter");
++    }
+     return m_adapter->GetUnsupportedFormatInfo(Format);
+   }
+ 

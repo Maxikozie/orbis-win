@@ -1,0 +1,53 @@
+From: Codex <codex@local>
+Subject: wow64native: log owner sweep thread samples
+
+During a mutex-owner sweep, emit each registered thread's sampled native TID,
+TEB match, signal result, and PC. This distinguishes an unregistered owner from
+a signal/sample mismatch without flooding ordinary runs. Avoid restarting the
+sweep for every repeated wait on the same owner.
+
+---
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -209,7 +209,7 @@
+                 unsigned long long rsp_words[4] = {0};
+                 unsigned long long umtx_words[4] = {0};
+                 unsigned long long native_tid = 0;
+-                int owner_match, is_waiter, is_owner;
++                int owner_match, is_waiter, is_owner, sample_valid;
+                 unsigned int frames[8] = {0};
+                 unsigned int frame_count = 0;
+                 int rc;
+@@ -227,16 +227,26 @@
+                                          stack_deep_words, rsp_words, umtx_words, &native_tid);
+                         if (sequence != before) break;
+                     }
+-                    owner_match = sample_teb == entry->native_teb;
++                    sample_valid = sequence != before;
++                    owner_match = sample_valid && sample_teb == entry->native_teb;
+                     is_waiter = owner_match && (cs & 0xffff) == 0x43 && rax == 0x1c6 && rsi == 0x11;
+                     if (is_waiter)
+                     {
+-                        owner_tid = (unsigned int)umtx_words[0] & 0x7fffffff;
+-                        owner_scan_cycles = 2;
+-                        scan_owner = 1;
++                        unsigned int sampled_owner = (unsigned int)umtx_words[0] & 0x7fffffff;
++                        if (sampled_owner != owner_tid)
++                        {
++                            owner_tid = sampled_owner;
++                            owner_scan_cycles = 2;
++                        }
++                        if (owner_scan_cycles) scan_owner = 1;
+                     }
+-                    is_owner = owner_match && owner_tid && native_tid == owner_tid;
+-                    if (owner_match && (pc_active || is_waiter || is_owner))
++                    is_owner = sample_valid && owner_tid && native_tid == owner_tid;
++                    if (scan_owner)
++                        WINE_MESSAGE("PW_NATIVE_OWNER_SCAN target=%x slot=%u guest_teb=%llx native_teb=%llx sample_teb=%llx sample_valid=%d native_tid=%llx target_match=%d signal_rc=%d seq=%llu rip=%llx cs=%llx rax=%llx\n",
++                                     owner_tid, i, entry->state->guest_fs, entry->native_teb,
++                                     sample_teb, sample_valid, native_tid, is_owner, rc,
++                                     sequence, rip, cs, rax);
++                    if ((owner_match && (pc_active || is_waiter)) || is_owner)
+                     {
+                     /* Walk at most four conventional 32-bit EBP frames. The
+                      * return-address-only sample was not enough to validate

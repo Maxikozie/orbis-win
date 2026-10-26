@@ -1,0 +1,17 @@
+From: Codex <codex@local>
+Subject: radv: trace every Orbis queue submit from startup
+
+Trace every queue submission entry and return for the diagnostic package. The
+Titan Quest render stall is not at a stable submit count, so do not gate the
+trace on an arbitrary sequence window. This makes the last entered submit and
+its return status visible at whichever point the run stops.
+
+---
+diff --git a/src/amd/vulkan/radv_queue.c b/src/amd/vulkan/radv_queue.c
+index f5c60d2..4f9eaa1 100644
+--- a/src/amd/vulkan/radv_queue.c
++++ b/src/amd/vulkan/radv_queue.c
+@@ -2590,2 +2590,1 @@ radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
+-   const bool orbis_trace_submit = orbis_submit_trace_n <= 16 ||
+-      (orbis_submit_trace_n >= 3001 && orbis_submit_trace_n <= 4096) || !(orbis_submit_trace_n % 120);
++   const bool orbis_trace_submit = true;

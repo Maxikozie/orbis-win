@@ -1,0 +1,57 @@
+From: Codex <codex@local>
+Subject: radv: trace Orbis queue-submit boundaries
+
+Log a bounded sequence of Vulkan queue-submit entries and returns with command
+buffer, wait, and signal counts. This establishes whether RADV is reached and
+returns around the Titan Quest Create render stall, and distinguishes empty
+semaphore submissions from actual command-buffer submissions.
+
+---
+diff --git a/src/amd/vulkan/radv_queue.c b/src/amd/vulkan/radv_queue.c
+index 025c597..087b578 100644
+--- a/src/amd/vulkan/radv_queue.c
++++ b/src/amd/vulkan/radv_queue.c
+@@ -2583,13 +2583,30 @@ radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
+ #endif
+    struct radv_queue *queue = (struct radv_queue *)vqueue;
+    struct radv_device *device = radv_queue_device(queue);
++#ifdef HAVE_ORBIS_PLATFORM
++   static uint64_t orbis_submit_trace_count;
++   const uint64_t orbis_submit_trace_n =
++      __atomic_add_fetch(&orbis_submit_trace_count, 1, __ATOMIC_RELAXED);
++   const bool orbis_trace_submit = orbis_submit_trace_n <= 16 || !(orbis_submit_trace_n % 120);
++
++   if (orbis_trace_submit)
++      mesa_logi("radv/orbis: queue submit enter #%" PRIu64 " command_buffers=%u waits=%u signals=%u",
++                orbis_submit_trace_n, submission->command_buffer_count, submission->wait_count,
++                submission->signal_count);
++#endif
+ 
+    VkResult result = radv_queue_submit_bind_sparse_memory(device, submission);
+    if (result != VK_SUCCESS)
+       goto fail;
+ 
+-   if (!submission->command_buffer_count && !submission->wait_count && !submission->signal_count)
++   if (!submission->command_buffer_count && !submission->wait_count && !submission->signal_count) {
++#ifdef HAVE_ORBIS_PLATFORM
++      if (orbis_trace_submit)
++         mesa_logi("radv/orbis: queue submit return #%" PRIu64 " result=%d empty=1", orbis_submit_trace_n,
++                   VK_SUCCESS);
++#endif
+       return VK_SUCCESS;
++   }
+ 
+    if (!submission->command_buffer_count) {
+       result = radv_queue_submit_empty(queue, submission);
+@@ -2598,6 +2615,11 @@ radv_queue_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
+    }
+ 
+ fail:
++#ifdef HAVE_ORBIS_PLATFORM
++   if (orbis_trace_submit || result != VK_SUCCESS)
++      mesa_logi("radv/orbis: queue submit return #%" PRIu64 " result=%d empty=0", orbis_submit_trace_n,
++                result);
++#endif
+    if (result != VK_SUCCESS) {
+       /* When something bad happened during the submission, such as
+        * an out of memory issue, it might be hard to recover from

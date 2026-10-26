@@ -1,0 +1,51 @@
+From: Codex <codex@localhost>
+Subject: iphlpapi: log PS4 GetAdaptersAddresses network fields
+
+Record the adapter identity and its first unicast address plus gateway and DNS
+list pointers. The PS4 fallback currently returns a synthetic loopback adapter;
+this diagnostic confirms exactly what a title receives without changing the
+network behavior.
+
+---
+--- a/dlls/iphlpapi/iphlpapi_main.c
++++ b/dlls/iphlpapi/iphlpapi_main.c
+@@ -1398,4 +1398,32 @@ static void trace_adapter_buffer( const char *where, ULONG call, const void *buffer )
+                  call, where, buffer, GetLastError() );
+ }
+ 
++static void trace_adapter_contents( ULONG call, IP_ADAPTER_ADDRESSES *adapter )
++{
++    ULONG index = 0;
++
++    for (; adapter; adapter = adapter->Next, ++index)
++    {
++        IP_ADAPTER_UNICAST_ADDRESS *unicast = adapter->FirstUnicastAddress;
++        IP_ADAPTER_GATEWAY_ADDRESS *gateway = adapter->FirstGatewayAddress;
++        IP_ADAPTER_DNS_SERVER_ADDRESS *dns = adapter->FirstDnsServerAddress;
++        struct sockaddr_in *ipv4 = NULL;
++
++        if (unicast && unicast->Address.lpSockaddr &&
++            unicast->Address.lpSockaddr->sa_family == AF_INET)
++            ipv4 = (struct sockaddr_in *)unicast->Address.lpSockaddr;
++
++        MESSAGE( "PW_GAA adapter call=%lu index=%lu len=%lu ifindex=%lu type=%lu status=%u mtu=%lu "
++                 "unicast=%p family=%d ip=%u.%u.%u.%u gateway=%p dns=%p name=%s\n",
++                 call, index, adapter->Length, adapter->IfIndex, adapter->IfType, adapter->OperStatus,
++                 adapter->Mtu, unicast, unicast && unicast->Address.lpSockaddr ?
++                 unicast->Address.lpSockaddr->sa_family : 0,
++                 ipv4 ? (unsigned int)((const unsigned char *)&ipv4->sin_addr)[0] : 0,
++                 ipv4 ? (unsigned int)((const unsigned char *)&ipv4->sin_addr)[1] : 0,
++                 ipv4 ? (unsigned int)((const unsigned char *)&ipv4->sin_addr)[2] : 0,
++                 ipv4 ? (unsigned int)((const unsigned char *)&ipv4->sin_addr)[3] : 0,
++                 gateway, dns, adapter->AdapterName ? adapter->AdapterName : "(null)" );
++    }
++}
++
+ ULONG WINAPI DECLSPEC_HOTPATCH GetAdaptersAddresses( ULONG family, ULONG flags, void *reserved,
+@@ -1437,5 +1465,6 @@ ULONG WINAPI DECLSPEC_HOTPATCH GetAdaptersAddresses( ULONG family, ULONG flags, void *reserved,
+         else
+         {
+             adapters_addresses_copy( aa, sorted, count );
++            trace_adapter_contents( call, aa );
+             free( sorted );
+         }

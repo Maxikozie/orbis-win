@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace the PS4 loader handoff
+
+The startup-frame trace shows that init_syscall_frame returns, then the process
+faults in libkernel before producing a frame. Mark the PE loader's transition
+into Wow64 to identify whether the crash occurs before or after loader startup.
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index a0992cf68d..949372bc4c 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -4339,6 +4339,8 @@ void (WINAPI *pWow64PrepareForException)( EXCEPTION_RECORD *rec, CONTEXT *contex
+ 
+ static void init_wow64( CONTEXT *context )
+ {
++    ERR( "wine startup: loader init_wow64 entered context=%p imports_fixed=%d\n",
++         context, imports_fixup_done );
+     if (!imports_fixup_done)
+     {
+         HMODULE wow64;
+@@ -4348,6 +4350,7 @@ static void init_wow64( CONTEXT *context )
+ 
+         build_wow64_main_module();
+         build_ntdll_module();
++        ERR( "wine startup: loader init_wow64 modules built\n" );
+ 
+         if ((status = load_dll( NULL, wow64_path, 0, &wm, FALSE )))
+         {
+@@ -4355,6 +4358,7 @@ static void init_wow64( CONTEXT *context )
+             NtTerminateProcess( GetCurrentProcess(), status );
+         }
+         wow64 = wm->ldr.DllBase;
++        ERR( "wine startup: loader wow64 loaded base=%p\n", wow64 );
+ #define GET_PTR(name) \
+         if (!(p ## name = RtlFindExportedRoutineByName( wow64, #name ))) ERR( "failed to load %s\n", #name )
+ 
+@@ -4365,6 +4369,8 @@ static void init_wow64( CONTEXT *context )
+     }
+ 
+     RtlLeaveCriticalSection( &loader_section );
++    ERR( "wine startup: loader calling Wow64LdrpInitialize fn=%p context=%p\n",
++         pWow64LdrpInitialize, context );
+     pWow64LdrpInitialize( context );
+ }
+ 
+@@ -4457,6 +4463,9 @@ void loader_init( CONTEXT *context, void **entry )
+ 
+     if (NtCurrentTeb()->SkipLoaderInit) return;
+ 
++    ERR( "wine startup: loader_init entered context=%p entry=%p wow_offset=%lx imports_fixed=%d\n",
++         context, entry, NtCurrentTeb()->WowTebOffset, imports_fixup_done );
++
+     RtlEnterCriticalSection( &loader_section );
+ 
+     if (!imports_fixup_done)
+@@ -4495,7 +4504,12 @@ void loader_init( CONTEXT *context, void **entry )
+         if (!default_load_path)
+             get_dll_load_path( peb->ProcessParameters->ImagePathName.Buffer, NULL, dll_safe_mode, &default_load_path );
+ 
+-        if (NtCurrentTeb()->WowTebOffset) init_wow64( context );
++        if (NtCurrentTeb()->WowTebOffset)
++        {
++            ERR( "wine startup: loader_init invoking wow64 initialization\n" );
++            init_wow64( context );
++            ERR( "wine startup: loader_init wow64 initialization returned\n" );
++        }
+ 
+         wm = build_main_module();
+         build_ntdll_module();

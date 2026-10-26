@@ -1,0 +1,47 @@
+From: Codex <codex@local>
+Subject: radv: trace graphics pipeline create boundaries
+
+Log each Orbis graphics-pipeline create entry and return, including shader-stage mask, create flags, result, and elapsed CPU time. An unmatched entry at Titan Quest's character-create freeze identifies a stalled RADV pipeline compile; a continuing return stream rules that out and moves the investigation above RADV.
+
+---
+--- a/src/amd/vulkan/radv_pipeline_graphics.c
++++ b/src/amd/vulkan/radv_pipeline_graphics.c
+@@ -3470,19 +3470,38 @@
+                              const VkGraphicsPipelineCreateInfo *pCreateInfos, const VkAllocationCallbacks *pAllocator,
+                              VkPipeline *pPipelines)
+ {
+    VkResult result = VK_SUCCESS;
+    unsigned i = 0;
++#ifdef HAVE_ORBIS_PLATFORM
++   static uint64_t orbis_graphics_pipeline_trace_count;
++#endif
+ 
+    for (; i < count; i++) {
+       const VkPipelineCreateFlagBits2 create_flags = vk_graphics_pipeline_create_flags(&pCreateInfos[i]);
+       VkResult r;
++#ifdef HAVE_ORBIS_PLATFORM
++      const uint64_t trace_n = __atomic_add_fetch(&orbis_graphics_pipeline_trace_count, 1, __ATOMIC_RELAXED);
++      uint32_t stage_mask = 0;
++      for (uint32_t stage = 0; stage < pCreateInfos[i].stageCount; ++stage)
++         stage_mask |= pCreateInfos[i].pStages[stage].stage;
++      const uint64_t trace_start = os_time_get_nano();
++      mesa_logi("radv/orbis: graphics pipeline enter #%llu stages=%u mask=0x%x flags=0x%llx library=%u",
++                (unsigned long long)trace_n, pCreateInfos[i].stageCount, stage_mask,
++                (unsigned long long)create_flags,
++                !!(create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR));
++#endif
+       if (create_flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) {
+          r = radv_graphics_lib_pipeline_create(_device, pipelineCache, &pCreateInfos[i], pAllocator, &pPipelines[i]);
+       } else {
+          r = radv_graphics_pipeline_create(_device, pipelineCache, &pCreateInfos[i], pAllocator, &pPipelines[i]);
+       }
++#ifdef HAVE_ORBIS_PLATFORM
++      mesa_logi("radv/orbis: graphics pipeline return #%llu result=%d elapsed_us=%llu",
++                (unsigned long long)trace_n, r,
++                (unsigned long long)((os_time_get_nano() - trace_start) / 1000));
++#endif
+       if (r != VK_SUCCESS) {
+          result = r;
+          pPipelines[i] = VK_NULL_HANDLE;
+ 
+          if (create_flags & VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT)

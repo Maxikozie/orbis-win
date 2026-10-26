@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace heap allocations in PS4 WoW64 loader startup
+
+The previous run completed path conversion then faulted in alloc_module
+before registering the WoW64 main image. Mark the image-header read and each
+heap allocation there to isolate which operation precedes the libkernel return
+fault. This is diagnostic only.
+
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -1534,9 +1534,16 @@
+     WCHAR *buffer;
+     WINE_MODREF *wm;
+     const WCHAR *p;
+-    const IMAGE_NT_HEADERS *nt = RtlImageNtHeader(hModule);
++    const IMAGE_NT_HEADERS *nt;
+ 
++    ERR( "wine startup: alloc_module begin image=%p name=%s length=%u stack=%p builtin=%d\n",
++         hModule, debugstr_us( nt_name ), nt_name->Length, __builtin_frame_address(0), builtin );
++    nt = RtlImageNtHeader(hModule);
++    ERR( "wine startup: alloc_module image headers=%p\n", nt );
++
++    ERR( "wine startup: alloc_module heap WINE_MODREF bytes=%u\n", (unsigned)sizeof(*wm) );
+     if (!(wm = RtlAllocateHeap( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*wm) ))) return NULL;
++    ERR( "wine startup: alloc_module heap WINE_MODREF result=%p\n", wm );
+ 
+     wm->ldr.DllBase       = hModule;
+     wm->ldr.SizeOfImage   = nt->OptionalHeader.SizeOfImage;
+@@ -1546,18 +1553,23 @@
+     wm->CheckSum          = nt->OptionalHeader.CheckSum;
+     wm->ldr.TimeDateStamp = nt->FileHeader.TimeDateStamp;
+ 
++    ERR( "wine startup: alloc_module heap module path bytes=%u\n",
++         nt_name->Length - 3 * (unsigned)sizeof(WCHAR) );
+     if (!(buffer = RtlAllocateHeap( GetProcessHeap(), 0, nt_name->Length - 3 * sizeof(WCHAR) )))
+     {
+         RtlFreeHeap( GetProcessHeap(), 0, wm );
+         return NULL;
+     }
++    ERR( "wine startup: alloc_module heap module path result=%p\n", buffer );
+ 
++    ERR( "wine startup: alloc_module heap DDAG bytes=%u\n", (unsigned)sizeof(*wm->ldr.DdagNode) );
+     if (!(wm->ldr.DdagNode = RtlAllocateHeap( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*wm->ldr.DdagNode) )))
+     {
+         RtlFreeHeap( GetProcessHeap(), 0, buffer );
+         RtlFreeHeap( GetProcessHeap(), 0, wm );
+         return NULL;
+     }
++    ERR( "wine startup: alloc_module heap DDAG result=%p\n", wm->ldr.DdagNode );
+     InitializeListHead(&wm->ldr.DdagNode->Modules);
+     InsertTailList(&wm->ldr.DdagNode->Modules, &wm->ldr.NodeModuleLink);
+ 

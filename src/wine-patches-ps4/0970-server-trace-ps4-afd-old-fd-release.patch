@@ -1,0 +1,73 @@
+From: Codex <codex@local>
+Subject: server: trace old AFD socket fd release on PS4
+
+The prior AFD trace showed the same descriptor pointer in the fault registers,
+but did not show whether get_fd_options() or release_object() was the failing
+operation. Emit bounded state immediately before and after each step.
+
+---
+diff --git a/server/sock.c b/server/sock.c
+index 8c1358f518..7d48f66026 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -2032,8 +2032,60 @@ static int init_socket( struct sock *sock, int family, int type, int protocol )
+ 
+     if (sock->fd)
+     {
++#ifdef __PROSPERO__
++        {
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            static unsigned int logged;
++            if (logged++ < 16)
++            {
++                char line[192];
++                snprintf( line, sizeof(line),
++                          "wineserver: AFD old-fd begin sock=%p fd=%p ref=%u handles=%u ops=%p\n",
++                          sock, sock->fd, ((struct object *)sock->fd)->refcount, ((struct object *)sock->fd)->handle_count,
++                          ((struct object *)sock->fd)->ops );
++                sceKernelDebugOutText( 0, line );
++            }
++        }
++#endif
+         options = get_fd_options( sock->fd );
++#ifdef __PROSPERO__
++        {
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            static unsigned int logged;
++            if (logged++ < 16)
++            {
++                char line[128];
++                snprintf( line, sizeof(line), "wineserver: AFD old-fd options=%08x fd=%p\n",
++                          options, sock->fd );
++                sceKernelDebugOutText( 0, line );
++            }
++        }
++#endif
++#ifdef __PROSPERO__
++        {
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            static unsigned int logged;
++            if (logged++ < 16)
++            {
++                char line[128];
++                snprintf( line, sizeof(line), "wineserver: AFD old-fd release begin fd=%p\n", sock->fd );
++                sceKernelDebugOutText( 0, line );
++            }
++        }
++#endif
+         release_object( sock->fd );
++#ifdef __PROSPERO__
++        {
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            static unsigned int logged;
++            if (logged++ < 16)
++            {
++                char line[128];
++                snprintf( line, sizeof(line), "wineserver: AFD old-fd release returned fd=%p\n", sock->fd );
++                sceKernelDebugOutText( 0, line );
++            }
++        }
++#endif
+     }
+ 
+     if (!(sock->fd = create_anonymous_fd( &sock_fd_ops, sockfd, &sock->obj, options )))

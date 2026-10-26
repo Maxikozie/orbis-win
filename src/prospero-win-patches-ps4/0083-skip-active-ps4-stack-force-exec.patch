@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: skip current PS4 stack during force-exec walk
+
+The native stack belongs to a direct-memory view. Applying the legacy
+force-exec protection change to the view containing the active stack makes
+the PS4 mprotect syscall fault on its return stack. Leave that view's stack
+non-executable; keep the behavior PS4-only.
+
+---
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index f3e3bb3ab5..4cf6872865 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5648,6 +5648,9 @@ void virtual_set_force_exec( BOOL enable )
+     struct file_view *view;
+     sigset_t sigset;
+     unsigned int index = 0;
++#ifdef __PS4__
++    ULONG_PTR stack_addr = (ULONG_PTR)&sigset;
++#endif
+ 
+     ERR( "wine startup: virtual_set_force_exec begin enable=%d current=%d\n", enable, force_exec_prot );
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+@@ -5661,6 +5664,19 @@ void virtual_set_force_exec( BOOL enable )
+             /* file mappings are always accessible */
+             BYTE commit = is_view_valloc( view ) ? 0 : VPROT_COMMITTED;
+ 
++#ifdef __PS4__
++            /* Do not change permissions on the stack this walk is currently
++             * using. On PS4, mprotecting the active direct-memory stack can
++             * unmap its return address before sceKernelMprotect returns. */
++            if (stack_addr >= (ULONG_PTR)view->base &&
++                stack_addr - (ULONG_PTR)view->base < view->size)
++            {
++                ERR( "wine startup: virtual_set_force_exec skip active stack view[%u] base=%p size=%lu stack=%p\n",
++                     index++, view->base, (unsigned long)view->size, (void *)stack_addr );
++                continue;
++            }
++#endif
++
+             ERR( "wine startup: virtual_set_force_exec view[%u] begin base=%p size=%lu commit=%u\n",
+                  index, view->base, (unsigned long)view->size, commit );
+             {

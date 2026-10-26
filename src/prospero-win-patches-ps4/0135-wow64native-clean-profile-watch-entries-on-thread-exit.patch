@@ -1,0 +1,88 @@
+From: Codex <codex@local>
+Subject: wow64native: unregister sampled threads at pthread exit
+
+BTCpuThreadTerm does not run for every native thread, so the optional profiler
+can retain pointers into dead thread-local storage. Register a pthread-key
+destructor as a second cleanup path; its callback removes the watch entry while
+the exiting thread's TLS is still alive. This prevents the watcher from later
+dereferencing stale per-thread profile state.
+
+---
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -71,6 +71,24 @@
+ static struct pw_profile_watch_entry profile_watch_entries[PW_PROFILE_WATCH_MAX_THREADS];
+ static pthread_t profile_watch_thread;
+ static volatile int profile_watch_started;
++static pthread_key_t profile_watch_key;
++static pthread_once_t profile_watch_key_once = PTHREAD_ONCE_INIT;
++static int profile_watch_key_status = -1;
++static void profile_watch_unregister(struct pw_native_thread_state *state);
++
++/* BTCpuThreadTerm is not reached on every native thread exit. Use a POSIX
++ * thread-key destructor as a second cleanup path so the watcher never keeps
++ * a pointer into a thread's TLS after pthread teardown. */
++static void profile_watch_key_destructor(void *value)
++{
++    if (value) profile_watch_unregister(value);
++}
++
++static void profile_watch_key_create(void)
++{
++    profile_watch_key_status = pthread_key_create(&profile_watch_key,
++                                                  profile_watch_key_destructor);
++}
+ #endif
+ static void profile_read(const struct pw_native_thread_state *state,
+                          unsigned long long *host_calls, unsigned long long *guest_calls,
+@@ -313,7 +331,15 @@
+ {
+     unsigned int i;
+     int expected = 0;
++    int rc;
+     clockid_t cpu_clock = 0;
++    rc = pthread_once(&profile_watch_key_once, profile_watch_key_create);
++    if (rc || profile_watch_key_status)
++    {
++        WINE_MESSAGE("PW_NATIVE_PROFILE watcher-key failed once=%d key=%d teb=%llx\n",
++                     rc, profile_watch_key_status, state->guest_fs);
++        return;
++    }
+     int cpu_clock_valid = !pthread_getcpuclockid(pthread_self(), &cpu_clock);
+     if (!cpu_clock_valid)
+         WINE_MESSAGE("PW_NATIVE_PROFILE cpu-clock-unavailable teb=%llx\n", state->guest_fs);
+@@ -337,6 +363,14 @@
+                      PW_PROFILE_WATCH_MAX_THREADS, state->guest_fs);
+         return;
+     }
++    rc = pthread_setspecific(profile_watch_key, state);
++    if (rc)
++    {
++        profile_watch_unregister(state);
++        WINE_MESSAGE("PW_NATIVE_PROFILE watcher-key-set failed rc=%d teb=%llx\n",
++                     rc, state->guest_fs);
++        return;
++    }
+     if (!__atomic_compare_exchange_n(&profile_watch_started, &expected, 1, 0,
+                                     __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
+     if (pthread_create(&profile_watch_thread, NULL, profile_watch_main, NULL))
+@@ -352,6 +386,8 @@
+ 
+ static void profile_watch_unregister(struct pw_native_thread_state *state)
+ {
++    if (profile_watch_key_status == 0)
++        pthread_setspecific(profile_watch_key, NULL);
+     pthread_mutex_lock(&profile_watch_lock);
+     for (unsigned int i = 0; i < PW_PROFILE_WATCH_MAX_THREADS; ++i)
+         if (profile_watch_entries[i].state == state)
+@@ -526,8 +562,8 @@
+                  &thread_state, (unsigned)thread_state.status, process_ready);
+ #ifdef __PROSPERO__
+     /* The optional watcher samples thread-local state from another thread.
+-     * Keep it off by default: threads that exit outside BTCpuThreadTerm can
+-     * leave stale TLS pointers behind. Enable only for targeted diagnostics. */
++     * Its POSIX-key destructor removes entries when a thread exits without
++     * reaching BTCpuThreadTerm; enable it only for targeted diagnostics. */
+     if (profile_watch_enabled)
+         profile_watch_register(&thread_state);
+ #endif

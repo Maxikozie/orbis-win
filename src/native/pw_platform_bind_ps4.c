@@ -14,6 +14,7 @@
  */
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "pw_videoout_ps5.h"
@@ -134,18 +135,60 @@ int pw_videoout_ps5_draw_scaled(const PwPresentFrame *frame, int mode, uint32_t 
 int pw_pad_ps5_platform_ops(PwPadPs5Ops *ops) { return pw_pad_ps4_platform_ops(ops); }
 int pw_audio_ps5_platform_ops(PwAudioPs5Ops *ops) { return pw_audio_ps4_platform_ops(ops); }
 
-/* ---- not ported yet ----
- * HID is keyboard and mouse over USB; the DualShock 4 arrives through the pad
- * path, which IS ported, so a title is playable without this. Returning no ops
- * is the same answer the PS5 build gives when no HID device is present. */
+/* ---- USB keyboard and mouse ----
+ * Orbis exposes the USB keyboard through a system module. Load it before the title's
+ * credential transition, then resolve their entry points from the module
+ * handles when the portable HID reader opens a device. The keyboard report
+ * layout is shared with the PS5 implementation in pw_hid_ps5.c. */
+extern int sceSysmoduleLoadModule(uint16_t id);
+extern int sceSysmoduleGetModuleHandleInternal(uint32_t id, int32_t *handle);
+extern int sceKernelDlsym(int32_t handle, const char *symbol, void **address);
+
+static const struct { const char *name; uint16_t id; } pw_ps4_hid_modules[] = {
+    { "libSceKeyboard", 0x0106 },
+};
+
+static int32_t pw_ps4_hid_module_handle(uint16_t id)
+{
+    int32_t handle = -1;
+    if (!sceSysmoduleGetModuleHandleInternal(id, &handle) && handle >= 0)
+        return handle;
+    handle = -1;
+    if (!sceSysmoduleGetModuleHandleInternal(0x80000000u | id, &handle) && handle >= 0)
+        return handle;
+    return -1;
+}
+
+static int32_t pw_ps4_hid_load(const char *name)
+{
+    for (size_t i = 0; i < sizeof(pw_ps4_hid_modules) / sizeof(pw_ps4_hid_modules[0]); i++) {
+        if (strcmp(name, pw_ps4_hid_modules[i].name)) continue;
+        int status = sceSysmoduleLoadModule(pw_ps4_hid_modules[i].id);
+        int32_t handle = pw_ps4_hid_module_handle(pw_ps4_hid_modules[i].id);
+        return handle >= 0 ? handle : status < 0 ? status : -1;
+    }
+    return -1;
+}
+
 const PwHidPs5Ops *pw_hid_ps5_system_ops(void (*log)(const char *line))
 {
-    if (log) log("hid: no PS4 implementation, continuing without keyboard or mouse");
-    return NULL;
+    static PwHidPs5Ops ops;
+    ops.load_module = pw_ps4_hid_load;
+    ops.resolve = sceKernelDlsym;
+    ops.log = log;
+    return &ops;
 }
 void pw_hid_ps5_preload(void (*log)(const char *line))
 {
-    (void)log;   /* nothing to preload without a backend */
+    char line[128];
+    for (size_t i = 0; i < sizeof(pw_ps4_hid_modules) / sizeof(pw_ps4_hid_modules[0]); i++) {
+        int status = sceSysmoduleLoadModule(pw_ps4_hid_modules[i].id);
+        int32_t handle = pw_ps4_hid_module_handle(pw_ps4_hid_modules[i].id);
+        snprintf(line, sizeof(line), "preload %s id=%#x status=%#x handle=%d",
+                 pw_ps4_hid_modules[i].name, (unsigned)pw_ps4_hid_modules[i].id,
+                 (unsigned)status, (int)handle);
+        if (log) log(line);
+    }
 }
 
 /* The Lapy elevation helper is a PS5 privilege-escalation path for the WebKit

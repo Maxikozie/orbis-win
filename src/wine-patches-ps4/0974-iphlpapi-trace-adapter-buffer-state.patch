@@ -1,0 +1,81 @@
+From: Codex <codex@localhost>
+Subject: iphlpapi: trace GetAdaptersAddresses output buffer state on PS4
+
+Log the caller-provided adapter buffer mapping before and after Wine's
+GetAdaptersAddresses implementation, along with arguments, returned size,
+and status. This isolates whether the PS4 native path or this API call
+invalidates the buffer observed by Titan Quest.
+
+---
+--- a/dlls/iphlpapi/iphlpapi_main.c
++++ b/dlls/iphlpapi/iphlpapi_main.c
+@@ -1326,18 +1326,54 @@
+     return err;
+ }
+ 
++static void trace_adapter_buffer( const char *where, ULONG call, const void *buffer )
++{
++    MEMORY_BASIC_INFORMATION info;
++    SIZE_T size;
++
++    if (!buffer)
++    {
++        MESSAGE( "PW_GAA buffer call=%lu where=%s ptr=NULL\n", call, where );
++        return;
++    }
++
++    size = VirtualQuery( buffer, &info, sizeof(info) );
++    if (size)
++        MESSAGE( "PW_GAA buffer call=%lu where=%s ptr=%p query=%lu base=%p alloc=%p region=%lu state=%08lx protect=%08lx type=%08lx\n",
++                 call, where, buffer, (ULONG)size, info.BaseAddress, info.AllocationBase,
++                 (ULONG)info.RegionSize, info.State, info.Protect, info.Type );
++    else
++        MESSAGE( "PW_GAA buffer call=%lu where=%s ptr=%p query-failed error=%lu\n",
++                 call, where, buffer, GetLastError() );
++}
++
+ ULONG WINAPI DECLSPEC_HOTPATCH GetAdaptersAddresses( ULONG family, ULONG flags, void *reserved,
+                                                      IP_ADAPTER_ADDRESSES *aa, ULONG *size )
+ {
+     IP_ADAPTER_ADDRESSES *info, **sorted;
+-    DWORD err, needed, count;
++    DWORD err, needed, count = 0;
++    static LONG call_count;
++    ULONG call = InterlockedIncrement( &call_count );
++    ULONG size_in = size ? *size : 0;
+ 
+     TRACE( "(%ld, %08lx, %p, %p, %p)\n", family, flags, reserved, aa, size );
++    MESSAGE( "PW_GAA enter call=%lu family=%lu flags=%08lx reserved=%p aa=%p sizep=%p size=%lu\n",
++             call, family, flags, reserved, aa, size, size_in );
++    trace_adapter_buffer( "enter", call, aa );
+ 
+-    if (!size) return ERROR_INVALID_PARAMETER;
++    if (!size)
++    {
++        MESSAGE( "PW_GAA return call=%lu error=%lu size=0\n", call, (ULONG)ERROR_INVALID_PARAMETER );
++        return ERROR_INVALID_PARAMETER;
++    }
+ 
+     err = adapters_addresses_alloc( family, flags, &info, &count );
+-    if (err) return err;
++    if (err)
++    {
++        MESSAGE( "PW_GAA return call=%lu error=%lu count=%lu size=%lu\n", call, err, count, *size );
++        trace_adapter_buffer( "alloc-error", call, aa );
++        return err;
++    }
+ 
+     needed = adapters_addresses_size( info );
+     if (!aa || *size < needed)
+@@ -1356,6 +1392,9 @@
+     }
+ 
+     adapters_addresses_free( info );
++    trace_adapter_buffer( "exit", call, aa );
++    MESSAGE( "PW_GAA return call=%lu error=%lu count=%lu needed=%lu size=%lu aa=%p\n",
++             call, err, count, needed, *size, aa );
+     return err;
+ }
+ 
+-- 
+2.43.0

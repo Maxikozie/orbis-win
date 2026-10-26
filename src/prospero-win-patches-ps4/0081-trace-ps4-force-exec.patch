@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace PS4 WoW64 execute-flag protection walk
+
+The PE trace confirms the no-execute compatibility call starts but never
+returns. Mark the Unix ProcessExecuteFlags handler and each existing-view
+mprotect step to find whether the transition, lock, or protection walk fails.
+Diagnostics only.
+
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -1813,6 +1813,8 @@
+         break;
+ 
+     case ProcessExecuteFlags:
++        ERR( "wine startup: unix NtSetInformationProcess ProcessExecuteFlags entered handle=%p info=%p size=%u win64=%d wow64=%d\n",
++             handle, info, size, is_win64, is_wow64() );
+         if ((is_win64 && !is_wow64()) || size != sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+         if (execute_flags & MEM_EXECUTE_OPTION_PERMANENT) return STATUS_ACCESS_DENIED;
+         else
+@@ -1830,7 +1832,10 @@
+                 return STATUS_INVALID_PARAMETER;
+             }
+             execute_flags = *(ULONG *)info;
++            ERR( "wine startup: unix ProcessExecuteFlags applying flags=%08x enable=%d\n",
++                 execute_flags, enable );
+             virtual_set_force_exec( enable );
++            ERR( "wine startup: unix ProcessExecuteFlags force-exec returned\n" );
+         }
+         break;
+ 
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5630,8 +5630,11 @@
+ {
+     struct file_view *view;
+     sigset_t sigset;
++    unsigned int index = 0;
+ 
++    ERR( "wine startup: virtual_set_force_exec begin enable=%d current=%d\n", enable, force_exec_prot );
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++    ERR( "wine startup: virtual_set_force_exec lock acquired\n" );
+     if (!force_exec_prot != !enable)  /* change all existing views */
+     {
+         force_exec_prot = enable;
+@@ -5641,10 +5644,15 @@
+             /* file mappings are always accessible */
+             BYTE commit = is_view_valloc( view ) ? 0 : VPROT_COMMITTED;
+ 
++            ERR( "wine startup: virtual_set_force_exec view[%u] begin base=%p size=%lu commit=%u\n",
++                 index, view->base, (unsigned long)view->size, commit );
+             mprotect_range( view->base, view->size, commit, 0 );
++            ERR( "wine startup: virtual_set_force_exec view[%u] complete\n", index++ );
+         }
+     }
++    ERR( "wine startup: virtual_set_force_exec leaving lock\n" );
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++    ERR( "wine startup: virtual_set_force_exec complete\n" );
+ }
+ 
+ 

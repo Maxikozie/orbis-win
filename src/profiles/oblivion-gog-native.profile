@@ -2,7 +2,7 @@
 ; actions. Joystick input stays disabled in Oblivion.ini; controller buttons
 ; emit the corresponding PC keyboard or mouse actions.
 [application]
-id = oblivion-gog-native
+id = oblivion-gog
 name = (Native) The Elder Scrolls IV: Oblivion (GOG)
 executable = C:\Games\OblivionGOG\Oblivion.exe
 working_directory = C:\Games\OblivionGOG
@@ -20,8 +20,10 @@ show_fps = true
 mode = keyboard
 mouse = right_stick
 mouse_speed = 1200
+keyboard_stick = left_stick
+stick_deadzone = 25
 ; PS3 actions translated to Oblivion's PC defaults.
-cross = enter
+cross = space
 circle = tab
 square = f
 triangle = e
@@ -31,10 +33,10 @@ l2 = z
 r2 = c
 l3 = ctrl
 r3 = r
-up = w
-down = s
-left = a
-right = d
+up = up
+down = down
+left = left
+right = right
 options = escape
 create = t
 

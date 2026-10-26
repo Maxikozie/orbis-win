@@ -1,0 +1,106 @@
+diff --git a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+index 2d72234..a78f707 100644
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -25,6 +25,9 @@
+ #include "util/orbis_api_probe.h"
+ #include "wsi_common_entrypoints.h"
+ #include "util/u_debug.h"
++#ifdef HAVE_ORBIS_PLATFORM
++#include "util/u_atomic.h"
++#endif
+ #include "util/macros.h"
+ #include "util/os_file.h"
+ #include "util/os_time.h"
+@@ -51,6 +54,9 @@
+ #endif
+ 
+ uint64_t WSI_DEBUG;
++#ifdef HAVE_ORBIS_PLATFORM
++static int32_t orbis_acquire_stage_count;
++#endif
+ 
+ static const struct debug_control debug_control[] = {
+    { "buffer",       WSI_DEBUG_BUFFER },
+@@ -2289,8 +2295,24 @@ wsi_common_acquire_next_image2(const struct wsi_device *wsi,
+    VK_FROM_HANDLE(wsi_swapchain, swapchain, pAcquireInfo->swapchain);
+    VK_FROM_HANDLE(vk_device, device, _device);
+ 
++#ifdef HAVE_ORBIS_PLATFORM
++   const int32_t trace = p_atomic_inc_return(&orbis_acquire_stage_count);
++   const bool trace_this = trace <= 8 || trace >= 1024;
++   if (trace_this)
++      mesa_logi("wsi/orbis: 0032 acquire #%d common entry timeout=%llu sem=%u fence=%u",
++                trace, (unsigned long long)pAcquireInfo->timeout,
++                pAcquireInfo->semaphore != VK_NULL_HANDLE,
++                pAcquireInfo->fence != VK_NULL_HANDLE);
++   if (trace_this)
++      mesa_logi("wsi/orbis: 0032 acquire #%d image callback enter", trace);
++#endif
+    VkResult result = swapchain->acquire_next_image(swapchain, pAcquireInfo,
+                                                    pImageIndex);
++#ifdef HAVE_ORBIS_PLATFORM
++   if (trace_this)
++      mesa_logi("wsi/orbis: 0032 acquire #%d image callback return result=%d image=%u",
++                trace, result, pImageIndex != NULL ? *pImageIndex : 0);
++#endif
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+       return result;
+    struct wsi_image *image =
+@@ -2299,23 +2321,55 @@ wsi_common_acquire_next_image2(const struct wsi_device *wsi,
+    image->acquired = true;
+ 
+    if (pAcquireInfo->semaphore != VK_NULL_HANDLE) {
++#ifdef HAVE_ORBIS_PLATFORM
++      if (trace_this)
++         mesa_logi("wsi/orbis: 0032 acquire #%d semaphore signal enter", trace);
++#endif
+       VkResult signal_result =
+          wsi_signal_semaphore_for_image(device, swapchain, image,
+                                         pAcquireInfo->semaphore);
++#ifdef HAVE_ORBIS_PLATFORM
++      if (trace_this)
++         mesa_logi("wsi/orbis: 0032 acquire #%d semaphore signal return result=%d",
++                   trace, signal_result);
++#endif
+       if (signal_result != VK_SUCCESS)
+          return signal_result;
+    }
+ 
+    if (pAcquireInfo->fence != VK_NULL_HANDLE) {
++#ifdef HAVE_ORBIS_PLATFORM
++      if (trace_this)
++         mesa_logi("wsi/orbis: 0032 acquire #%d fence signal enter", trace);
++#endif
+       VkResult signal_result =
+          wsi_signal_fence_for_image(device, swapchain, image,
+                                     pAcquireInfo->fence);
++#ifdef HAVE_ORBIS_PLATFORM
++      if (trace_this)
++         mesa_logi("wsi/orbis: 0032 acquire #%d fence signal return result=%d",
++                   trace, signal_result);
++#endif
+       if (signal_result != VK_SUCCESS)
+          return signal_result;
+    }
+ 
+-   if (wsi->set_memory_ownership)
++   if (wsi->set_memory_ownership) {
++#ifdef HAVE_ORBIS_PLATFORM
++      if (trace_this)
++         mesa_logi("wsi/orbis: 0032 acquire #%d memory ownership enter", trace);
++#endif
+       wsi->set_memory_ownership(swapchain->device, image->memory, true);
++#ifdef HAVE_ORBIS_PLATFORM
++      if (trace_this)
++         mesa_logi("wsi/orbis: 0032 acquire #%d memory ownership return", trace);
++#endif
++   }
++
++#ifdef HAVE_ORBIS_PLATFORM
++   if (trace_this)
++      mesa_logi("wsi/orbis: 0032 acquire #%d common return result=%d", trace, result);
++#endif
+ 
+    return result;
+ }

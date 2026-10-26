@@ -17,6 +17,13 @@ APP_OBJ="${PW_APP_OBJ:-$ROOT/build/wine-app/obj}"
 PRX="$PW/.deps/wine-ps5/prx"
 PW_WINE64_WAIT_WATCHDOG="${PW_WINE64_WAIT_WATCHDOG:-0}"
 PW_WINE64_SERVER_DIRECT_OFF="${PW_WINE64_SERVER_DIRECT_OFF:-0}"
+PW_WINE64_HEAP_FLEXIBLE="${PW_WINE64_HEAP_FLEXIBLE:-0}"
+PS4_KERNELBASE32_DLL="${PS4_KERNELBASE32_DLL:-}"
+PS4_IPHLPAPI32_DLL="${PS4_IPHLPAPI32_DLL:-}"
+NEO=0
+for a in "$@"; do
+  case "$a" in --neo) NEO=1 ;; esac
+done
 case "$PW_WINE64_WAIT_WATCHDOG" in
   0|1) ;;
   *) echo "PW_WINE64_WAIT_WATCHDOG must be 0 or 1" >&2; exit 2 ;;
@@ -24,6 +31,10 @@ esac
 case "$PW_WINE64_SERVER_DIRECT_OFF" in
   0|1) ;;
   *) echo "PW_WINE64_SERVER_DIRECT_OFF must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$PW_WINE64_HEAP_FLEXIBLE" in
+  0|1) ;;
+  *) echo "PW_WINE64_HEAP_FLEXIBLE must be 0 or 1" >&2; exit 2 ;;
 esac
 export OO_PS4_TOOLCHAIN="$OO"
 
@@ -33,10 +44,17 @@ export OO_PS4_TOOLCHAIN="$OO"
 }
 
 echo "== build the normal app objects and complete runtime package stage"
+APP_ARGS=(--pkg --relocatable-stage)
+(( NEO )) && APP_ARGS+=(--neo)
 TITLE_ID="$TITLE_ID" TITLE="$TITLE" PKG_OUT="$BASE_OUT" \
 PW_ROOT="$PW" PW_APP_OBJ="$APP_OBJ" \
+PW_WINE64_WAIT_WATCHDOG="$PW_WINE64_WAIT_WATCHDOG" \
 PW_WINE64_SERVER_DIRECT_OFF="$PW_WINE64_SERVER_DIRECT_OFF" \
-  "$ROOT/scripts/build-app-ps4.sh" --pkg
+PW_WINE64_HEAP_FLEXIBLE="$PW_WINE64_HEAP_FLEXIBLE" \
+PS4_KERNELBASE32_DLL="$PS4_KERNELBASE32_DLL" \
+PS4_IPHLPAPI32_DLL="$PS4_IPHLPAPI32_DLL" \
+PS4_NTDLL32_DLL="${PS4_NTDLL32_DLL:-}" \
+  "$ROOT/scripts/build-app-ps4.sh" "${APP_ARGS[@]}"
 
 echo "== build the high-address Wine PRX"
 PRX_BUILD="$BUILD/prx"
@@ -44,6 +62,7 @@ mkdir -p "$PRX_BUILD"
 "$CC" -std=gnu11 -O2 -fPIC -DPW_RELOCATABLE_WINE \
   -DPW_WINE64_WAIT_WATCHDOG="$PW_WINE64_WAIT_WATCHDOG" \
   -DPW_WINE64_SERVER_DIRECT_OFF="$PW_WINE64_SERVER_DIRECT_OFF" \
+  -DPW_WINE64_HEAP_FLEXIBLE="$PW_WINE64_HEAP_FLEXIBLE" \
   -I"$PW" -I"$PW/include" -I"$PW/src" -I"$PW/native" -I"$ROOT/src/native" \
   -include "$PW/native/ps5log/ps5log_ps5_net.h" \
   -c "$PW/native/wine64_main.c" -o "$PRX_BUILD/native_wine64_main_reloc.o"
@@ -64,7 +83,7 @@ APP_OBJECTS+=("$PRX_BUILD/native_wine64_main_reloc.o")
 "$CC" -shared -Wl,-Bsymbolic -Wl,-soname,relocated_wine_app.prx \
   -Wl,--warn-unresolved-symbols -o "$PRX_BUILD/app.shared.elf" \
   "${APP_OBJECTS[@]}" "$PRX_BUILD/app_entry.o" "$PRX_BUILD/descriptor.o" \
-  -lSceNet -lSceAudioOut -lSceSystemService -lSceGnmDriver \
+  -lSceNet -lSceNetCtl -lSceAudioOut -lSceSystemService -lSceSysmodule -lSceGnmDriver \
   -lSceVideoOut -lScePad -lSceUserService
 "$OO/bin/linux/create-fself" -in "$PRX_BUILD/app.shared.elf" \
   -out "$PRX_BUILD/app.oelf" -lib "$PRX_BUILD/relocated_wine_app.prx" \
@@ -83,7 +102,7 @@ python3 "$ROOT/scripts/gen-libkernel-symbol-list.py" \
 "$CC" -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC \
   -I"$PW/wine/ps5" -I"$BUILD" "$ROOT/src/reloc-wine-app/stub.c" \
   -o "$BUILD/stub.elf" -lSceNet -lSceAudioOut -lSceSystemService \
-  -lSceGnmDriver -lSceVideoOut -lScePad -lSceUserService
+  -lSceSysmodule -lSceGnmDriver -lSceVideoOut -lScePad -lSceUserService
 "$OO/bin/linux/create-fself" -in "$BUILD/stub.elf" \
   -out "$BUILD/stub.oelf" -eboot "$BUILD/eboot.bin" >/dev/null
 
@@ -100,6 +119,9 @@ done < <(find "$STAGE" -type f -print0)
 "$BUNDLE/orbis-compat/scripts/ps4/make-pkg.sh" \
   --eboot "$BUILD/eboot.bin" --out-dir "$OUT" \
   --title-id "$TITLE_ID" --title "$TITLE" "${EXTRA[@]}"
+if (( NEO )); then
+  "$ROOT/scripts/set-neo.sh" "$OUT"
+fi
 
 PKG_FILE=$(find "$OUT" -maxdepth 1 -type f -name '*.pkg' -print -quit)
 [[ -n "$PKG_FILE" && -s "$PKG_FILE" ]] || { echo "package was not created" >&2; exit 1; }

@@ -1,0 +1,111 @@
+From: Codex <codex@local>
+Subject: [PATCH] wow64native: sample guest PCs at native dispatch boundaries
+
+The dispatched-call-ID samples were zero for every thread in the stalled GTA
+IV startup capture, despite tens of millions of counted transitions. Sample
+the guest EIP already saved in the WOW64 CPU context instead. This is a
+signal-free sample of the instruction that entered each syscall or Unix-call
+thunk, and lets the next capture distinguish a hot guest call site from a
+Wine transition loop.
+
+---
+--- a/wine/wow64native/cpu.c
++++ b/wine/wow64native/cpu.c
+@@ -403,7 +403,10 @@
+                    "movl %edx,0xc0(%r13)\n\t"   /* context->EFlags */
+                    "leaq 4(%r14),%rdx\n\t"
+                    "movl %edx,0xc4(%r13)\n\t"   /* context->Esp */
+-                   PW_PROFILE_ENTRY("40", "72", "movl 16(%rsp),%ecx\n\t")
++                   /* Record the 32-bit guest instruction that entered the
++                    * syscall thunk. RAX is not a reliable syscall ID at
++                    * this boundary on every WOW64 dispatch path. */
++                   PW_PROFILE_ENTRY("40", "72", "movl 0xb8(%r13),%ecx\n\t")
+                    "call pw_native_restore_host_fs\n\t"
+                    "movq %rax,%rcx\n\t"         /* syscall number */
+                    "leaq 8(%r14),%rdx\n\t"      /* parameters */
+@@ -473,7 +476,10 @@
+                    "movl %edx,0xbc(%r13)\n\t"   /* context->SegCs */
+                    "leaq 20(%r14),%rdx\n\t"
+                    "movl %edx,0xc4(%r13)\n\t"   /* context->Esp */
+-                   PW_PROFILE_ENTRY("32", "328", "movl 4(%r14),%ecx\n\tshll $16,%ecx\n\torl 12(%r14),%ecx\n\t")
++                   /* Use the saved guest EIP here too; the unix-call handle
++                    * and ordinal are not consistently available before the
++                    * host FS transition. */
++                   PW_PROFILE_ENTRY("32", "328", "movl 0xb8(%r13),%ecx\n\t")
+                    "call pw_native_restore_host_fs\n\t"
+                    "movq 4(%r14),%rcx\n\t"      /* handle */
+                    "movl 12(%r14),%edx\n\t"     /* code */
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -97,7 +97,7 @@
+     if (!p) return;
+     sys_end = (unsigned int)(syscall_calls >> PW_NATIVE_PROFILE_SAMPLE_SHIFT);
+     unix_end = (unsigned int)(unix_calls >> PW_NATIVE_PROFILE_SAMPLE_SHIFT);
+-    WINE_MESSAGE("PW_NATIVE_CALL_IDS teb=%llx syscall=%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x unix=%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x\n",
++    WINE_MESSAGE("PW_NATIVE_GUEST_PC teb=%llx syscall=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x unix=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+                  state->guest_fs,
+                  p->syscall_samples[(sys_end - 0) & 63], p->syscall_samples[(sys_end - 1) & 63],
+                  p->syscall_samples[(sys_end - 2) & 63], p->syscall_samples[(sys_end - 3) & 63],
+@@ -293,7 +293,7 @@
+          * fixed; ordinary CPU-time and transition counters need no signal. */
+         profile_pc_enabled = (caps & 0x20u) && profile_pc_query &&
+                              getenv("PW_NATIVE_PC") && !strcmp(getenv("PW_NATIVE_PC"), "1");
+-        WINE_MESSAGE("PW_NATIVE_STAGE process_init caps=%x required=%x\n",
++        WINE_MESSAGE("PW_NATIVE_STAGE process_init caps=%08x required=%08x\n",
+                      caps, PW_NW64_CAP_REQUIRED);
+         WINE_MESSAGE("PW_NATIVE_STAGE process_init pc_sampler=%d query=%p\n",
+                      profile_pc_enabled, profile_pc_query);
+@@ -320,7 +320,7 @@
+ {
+     struct pw_native_thread_params *params = args;
+     NTSTATUS status;
+-    WINE_MESSAGE("PW_NATIVE_STAGE thread_init enter args=%p version=%u expected=%u teb=%x initialized=%d\n",
++    WINE_MESSAGE("PW_NATIVE_STAGE thread_init enter args=%p version=%u expected=%u teb=%08x initialized=%d\n",
+                  args, params ? params->version : 0, PW_NATIVE_ABI_VERSION,
+                  params ? (unsigned)params->guest_teb : 0, thread_initialized);
+     if (!params || params->version != PW_NATIVE_ABI_VERSION)
+@@ -332,7 +332,7 @@
+     params->state = 0;
+     if (params->guest_teb < 0x10000 || params->guest_teb > 0xfffff000)
+     {
+-        WINE_MESSAGE("PW_NATIVE_STAGE thread_init invalid-teb teb=%x\n",
++        WINE_MESSAGE("PW_NATIVE_STAGE thread_init invalid-teb teb=%08x\n",
+                      (unsigned)params->guest_teb);
+         return STATUS_INVALID_ADDRESS;
+     }
+@@ -346,12 +346,12 @@
+         }
+         thread_state.status = process_ready ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+         params->state = (unsigned long long)&thread_state;
+-        WINE_MESSAGE("PW_NATIVE_STAGE thread_init reuse state=%p status=%x ready=%d\n",
++        WINE_MESSAGE("PW_NATIVE_STAGE thread_init reuse state=%p status=%08x ready=%d\n",
+                      &thread_state, (unsigned)thread_state.status, process_ready);
+         return thread_state.status;
+     }
+     status = capture_host_fs(&thread_state.host_fs);
+-    WINE_MESSAGE("PW_NATIVE_STAGE thread_init host-fs status=%x base=%llx\n",
++    WINE_MESSAGE("PW_NATIVE_STAGE thread_init host-fs status=%08x base=%llx\n",
+                  (unsigned)status, thread_state.host_fs);
+     if (status) return status;
+ #ifdef __PROSPERO__
+@@ -373,9 +373,9 @@
+         saved_fiber_data = *fiber_data;
+         signal_tcb_fiber_data = (ULONG)((ULONG_PTR)page + fiber_offset);
+         *fiber_data = signal_tcb_fiber_data;
+-        WINE_MESSAGE("PW_NATIVE_STAGE thread_init tcb teb=%x page=%p fiber=%x previous=%x\n",
++        WINE_MESSAGE("PW_NATIVE_STAGE thread_init tcb teb=%08x page=%p fiber=%08x previous=%08x\n",
+                      (unsigned)params->guest_teb, page, signal_tcb_fiber_data, saved_fiber_data);
+-        WINE_MESSAGE("PW_NATIVE_SIGNAL_TCB guest_teb=%x page=%p fiber=%x previous=%x\n",
++        WINE_MESSAGE("PW_NATIVE_SIGNAL_TCB guest_teb=%08x page=%p fiber=%08x previous=%08x\n",
+                      (unsigned)params->guest_teb, page, signal_tcb_fiber_data, saved_fiber_data);
+     }
+ #endif
+@@ -389,7 +389,7 @@
+     thread_state.status = process_ready ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+     thread_initialized = 1;
+     params->state = (unsigned long long)&thread_state;
+-    WINE_MESSAGE("PW_NATIVE_STAGE thread_init ready state=%p status=%x ready=%d\n",
++    WINE_MESSAGE("PW_NATIVE_STAGE thread_init ready state=%p status=%08x ready=%d\n",
+                  &thread_state, (unsigned)thread_state.status, process_ready);
+ #ifdef __PROSPERO__
+     /* The optional watcher samples thread-local state from another thread.

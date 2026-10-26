@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace PS4 execute-flag process call in WoW64 startup
+
+The module-list trace reaches the final execute-protection branch. GTA IV's PE
+has NX_COMPAT clear, so Wine calls NtSetInformationProcess there. Trace the PE
+flags and call boundaries to determine whether this syscall-return path faults.
+Diagnostics only.
+
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -1620,12 +1620,18 @@
+     ERR( "wine startup: alloc_module base-address tree inserted\n" );
+     /* wait until init is called for inserting into InInitializationOrderModuleList */
+ 
++    ERR( "wine startup: alloc_module execute flags characteristics=%04x nx_compat=%d\n",
++         nt->OptionalHeader.DllCharacteristics,
++         !!(nt->OptionalHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT) );
+     if (!(nt->OptionalHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT))
+     {
+         ULONG flags = MEM_EXECUTE_OPTION_ENABLE;
+         WARN( "disabling no-exec because of %s\n", debugstr_w(wm->ldr.BaseDllName.Buffer) );
++        ERR( "wine startup: alloc_module NtSetInformationProcess ProcessExecuteFlags begin flags=%08lx\n", (unsigned long)flags );
+         NtSetInformationProcess( GetCurrentProcess(), ProcessExecuteFlags, &flags, sizeof(flags) );
++        ERR( "wine startup: alloc_module NtSetInformationProcess ProcessExecuteFlags returned\n" );
+     }
++    ERR( "wine startup: alloc_module returning wm=%p\n", wm );
+     return wm;
+ }
+ 

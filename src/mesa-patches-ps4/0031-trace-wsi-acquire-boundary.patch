@@ -1,0 +1,57 @@
+--- a/src/vulkan/wsi/wsi_common_headless.c
++++ b/src/vulkan/wsi/wsi_common_headless.c
+@@ -408,6 +408,7 @@
+    int32_t orbis_flip_q[8];
+    uint32_t orbis_flip_n;
+    int32_t orbis_acquire_starvation_logged;
++   int32_t orbis_acquire_trace_count;
+ #endif
+    struct wsi_headless_image images[0];
+ };
+@@ -468,6 +469,13 @@
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    timespec_add(&end_time, &rel_timeout, &start_time);
+ 
++#ifdef HAVE_ORBIS_PLATFORM
++   const int32_t acquire_trace = p_atomic_inc_return(&chain->orbis_acquire_trace_count);
++   if (acquire_trace <= 8)
++      mesa_logi("wsi/orbis: 0031 acquire begin #%d timeout=%llu ns images=%u",
++                acquire_trace, (unsigned long long)info->timeout, chain->base.image_count);
++#endif
++
+    while (1) {
+       /* Try to find a free image. */
+       for (uint32_t i = 0; i < chain->base.image_count; i++) {
+@@ -482,6 +490,11 @@
+             *image_index = i;
+             chain->images[i].busy_on_host = true;
+             chain->images[i].busy_on_device = true;
++#ifdef HAVE_ORBIS_PLATFORM
++            if (acquire_trace <= 8)
++               mesa_logi("wsi/orbis: 0031 acquire return #%d VK_SUCCESS image=%u",
++                         acquire_trace, i);
++#endif
+             return VK_SUCCESS;
+          }
+       }
+@@ -548,6 +561,11 @@
+           * wsi_common_drm.c and wsi_common_wayland.c already spell exactly this out; headless (and
+           * metal) did not, which is upstream's omission rather than this port's. Same expression as
+           * theirs so the three read alike. */
++#ifdef HAVE_ORBIS_PLATFORM
++         if (acquire_trace <= 8)
++            mesa_logi("wsi/orbis: 0031 acquire return #%d %s",
++                      acquire_trace, info->timeout != 0 ? "VK_TIMEOUT" : "VK_NOT_READY");
++#endif
+          return info->timeout != 0 ? VK_TIMEOUT : VK_NOT_READY;
+       }
+    }
+@@ -961,6 +979,8 @@
+          result = VK_ERROR_INITIALIZATION_FAILED;
+          goto fail_destroy_images;
+       }
++      mesa_logi("wsi/orbis: 0031 acquire tracing active - images=%u zero_copy=%u",
++                chain->base.image_count, chain->orbis_zero_copy);
+    }
+ #endif
+ 

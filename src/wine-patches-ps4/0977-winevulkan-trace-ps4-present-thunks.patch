@@ -1,0 +1,43 @@
+From: Codex <codex@localhost>
+Subject: winevulkan: Trace PS4 Vulkan present thunks
+
+Mark entry to the Win32 Vulkan present thunk and the Unix PE32 dispatch
+thunk. This shows whether DXVK reaches Wine's Unix Vulkan dispatcher before
+the PS5 user-driver present hook.
+
+---
+diff --git a/dlls/winevulkan/loader_thunks.c b/dlls/winevulkan/loader_thunks.c
+--- a/dlls/winevulkan/loader_thunks.c
++++ b/dlls/winevulkan/loader_thunks.c
+@@ -6496,7 +6496,14 @@ VkResult WINAPI vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
+ {
+     struct vkQueuePresentKHR_params params;
++    static BOOL reported;
++
++    if (!reported)
++    {
++        ERR("PW_VK_PRESENT Win32 thunk reached\n");
++        reported = TRUE;
++    }
+     params.queue = queue;
+     params.pPresentInfo = pPresentInfo;
+     UNIX_CALL_CHECKED(vkQueuePresentKHR, &params);
+     return params.result;
+ }
+diff --git a/dlls/winevulkan/vulkan_thunks.c b/dlls/winevulkan/vulkan_thunks.c
+--- a/dlls/winevulkan/vulkan_thunks.c
++++ b/dlls/winevulkan/vulkan_thunks.c
+@@ -69764,6 +69764,13 @@ static NTSTATUS thunk32_vkQueuePresentKHR(void *args)
+     struct conversion_context local_ctx;
+     struct conversion_context *ctx = &local_ctx;
++    static BOOL reported;
++
++    if (!reported)
++    {
++        ERR("PW_VK_PRESENT Unix PE32 thunk reached\n");
++        reported = TRUE;
++    }
+ 
+     TRACE("%#x, %#x\n", params->queue, params->pPresentInfo);
+ 
+     init_conversion_context(ctx);

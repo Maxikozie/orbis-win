@@ -64,7 +64,7 @@ $CC -std=c11 -O2 -Wall -Wextra -Werror -fPIC \
 
 echo "== 2. descriptor =="
 python3 "$pw/tools/gen_prx_descriptor.py" "$work/obj/libvulkan_desc.c" \
-    vkGetInstanceProcAddr vkGetDeviceProcAddr
+    vkGetInstanceProcAddr vkGetDeviceProcAddr pw_videoout_cursor
 $CC -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$pw/wine/ps5" \
     -c "$work/obj/libvulkan_desc.c" -o "$work/obj/libvulkan_desc.o"
 

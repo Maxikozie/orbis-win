@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace PS4 WoW64 module registration
+
+The initial-thread trace reaches init_wow64, but the process faults in
+libkernel before that function reports its module setup complete. Mark each
+operation while registering the WOW64 main image and ntdll so the next run can
+isolate the call that precedes the invalid syscall return stack.
+
+This patch changes diagnostics only.
+
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -2359,11 +2359,14 @@
+     WINE_MODREF *wm;
+     void *module;
+ 
++    ERR( "wine startup: loader build_ntdll_module begin thunk=%p\n", LdrInitializeThunk );
+     NtQueryVirtualMemory( GetCurrentProcess(), LdrInitializeThunk, MemoryBasicInformation,
+                           &meminfo, sizeof(meminfo), NULL );
+     module = meminfo.AllocationBase;
++    ERR( "wine startup: loader ntdll allocation base=%p\n", module );
+     wm = alloc_module( module, &nt_name, TRUE );
+     assert( wm );
++    ERR( "wine startup: loader ntdll module allocated wm=%p\n", wm );
+     wm->ldr.Flags &= ~LDR_DONT_RESOLVE_REFS;
+     node_ntdll = wm->ldr.DdagNode;
+     if (TRACE_ON(relay)) RELAY_SetupDLL( module );
+@@ -4326,9 +4329,13 @@
+     RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
+     void *module = NtCurrentTeb()->Peb->ImageBaseAddress;
+ 
++    ERR( "wine startup: loader build_wow64_main_module begin image=%p path=%s\n",
++         module, debugstr_w( params->ImagePathName.Buffer ) );
+     RtlDosPathNameToNtPathName_U_WithStatus( params->ImagePathName.Buffer, &nt_name, NULL, NULL );
++    ERR( "wine startup: loader wow64 image path converted nt_name=%s\n", debugstr_us( &nt_name ) );
+     wm = alloc_module( module, &nt_name, FALSE );
+     assert( wm );
++    ERR( "wine startup: loader wow64 main module allocated wm=%p\n", wm );
+     wm->ldr.LoadCount = -1;
+     RtlFreeUnicodeString( &nt_name );
+ }
+@@ -4348,7 +4355,9 @@
+         NTSTATUS status;
+         static const WCHAR wow64_path[] = L"C:\\windows\\system32\\wow64.dll";
+ 
++        ERR( "wine startup: loader building wow64 main module\n" );
+         build_wow64_main_module();
++        ERR( "wine startup: loader building initial ntdll module\n" );
+         build_ntdll_module();
+         ERR( "wine startup: loader init_wow64 modules built\n" );
+ 

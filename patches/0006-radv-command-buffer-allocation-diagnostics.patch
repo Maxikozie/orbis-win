@@ -1,0 +1,198 @@
+diff --git a/src/amd/vulkan/radv_cmd_buffer.c b/src/amd/vulkan/radv_cmd_buffer.c
+index 924bd60..bcfe12f 100644
+--- a/src/amd/vulkan/radv_cmd_buffer.c
++++ b/src/amd/vulkan/radv_cmd_buffer.c
+@@ -49,6 +49,8 @@
+ 
+ #include "util/compiler.h"
+ #include "util/fast_idiv_by_const.h"
++#include "util/log.h"
++#include "util/simple_mtx.h"
+ #include "util/perf/u_trace.h"
+ 
+ enum {
+@@ -1273,11 +1275,15 @@ radv_create_cmd_buffer(struct vk_command_pool *pool, VkCommandBufferLevel level,
+    struct radv_cmd_buffer *cmd_buffer;
+ 
+    cmd_buffer = vk_zalloc(&pool->alloc, sizeof(*cmd_buffer), 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+-   if (cmd_buffer == NULL)
++   if (cmd_buffer == NULL) {
++      mesa_loge("RADV_ALLOC_CMD_BUFFER stage=object result=%d size=%zu", VK_ERROR_OUT_OF_HOST_MEMORY,
++                sizeof(*cmd_buffer));
+       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
++   }
+ 
+    VkResult result = vk_command_buffer_init(pool, &cmd_buffer->vk, &radv_cmd_buffer_ops, level);
+    if (result != VK_SUCCESS) {
++      mesa_loge("RADV_ALLOC_CMD_BUFFER stage=common-init result=%d cmd=%p", result, (void *)cmd_buffer);
+       vk_free(&cmd_buffer->vk.pool->alloc, cmd_buffer);
+       return result;
+    }
+@@ -1314,6 +1320,8 @@ radv_create_cmd_buffer(struct vk_command_pool *pool, VkCommandBufferLevel level,
+       result =
+          radv_create_cmd_stream(device, ip, cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY, &cmd_buffer->cs);
+       if (result != VK_SUCCESS) {
++         mesa_loge("RADV_ALLOC_CMD_BUFFER stage=cmd-stream result=%d ip=%d cmd=%p", result, ip,
++                   (void *)cmd_buffer);
+          radv_destroy_cmd_buffer(&cmd_buffer->vk);
+          return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       }
+@@ -1965,6 +1973,57 @@ radv_descriptor_get_va(const struct radv_descriptor_state *descriptors_state, un
+    return va;
+ }
+ 
++#ifdef HAVE_ORBIS_PLATFORM
++#define RADV_ORBIS_GTA_SET_TRACE_MAX 256
++
++static simple_mtx_t radv_orbis_gta_set_trace_lock = SIMPLE_MTX_INITIALIZER;
++static uint64_t radv_orbis_gta_set_trace_vas[RADV_ORBIS_GTA_SET_TRACE_MAX];
++static unsigned radv_orbis_gta_set_trace_count;
++
++static bool
++radv_orbis_gta_set_trace_first(uint64_t va)
++{
++   const char *env = getenv("ORBIS_TRACE_GTA_SET");
++   if (!env || env[0] != '1' || env[1] != '\0')
++      return false;
++
++   simple_mtx_lock(&radv_orbis_gta_set_trace_lock);
++   for (unsigned i = 0; i < radv_orbis_gta_set_trace_count; i++) {
++      if (radv_orbis_gta_set_trace_vas[i] == va) {
++         simple_mtx_unlock(&radv_orbis_gta_set_trace_lock);
++         return false;
++      }
++   }
++   if (radv_orbis_gta_set_trace_count == RADV_ORBIS_GTA_SET_TRACE_MAX) {
++      simple_mtx_unlock(&radv_orbis_gta_set_trace_lock);
++      return false;
++   }
++   radv_orbis_gta_set_trace_vas[radv_orbis_gta_set_trace_count++] = va;
++   simple_mtx_unlock(&radv_orbis_gta_set_trace_lock);
++   return true;
++}
++
++static void
++radv_orbis_trace_gta_descriptor_set(const struct radv_shader *shader, unsigned set_idx, unsigned sgpr_idx,
++                                   const struct radv_descriptor_set *set)
++{
++   if (!set || !radv_orbis_gta_set_trace_first(set->header.va))
++      return;
++
++   const struct radv_descriptor_set_layout *layout = set->header.layout;
++   mesa_logi("radv/orbis: GTA_SET stage=%u shader=0x%" PRIx64 " set=%u sgpr=%u va=0x%" PRIx64
++             " set_size=%u layout_size=%u bindings=%u",
++             shader->info.stage, shader->va, set_idx, sgpr_idx, set->header.va, set->header.size, layout->size,
++             layout->binding_count);
++   for (unsigned binding = 0; binding < layout->binding_count; binding++) {
++      const struct radv_descriptor_set_binding_layout *binding_layout = &layout->binding[binding];
++      mesa_logi("radv/orbis: GTA_SET_BIND va=0x%" PRIx64 " binding=%u type=%u offset=0x%x size=%u array=%u",
++                set->header.va, binding, binding_layout->type, binding_layout->offset, binding_layout->size,
++                binding_layout->array_size);
++   }
++}
++#endif
++
+ static void
+ radv_emit_descriptors_per_stage(const struct radv_device *device, struct radv_cmd_stream *cs,
+                                 const struct radv_shader *shader, const struct radv_descriptor_state *descriptors_state)
+@@ -2008,6 +2067,11 @@ radv_emit_descriptors_per_stage(const struct radv_device *device, struct radv_cm
+             radeon_set_sh_reg_seq(sh_offset, count);
+ 
+             for (int i = 0; i < count; i++) {
++#ifdef HAVE_ORBIS_PLATFORM
++               const unsigned set_idx = start + i;
++               radv_orbis_trace_gta_descriptor_set(shader, set_idx, loc->sgpr_idx + i,
++                                                   descriptors_state->sets[set_idx]);
++#endif
+                const uint64_t va = radv_descriptor_get_va(descriptors_state, start + i);
+ 
+                radeon_emit(va);
+@@ -7198,6 +7262,38 @@ radv_prims_for_vertices(struct radv_prim_vertex_count *info, unsigned num)
+    return 1 + ((num - info->min) / info->incr);
+ }
+ 
++#ifdef HAVE_ORBIS_PLATFORM
++static bool
++radv_orbis_force_wd_switch_on_eop(void)
++{
++   static int force = -1;
++
++   if (force < 0) {
++      const char *const e = getenv("ORBIS_FORCE_WD_SWITCH_ON_EOP");
++      force = e && e[0] == '1' && e[1] == '\0';
++      if (force)
++         mesa_logi("radv/orbis: forcing WD_SWITCH_ON_EOP for the Neo draw-path experiment");
++   }
++
++   return force;
++}
++
++static bool
++radv_orbis_disable_ia_switch_on_eoi(void)
++{
++   static int disable = -1;
++
++   if (disable < 0) {
++      const char *const e = getenv("ORBIS_DISABLE_IA_SWITCH_ON_EOI");
++      disable = e && e[0] == '1' && e[1] == '\0';
++      if (disable)
++         mesa_logi("radv/orbis: disabling IA_SWITCH_ON_EOI for the Neo draw-path experiment");
++   }
++
++   return disable;
++}
++#endif
++
+ static const struct radv_prim_vertex_count prim_size_table[] = {
+    [V_008958_DI_PT_NONE] = {0, 0},          [V_008958_DI_PT_POINTLIST] = {1, 1},
+    [V_008958_DI_PT_LINELIST] = {2, 2},      [V_008958_DI_PT_LINESTRIP] = {2, 1},
+@@ -7301,10 +7397,24 @@ radv_get_ia_multi_vgt_param(struct radv_cmd_buffer *cmd_buffer, bool instanced_d
+       if (count_from_stream_output)
+          wd_switch_on_eop = true;
+ 
++#ifdef HAVE_ORBIS_PLATFORM
++      /* Test the base-mode IA scheduling policy on Gladius without changing the reported topology.
++       * Base mode has max_se < 4 and therefore enables WD_SWITCH_ON_EOP here; Neo skips it and
++       * enables IA_SWITCH_ON_EOI. The 256/257 point boundary makes this a targeted A/B. */
++      if (gpu_info->family == CHIP_GLADIUS && radv_orbis_force_wd_switch_on_eop())
++         wd_switch_on_eop = true;
++#endif
++
+       /* Required on GFX7 and later. */
+       if (gpu_info->max_se > 2 && !wd_switch_on_eop)
+          ia_switch_on_eoi = true;
+ 
++#ifdef HAVE_ORBIS_PLATFORM
++      /* Keep Neo's WD policy and disable only its IA end-of-input switch. */
++      if (gpu_info->family == CHIP_GLADIUS && radv_orbis_disable_ia_switch_on_eoi())
++         ia_switch_on_eoi = false;
++#endif
++
+       /* Required by Hawaii and, for some special cases, by GFX8. */
+       if (ia_switch_on_eoi &&
+           (gpu_info->family == CHIP_HAWAII ||
+diff --git a/src/vulkan/runtime/vk_command_pool.c b/src/vulkan/runtime/vk_command_pool.c
+index 3eea789..cd634e4 100644
+--- a/src/vulkan/runtime/vk_command_pool.c
++++ b/src/vulkan/runtime/vk_command_pool.c
+@@ -29,6 +29,7 @@
+ #include "vk_common_entrypoints.h"
+ #include "vk_device.h"
+ #include "vk_log.h"
++#include "util/log.h"
+ 
+ static bool
+ should_recycle_command_buffers(struct vk_device *device)
+@@ -216,8 +217,11 @@ vk_common_AllocateCommandBuffers(VkDevice device,
+          vk_command_pool_find_free(pool, pAllocateInfo->level);
+       if (cmd_buffer == NULL) {
+          result = pool->command_buffer_ops->create(pool, pAllocateInfo->level, &cmd_buffer);
+-         if (unlikely(result != VK_SUCCESS))
++         if (unlikely(result != VK_SUCCESS)) {
++            mesa_loge("VK_ALLOC_CMD_BUFFERS failed result=%d index=%u count=%u level=%u pool=%p", result, i,
++                      pAllocateInfo->commandBufferCount, pAllocateInfo->level, (void *)pool);
+             goto fail;
++         }
+       }
+ 
+       cmd_buffer->level = pAllocateInfo->level;

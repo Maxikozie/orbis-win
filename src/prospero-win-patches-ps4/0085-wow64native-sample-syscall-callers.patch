@@ -1,0 +1,61 @@
+From: Codex <codex@local>
+Subject: [PATCH] wow64native: sample guest syscall callers
+
+The guest-PC profile identifies repeated calls through a win32u syscall stub, but not the code that invokes it. Capture the caller return address from the guest stack alongside each sampled syscall PC so the next run can attribute the hot stub to a module and call site.
+
+---
+--- a/wine/wow64native/wow64native.h
++++ b/wine/wow64native/wow64native.h
+@@ -46,6 +46,9 @@
+     /* A 64-entry rolling sample of every 1024th dispatched call. */
+     unsigned int syscall_samples[PW_NATIVE_PROFILE_SAMPLE_COUNT];
+     unsigned int unix_samples[PW_NATIVE_PROFILE_SAMPLE_COUNT];
++    /* Guest return addresses for sampled syscall stubs, parallel to
++     * syscall_samples. */
++    unsigned int syscall_caller_samples[PW_NATIVE_PROFILE_SAMPLE_COUNT];
+ };
+ /* Unix-owned thread state; accessing Unix TLS requires host FS. */
+ struct pw_native_thread_state
+--- a/wine/wow64native/cpu.c
++++ b/wine/wow64native/cpu.c
+@@ -130,7 +130,8 @@
+ C_ASSERT(offsetof(struct pw_native_profile, report_proc) == 64);
+ C_ASSERT(offsetof(struct pw_native_profile, syscall_samples) == 72);
+ C_ASSERT(offsetof(struct pw_native_profile, unix_samples) == 328);
+-C_ASSERT(sizeof(struct pw_native_profile) == 584);
++C_ASSERT(offsetof(struct pw_native_profile, syscall_caller_samples) == 584);
++C_ASSERT(sizeof(struct pw_native_profile) == 840);
+ 
+ /* No C or TLS lookup before host FS. Preserve guest flags/registers; the
+  * profile pointer is checked on every entry and is NULL by default. */
+@@ -406,7 +407,10 @@
+                    /* Record the 32-bit guest instruction that entered the
+                     * syscall thunk. RAX is not a reliable syscall ID at
+                     * this boundary on every WOW64 dispatch path. */
+-                   PW_PROFILE_ENTRY("40", "72", "movl 0xb8(%r13),%ecx\n\t")
++                   PW_PROFILE_ENTRY("40", "584",
++                                    "movl 0xb8(%r13),%ecx\n\t"
++                                    "movl %ecx,72(%rax,%rdx,4)\n\t"
++                                    "movl 4(%r14),%ecx\n\t")
+                    "call pw_native_restore_host_fs\n\t"
+                    "movq %rax,%rcx\n\t"         /* syscall number */
+                    "leaq 8(%r14),%rdx\n\t"      /* parameters */
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -115,6 +115,16 @@
+                  p->unix_samples[(unix_end - 10) & 63], p->unix_samples[(unix_end - 11) & 63],
+                  p->unix_samples[(unix_end - 12) & 63], p->unix_samples[(unix_end - 13) & 63],
+                  p->unix_samples[(unix_end - 14) & 63], p->unix_samples[(unix_end - 15) & 63]);
++    WINE_MESSAGE("PW_NATIVE_SYSCALL_CALLER teb=%llx caller=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
++                 state->guest_fs,
++                 p->syscall_caller_samples[(sys_end - 0) & 63], p->syscall_caller_samples[(sys_end - 1) & 63],
++                 p->syscall_caller_samples[(sys_end - 2) & 63], p->syscall_caller_samples[(sys_end - 3) & 63],
++                 p->syscall_caller_samples[(sys_end - 4) & 63], p->syscall_caller_samples[(sys_end - 5) & 63],
++                 p->syscall_caller_samples[(sys_end - 6) & 63], p->syscall_caller_samples[(sys_end - 7) & 63],
++                 p->syscall_caller_samples[(sys_end - 8) & 63], p->syscall_caller_samples[(sys_end - 9) & 63],
++                 p->syscall_caller_samples[(sys_end - 10) & 63], p->syscall_caller_samples[(sys_end - 11) & 63],
++                 p->syscall_caller_samples[(sys_end - 12) & 63], p->syscall_caller_samples[(sys_end - 13) & 63],
++                 p->syscall_caller_samples[(sys_end - 14) & 63], p->syscall_caller_samples[(sys_end - 15) & 63]);
+ }
+ 
+ #ifdef __PROSPERO__

@@ -1,0 +1,65 @@
+From: Codex <codex@local>
+Subject: wow64native: log a bounded sampled guest frame chain
+
+The 10094 native PC sample found a stable return value, but it did not resolve
+to a call boundary in the loaded game module. Log up to four conventional
+32-bit EBP frames, bounded near the sampled guest stack, so the next capture
+can validate the frame layout before attributing the THQNO busy wait.
+
+---
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -155,7 +155,8 @@
+             {
+                 unsigned long long before = 0, sequence = 0, rip = 0, rsp = 0, cs = 0;
+                 unsigned long long rax = 0, rdi = 0, rsi = 0, rdx = 0, r10 = 0, rbp = 0;
+-                unsigned int frame_return = 0;
++                unsigned int frames[8] = {0};
++                unsigned int frame_count = 0;
+                 int rc;
+                 profile_pc_query(&before, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+                 rc = pthread_kill(entry->native_thread, SIGPROF);
+@@ -168,16 +169,33 @@
+                         profile_pc_query(&sequence, &rip, &rsp, &cs, &rax, &rdi, &rsi, &rdx, &r10, &rbp);
+                         if (sequence != before) break;
+                     }
+-                    /* For a 32-bit frame pointer close to ESP, copy the caller
+-                     * return address from [EBP+4]. This runs on the watcher
+-                     * thread after the signal snapshot, and is opt-in with
+-                     * native profiling; it identifies waits inside stripped
+-                     * game DLLs without a core dump. */
++                    /* Walk at most four conventional 32-bit EBP frames. The
++                     * return-address-only sample was not enough to validate
++                     * the caller in stripped game DLLs. Keep every read near
++                     * the sampled guest stack and stop on a non-monotonic or
++                     * implausible frame pointer. This is opt-in diagnostic
++                     * code and runs on the watcher thread. */
+                     if ((cs & 0xffff) == 0x33 && rbp >= rsp && rbp - rsp < 0x100000 &&
+                         rbp < 0x7ffff000)
+-                        memcpy(&frame_return, (const void *)(uintptr_t)(rbp + 4), sizeof(frame_return));
+-                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx seq=%llu rip=%llx rsp=%llx rbp=%llx ret=%08x cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
+-                                 entry->state->guest_fs, sequence, rip, rsp, rbp, frame_return, cs,
++                    {
++                        unsigned long long frame = rbp;
++                        for (unsigned int i = 0; i < 4; ++i)
++                        {
++                            unsigned int previous, ret;
++                            if (frame < rsp || frame - rsp >= 0x100000 || frame >= 0x7ffff000) break;
++                            memcpy(&previous, (const void *)(uintptr_t)frame, sizeof(previous));
++                            memcpy(&ret, (const void *)(uintptr_t)(frame + sizeof(previous)), sizeof(ret));
++                            frames[2 * i] = previous;
++                            frames[2 * i + 1] = ret;
++                            frame_count++;
++                            if (previous <= frame || previous - rsp >= 0x100000 || previous >= 0x7ffff000) break;
++                            frame = previous;
++                        }
++                    }
++                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx seq=%llu rip=%llx rsp=%llx rbp=%llx ret=%08x frames=%u[%08x/%08x,%08x/%08x,%08x/%08x,%08x/%08x] cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
++                                 entry->state->guest_fs, sequence, rip, rsp, rbp, frames[1], frame_count,
++                                 frames[0], frames[1], frames[2], frames[3], frames[4], frames[5],
++                                 frames[6], frames[7], cs,
+                                  rax, rdi, rsi, rdx, r10,
+                                  sequence != before ? "ok" : "timeout");
+                 }
+-- 
+2.43.0

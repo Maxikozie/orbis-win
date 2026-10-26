@@ -1,0 +1,215 @@
+From: Codex <codex@localhost>
+Subject: [PATCH] ntdll: trace the PS4 startup signal handoff
+
+Add opt-in, no-behavior-change milestones around server_init_process_done
+and signal_init_process. Trace every signal registration so a native startup
+fault can be localized to signal setup, wineserver handoff, or guest entry.
+The existing WINE_PS5_TRACE_STARTUP environment switch gates all messages.
+
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 0d9515c390..834aea32d8 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -2476,6 +2476,23 @@ size_t server_init_process(void)
+ /***********************************************************************
+  *           server_init_process_done
+  */
++#ifdef __PROSPERO__
++static void server_startup_mark( const char *step )
++{
++    static int enabled = -1;
++
++    if (enabled < 0) enabled = getenv( "WINE_PS5_TRACE_STARTUP" ) != NULL;
++    if (enabled)
++    {
++        char line[128];
++        int len = snprintf( line, sizeof(line), "wine startup: server_init_process_done %s\n", step );
++        if (len > 0) wine_write_stderr( line, len < sizeof(line) ? len : sizeof(line) - 1 );
++    }
++}
++#else
++#define server_startup_mark(step) ((void)0)
++#endif
++
+ void server_init_process_done(void)
+ {
+     unsigned int status;
+@@ -2483,9 +2500,12 @@ void server_init_process_done(void)
+     struct thread_data *data = get_thread_data();
+     TEB64 *teb64 = get_teb64( data->teb );
+ 
++    server_startup_mark( "entered" );
+     if (!get_device_info( initial_cwd, &info ) && (info.Characteristics & FILE_REMOVABLE_MEDIA))
+         chdir( "/" );
++    server_startup_mark( "get_device_info done" );
+     close( initial_cwd );
++    server_startup_mark( "initial cwd closed" );
+ 
+ #ifdef __APPLE__
+     send_server_task_port();
+@@ -2496,10 +2516,15 @@ void server_init_process_done(void)
+     /* Install signal handlers; this cannot be done earlier, since we cannot
+      * send exceptions to the debugger before the create process event that
+      * is sent by init_process_done */
++    server_startup_mark( "signal_init_process begin" );
+     signal_init_process( data->teb );
++    server_startup_mark( "signal_init_process done" );
++    server_startup_mark( "init_teb_data begin" );
+     init_teb_data( data );
++    server_startup_mark( "init_teb_data done" );
+ 
+     /* Signal the parent process to continue */
++    server_startup_mark( "init_process_done request begin" );
+     SERVER_START_REQ( init_process_done )
+     {
+         req->teb = wine_server_client_ptr( teb64 ? (void *)teb64 : (void *)data->teb );
+@@ -2508,8 +2533,10 @@ void server_init_process_done(void)
+         data->suspend = reply->suspend;
+     }
+     SERVER_END_REQ;
++    server_startup_mark( "init_process_done request done" );
+ 
+     assert( !status );
++    server_startup_mark( "signal_start_thread begin" );
+     signal_start_thread( main_image_info.TransferAddress, peb, data->teb );
+ }
+ 
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 598293096c..994531af6e 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -236,8 +236,36 @@ static int pw_native_sigaction( int signal, const struct sigaction *action,
+     }
+     return sigaction( signal, action, previous );
+ }
++
++static void pw_native_startup_mark( const char *step, int signal, int result )
++{
++    static int enabled = -1;
++
++    if (enabled < 0) enabled = getenv( "WINE_PS5_TRACE_STARTUP" ) != NULL;
++    if (enabled)
++    {
++        char line[128];
++        int len = signal >= 0 ?
++            snprintf( line, sizeof(line), "wine startup: native_signal %s signal=%d result=%d\n",
++                      step, signal, result ) :
++            snprintf( line, sizeof(line), "wine startup: native_signal %s\n", step );
++        if (len > 0) wine_write_stderr( line, len < (int)sizeof(line) ? len : (int)sizeof(line) - 1 );
++    }
++}
++
++static int pw_native_startup_sigaction( int signal, const struct sigaction *action,
++                                        struct sigaction *previous )
++{
++    int result;
++    pw_native_startup_mark( "sigaction begin", signal, -2 );
++    result = pw_native_sigaction( signal, action, previous );
++    pw_native_startup_mark( "sigaction done", signal, result );
++    return result;
++}
+ #else
+ #define pw_native_sigaction sigaction
++#define pw_native_startup_sigaction sigaction
++#define pw_native_startup_mark(step, signal, result) ((void)0)
+ #endif
+ 
+ static USHORT cs32_sel;  /* selector for %cs in 32-bit mode */
+@@ -3698,9 +3726,11 @@ void signal_init_process( TEB *teb )
+     WOW_TEB *wow_teb = get_wow_teb( teb );
+     void *ptr;
+ 
++    pw_native_startup_mark( "signal_init_process entered", -1, 0 );
+     if (user_shared_data->XState.Size) xstate_size = user_shared_data->XState.Size - sizeof(XSAVE_FORMAT);
+     frame_size = offsetof( struct syscall_frame, xstate ) + xstate_size;
+     xstate_extended_features = user_shared_data->XState.EnabledFeatures & ~(UINT64)3;
++    pw_native_startup_mark( "xstate configured", -1, 0 );
+ 
+     /* sneak in a syscall dispatcher pointer at a fixed address (7ffe1000) */
+     ptr = (char *)user_shared_data + page_size;
+@@ -3721,6 +3751,7 @@ void signal_init_process( TEB *teb )
+         anon_mmap_fixed( ptr, page_size, PROT_READ | PROT_WRITE, 0 );
+         *(void **)ptr = __wine_syscall_dispatcher;
+     }
++    pw_native_startup_mark( "shared-data dispatcher mapped", -1, 0 );
+ 
+     __asm__( "movw %%cs,%0" : "=m" (cs64_sel) );
+     __asm__( "movw %%ss,%0" : "=m" (ds64_sel) );
+@@ -3736,44 +3767,48 @@ void signal_init_process( TEB *teb )
+         cs32_sel = GSEL(GUCODE32_SEL, SEL_UPL);
+ #endif
+     }
++    pw_native_startup_mark( "selectors configured", -1, 0 );
+ 
+     alloc_syscall_frame( (frame_size + 63) & ~63 );
++    pw_native_startup_mark( "syscall frame allocated", -1, 0 );
+     signal_alloc_thread( teb );
++    pw_native_startup_mark( "signal_alloc_thread done", -1, 0 );
+ 
+ #ifdef __PROSPERO__
+     pw_native_resolve_kernel();
++    pw_native_startup_mark( "libkernel resolve done", -1, 0 );
+ #endif
+     sig_act.sa_mask = server_block_set;
+     sig_act.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
+ 
+     sig_act.sa_sigaction = PW_SIGNAL_HANDLER(int);
+-    if (pw_native_sigaction( SIGINT, &sig_act, NULL ) == -1) goto error;
++    if (pw_native_startup_sigaction( SIGINT, &sig_act, NULL ) == -1) goto error;
+     sig_act.sa_sigaction = PW_SIGNAL_HANDLER(fpe);
+-    if (pw_native_sigaction( SIGFPE, &sig_act, NULL ) == -1) goto error;
++    if (pw_native_startup_sigaction( SIGFPE, &sig_act, NULL ) == -1) goto error;
+     sig_act.sa_sigaction = PW_SIGNAL_HANDLER(abrt);
+-    if (pw_native_sigaction( SIGABRT, &sig_act, NULL ) == -1) goto error;
++    if (pw_native_startup_sigaction( SIGABRT, &sig_act, NULL ) == -1) goto error;
+     sig_act.sa_sigaction = PW_SIGNAL_HANDLER(quit);
+-    if (pw_native_sigaction( SIGQUIT, &sig_act, NULL ) == -1) goto error;
++    if (pw_native_startup_sigaction( SIGQUIT, &sig_act, NULL ) == -1) goto error;
+     sig_act.sa_sigaction = PW_SIGNAL_HANDLER(usr1);
+-    if (pw_native_sigaction( SIGUSR1, &sig_act, NULL ) == -1) goto error;
++    if (pw_native_startup_sigaction( SIGUSR1, &sig_act, NULL ) == -1) goto error;
+     sig_act.sa_sigaction = PW_SIGNAL_HANDLER(trap);
+-    if (pw_native_sigaction( SIGTRAP, &sig_act, NULL ) == -1) goto error;
++    if (pw_native_startup_sigaction( SIGTRAP, &sig_act, NULL ) == -1) goto error;
+     sig_act.sa_sigaction = PW_SIGNAL_HANDLER(segv);
+-    if (pw_native_sigaction( SIGSEGV, &sig_act, NULL ) == -1) goto error;
+-    if (pw_native_sigaction( SIGILL, &sig_act, NULL ) == -1) goto error;
+-    if (pw_native_sigaction( SIGBUS, &sig_act, NULL ) == -1) goto error;
++    if (pw_native_startup_sigaction( SIGSEGV, &sig_act, NULL ) == -1) goto error;
++    if (pw_native_startup_sigaction( SIGILL, &sig_act, NULL ) == -1) goto error;
++    if (pw_native_startup_sigaction( SIGBUS, &sig_act, NULL ) == -1) goto error;
+ #if defined(__APPLE__) || defined(__linux__) || defined(__PROSPERO__)
+     sig_act.sa_sigaction = sigsys_handler;
+-    if (pw_native_sigaction( SIGSYS, &sig_act, NULL ) == -1) goto error;
++    if (pw_native_startup_sigaction( SIGSYS, &sig_act, NULL ) == -1) goto error;
+ #endif
+ 
+ #ifdef __PROSPERO__
+     {
+         struct sigaction old_act;
+-        if (pw_native_sigaction( SIGPROF, NULL, &old_act ) == 0 && old_act.sa_handler == SIG_DFL)
++        if (pw_native_startup_sigaction( SIGPROF, NULL, &old_act ) == 0 && old_act.sa_handler == SIG_DFL)
+         {
+             sig_act.sa_sigaction = PW_SIGNAL_HANDLER(profile);
+-            if (pw_native_sigaction( SIGPROF, &sig_act, NULL ) == 0) pw_native_caps |= 0x20;
++            if (pw_native_startup_sigaction( SIGPROF, &sig_act, NULL ) == 0) pw_native_caps |= 0x20;
+             else TRACE_(seh)( "could not install native PC sampler signal\n" );
+         }
+         else TRACE_(seh)( "native PC sampler unavailable: SIGPROF already owned\n" );
+@@ -3785,7 +3820,7 @@ void signal_init_process( TEB *teb )
+     {
+         struct sigaction act;
+ 
+-        if (pw_native_sigaction( SIGSYS, NULL, &act ) == -1)
++        if (pw_native_startup_sigaction( SIGSYS, NULL, &act ) == -1)
+         {
+             WARN_(seh)( "failed to retrieve signal restorer trampoline\n" );
+             syscall_dispatch_enabled = FALSE;
+@@ -3808,6 +3843,7 @@ void signal_init_process( TEB *teb )
+                  (unsigned long long)user_shared_data->XState.EnabledFeatures, xstate_size,
+                  user_shared_data->XState.Features[2].Offset, user_shared_data->XState.Features[2].Size );
+ #endif
++    pw_native_startup_mark( "signal_init_process complete", -1, 0 );
+     return;
+ 
+  error:

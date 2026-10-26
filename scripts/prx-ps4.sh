@@ -120,6 +120,29 @@ $CC -std=gnu11 -O2 -Wall -Werror -fPIC -D__WINESRC__ -DWINE_UNIX_LIB -D_REENTRAN
     -c "$work/source/dlls/xinput1_3/unixlib.c" -o "$prx/obj/xinput_unixlib.o" ||
     { echo "  X xinput1_3: cannot compile unixlib.c" >&2; exit 1; }
 
+# Wine's PS4 configure cannot find the WebKit-only POSIX resolver, so
+# ws2_32/unixlib.c compiles a getaddrinfo stub that returns WS_EAI_FAIL. Supply
+# Winsock's Unix side with the SDK's real sceNetResolver path instead.
+$CC -std=gnu11 -O2 -Wall -Wextra -Werror -fPIC -D_REENTRANT -DPW_PS4_DNS \
+    -I"$oo/include" -c "$root/wine/ps5/pw_ws2_32_libc.c" \
+    -o "$prx/obj/pw_ws2_32_libc_ps4.o" ||
+    { echo "  X ws2_32: cannot compile the PS4 resolver shim" >&2; exit 1; }
+
+# Configure cannot link the console-only resolver while probing libc, so the
+# generated config.h leaves HAVE_GETADDRINFO undefined. Compile just this
+# unixlib with the feature enabled; the local shim above supplies all three
+# POSIX resolver functions it calls.
+$CC -std=gnu11 -m64 -DHAVE_GETADDRINFO -DPW_PS4_DNS -c \
+    -o "$prx/obj/ws2_32_unixlib_dns.o" "$work/source/dlls/ws2_32/unixlib.c" \
+    -I"$build/dlls/ws2_32" -I"$work/source/dlls/ws2_32" -I"$build/include" \
+    -I"$work/source/include" -D__WINESRC__ -D_WS2_32_ -DWINE_UNIX_LIB \
+    -Wall -pipe -fcf-protection=none -fvisibility=hidden -fno-stack-protector \
+    -fno-strict-aliasing -Wdeclaration-after-statement -Wempty-body \
+    -Wignored-qualifiers -Winit-self -Wpointer-arith -Wstrict-prototypes \
+    -Wtype-limits -Wunused-but-set-parameter -Wvla -Wwrite-strings \
+    -gdwarf-4 -fPIC -fasynchronous-unwind-tables -g -O2 ||
+    { echo "  X ws2_32: cannot compile resolver-enabled unixlib.c" >&2; exit 1; }
+
 stubs=$prx/stubs; rm -rf "$stubs"; mkdir -p "$stubs"
 
 # ⚠ -ptype fake. Without it create-fself stamps a library with the same
@@ -169,9 +192,16 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
             "xinput1_3|-|"; do
     name=${step%%|*}; rest=${step#*|}; target=${rest%%|*}; shims=${rest#*|}
     # "-": compiled above rather than taken from a .so the build never makes.
-    if [ "$target" = - ]; then objs=$prx/obj/xinput_unixlib.o; else objs=$(link_objects "$target"); fi
+    if [ "$target" = - ]; then
+        objs=$prx/obj/xinput_unixlib.o
+    elif [ "$name" = ws2_32 ]; then
+        objs=$prx/obj/ws2_32_unixlib_dns.o
+    else
+        objs=$(link_objects "$target")
+    fi
     [ -n "$objs" ] || { echo "  ✗ $name: no ELF link in make.log"; status=1; continue; }
     shim_objs=""
+    extra_libs=""
     thread_wraps=""
     if [ "$name" = ntdll ]; then
         shim_objs="$heap $dmem $prx/obj/pw_prx_env_ps4.o $prx/obj/pw_pthread_stack_ps4.o"
@@ -187,6 +217,8 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
     # as upstream intends; pw_wine_heap takes its memory from anonymous mmap in
     # 1 MiB pieces, so the server draws on flexible memory instead.
     [ "$name" = wineserver ] && shim_objs="$heap"
+    [ "$name" = ws2_32 ] && shim_objs="$shim_objs $prx/obj/pw_ws2_32_libc_ps4.o"
+    [ "$name" = ws2_32 ] && extra_libs="-lSceNetCtl"
     # ⚠ And every other unixlib gets the forwarding half alone. Without it they
     # import malloc and free from the shared libc, while anything they are
     # handed by ntdll came from pw_wine_heap -- and the two allocators do not
@@ -216,7 +248,7 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
     # per PRX, exactly as with the heap.
     case $name in
     ntdll|wineserver) ;;
-    *) shim_objs="$prx/heap/pw_wine_heap_libc.o $prx/obj/pw_wine_dl_libc.o" ;;
+    *) shim_objs="$shim_objs $prx/heap/pw_wine_heap_libc.o $prx/obj/pw_wine_dl_libc.o" ;;
     esac
     for s in $shims; do shim_objs="$shim_objs $prx/obj/$s.o"; done
     # stubs go through the shim so they land after orbis-compat and -lc
@@ -226,6 +258,7 @@ for step in "ntdll|dlls/ntdll/ntdll.so|$ntdll_shims" \
     if (cd "$build" && $CC -shared -Wl,-Bsymbolic -Wl,--eh-frame-hdr \
             -Wl,-soname,"$name.prx" -Wl,--warn-unresolved-symbols $cwd_wraps $thread_wraps \
             -o "$prx/$name.shared.elf" $objs $shim_objs "$prx/obj/${name}_desc.o" \
+            $extra_libs \
             ) > "$log" 2>&1
     then
         if "$oo/bin/linux/create-fself" -in "$prx/$name.shared.elf" \
