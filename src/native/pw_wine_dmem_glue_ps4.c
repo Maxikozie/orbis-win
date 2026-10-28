@@ -274,6 +274,21 @@ static PwWineDmemRun runs[RUNS];
 /* 0 before the self-check, 1 in use, -1 refused: every call passes. */
 static int state;
 
+/* Recreate a direct-memory page after a failed flexible-memory migration.
+ * `pw_wine_dmem_replace(..., 0)` leaves a virtual reservation behind, so the
+ * reservation must be restored before pw_wine_dmem_protect() can back it. */
+static int restore_exec_page_to_dmem(uintptr_t page, const uint8_t *saved)
+{
+    int reserve_rc = reserve(NULL, page, PAGE);
+    int protect_rc = reserve_rc ? -1 :
+        pw_wine_dmem_protect(&dmem, page, PAGE,
+                             PW_WINE_DMEM_READ | PW_WINE_DMEM_WRITE);
+
+    if (!protect_rc)
+        memcpy((void *)page, saved, PAGE);
+    return reserve_rc ? reserve_rc : protect_rc;
+}
+
 /* A direct-memory RX request can return success without changing the effective
  * permission. Move that allocation granule to flexible memory, preserving its
  * contents, only when the kernel query confirms RX did not take. */
@@ -281,7 +296,7 @@ static int migrate_exec_page_to_flex(uintptr_t page)
 {
     uint8_t saved[PAGE];
     void *mapped;
-    int release_rc, adopt_rc;
+    int release_rc, adopt_rc, unreserve_rc;
     char line[192];
 
     if (pw_wine_dmem_backed(&dmem, page, PAGE) != PAGE) return 0;
@@ -296,17 +311,30 @@ static int migrate_exec_page_to_flex(uintptr_t page)
         return -1;
     }
 
+    /* The PS4 rejects MAP_FIXED over sceKernelReserveVirtualRange()'s
+     * reservation (EINVAL; confirmed by the low/high fixed-map probes). Drop
+     * the reservation after releasing direct memory so mmap can claim this
+     * exact guest address as flexible memory. */
+    unreserve_rc = sceKernelMunmap((void *)page, PAGE);
+    if (unreserve_rc)
+    {
+        snprintf(line, sizeof(line),
+                 "wine-ps4: exec-page flex-migrate unreserve failed addr=%p rc=%d\n",
+                 (void *)page, unreserve_rc);
+        sceKernelDebugOutText(0, line);
+        return -1;
+    }
+
     mapped = mmap((void *)page, PAGE, PROT_READ | PROT_WRITE,
                   MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
     if (mapped == MAP_FAILED || mapped != (void *)page)
     {
         int map_errno = errno;
         if (mapped != MAP_FAILED) (void)munmap(mapped, PAGE);
-        if (!pw_wine_dmem_replace(&dmem, page, PAGE, PROT_READ | PROT_WRITE))
-            memcpy((void *)page, saved, sizeof(saved));
+        int restore_rc = restore_exec_page_to_dmem(page, saved);
         snprintf(line, sizeof(line),
-                 "wine-ps4: exec-page flex-migrate mmap failed addr=%p errno=%d\n",
-                 mapped, map_errno);
+                 "wine-ps4: exec-page flex-migrate mmap failed wanted=%p got=%p errno=%d restore=%d\n",
+                 (void *)page, mapped, map_errno, restore_rc);
         sceKernelDebugOutText(0, line);
         return -1;
     }
@@ -316,95 +344,14 @@ static int migrate_exec_page_to_flex(uintptr_t page)
     if (adopt_rc)
     {
         (void)munmap(mapped, PAGE);
-        if (!pw_wine_dmem_replace(&dmem, page, PAGE, PROT_READ | PROT_WRITE))
-            memcpy((void *)page, saved, sizeof(saved));
+        int restore_rc = restore_exec_page_to_dmem(page, saved);
         snprintf(line, sizeof(line),
-                 "wine-ps4: exec-page flex-migrate adopt failed rc=%d\n", adopt_rc);
+                 "wine-ps4: exec-page flex-migrate adopt failed rc=%d restore=%d\n",
+                 adopt_rc, restore_rc);
         sceKernelDebugOutText(0, line);
         return -1;
     }
 
-    snprintf(line, sizeof(line),
-             "wine-ps4: exec-page flex-migrate complete addr=%p bytes=%u\n",
-             (void *)page, (unsigned)PAGE);
-    sceKernelDebugOutText(0, line);
-    return 0;
-}
-
-/* Move a contiguous direct-memory span to flexible memory in one operation.
- * The per-page version above is retained only for mixed/sparse mappings where
- * a queried range is not wholly backed by direct memory. */
-static int migrate_exec_range_to_flex(uintptr_t address, size_t bytes)
-{
-    void *saved, *mapped;
-    int release_rc, adopt_rc;
-    char line[192];
-
-    if (!bytes || address % PAGE || bytes % PAGE ||
-        pw_wine_dmem_backed(&dmem, address, bytes) != bytes)
-        return -1;
-
-    saved = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
-                 MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (saved == MAP_FAILED)
-    {
-        snprintf(line, sizeof(line),
-                 "wine-ps4: exec-range flex-migrate scratch failed bytes=%zu errno=%d\n",
-                 bytes, errno);
-        sceKernelDebugOutText(0, line);
-        return -1;
-    }
-    memcpy(saved, (const void *)address, bytes);
-
-    release_rc = pw_wine_dmem_replace(&dmem, address, bytes, 0);
-    if (release_rc)
-    {
-        munmap(saved, bytes);
-        snprintf(line, sizeof(line),
-                 "wine-ps4: exec-range flex-migrate release failed addr=%p bytes=%zu rc=%d\n",
-                 (void *)address, bytes, release_rc);
-        sceKernelDebugOutText(0, line);
-        return -1;
-    }
-
-    mapped = mmap((void *)address, bytes, PROT_READ | PROT_WRITE,
-                  MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (mapped == MAP_FAILED || mapped != (void *)address)
-    {
-        int map_errno = errno;
-        if (mapped != MAP_FAILED) (void)munmap(mapped, bytes);
-        if (!pw_wine_dmem_replace(&dmem, address, bytes,
-                                  PROT_READ | PROT_WRITE))
-            memcpy((void *)address, saved, bytes);
-        munmap(saved, bytes);
-        snprintf(line, sizeof(line),
-                 "wine-ps4: exec-range flex-migrate map failed addr=%p bytes=%zu errno=%d\n",
-                 mapped, bytes, map_errno);
-        sceKernelDebugOutText(0, line);
-        return -1;
-    }
-
-    memcpy(mapped, saved, bytes);
-    adopt_rc = pw_wine_dmem_adopt(&dmem, address, bytes);
-    if (adopt_rc)
-    {
-        (void)munmap(mapped, bytes);
-        if (!pw_wine_dmem_replace(&dmem, address, bytes,
-                                  PROT_READ | PROT_WRITE))
-            memcpy((void *)address, saved, bytes);
-        munmap(saved, bytes);
-        snprintf(line, sizeof(line),
-                 "wine-ps4: exec-range flex-migrate adopt failed addr=%p bytes=%zu rc=%d\n",
-                 mapped, bytes, adopt_rc);
-        sceKernelDebugOutText(0, line);
-        return -1;
-    }
-    munmap(saved, bytes);
-
-    snprintf(line, sizeof(line),
-             "wine-ps4: exec-range flex-migrate complete addr=%p bytes=%zu\n",
-             (void *)address, bytes);
-    sceKernelDebugOutText(0, line);
     return 0;
 }
 
@@ -413,9 +360,11 @@ static int migrate_exec_range_to_flex(uintptr_t address, size_t bytes)
  * migrate it to flexible memory and retry. */
 static int protect_exec_page(unsigned int call, uintptr_t page, int protection)
 {
+    static unsigned verified_migration_logs;
     PwPs4VirtualQueryInfo info;
     int protect_rc, query_rc, migrate_rc = -2, retry_rc = -2;
     int effective = -1;
+    int log_verified_migration = 0;
     size_t dmem_bytes;
     char line[256];
 
@@ -447,7 +396,12 @@ static int protect_exec_page(unsigned int call, uintptr_t page, int protection)
         }
     }
 
-    if (protect_rc || query_rc || !(effective & PROT_EXEC) || migrate_rc != -2)
+    if (!protect_rc && !query_rc && (effective & PROT_EXEC) && !migrate_rc &&
+        __atomic_fetch_add(&verified_migration_logs, 1, __ATOMIC_RELAXED) < 64)
+        log_verified_migration = 1;
+
+    if (protect_rc || query_rc || !(effective & PROT_EXEC) ||
+        (migrate_rc != -2 && migrate_rc != 0) || log_verified_migration)
     {
         snprintf(line, sizeof(line),
                  "wine-ps4: exec-protect-verify build=0974 call=%u page=%p dmem-before=%zu protect=%d query=%d effective=%#x migrate=%d retry=%d\n",
@@ -461,23 +415,36 @@ static int protect_exec_page(unsigned int call, uintptr_t page, int protection)
     return 0;
 }
 
-/* A single executable mprotect can cover a very large guest range (for
- * example, a reservation with sparse committed pages).  Migrating every
- * direct-memory granule in that request is both slow and can consume the
- * title's flexible-memory pool.  Keep the fallback bounded to ordinary
- * image-sized requests; larger ranges keep the original dmem protection
- * behavior and are logged for diagnosis. */
-#define PW_PS4_EXEC_MIGRATE_MAX_BYTES (16u * 1024u * 1024u)
-
 static uintptr_t page_down(const void *address) { return (uintptr_t)address & ~(uintptr_t)(PAGE - 1); }
 static size_t page_span(const void *address, size_t bytes)
 {
     return (((uintptr_t)address + bytes + PAGE - 1) & ~(uintptr_t)(PAGE - 1)) - page_down(address);
 }
 
-/* Protect one contiguous image range, querying mapping boundaries instead of
- * probing every 16 KiB page. A fully direct-backed, non-executable mapping is
- * moved as a range; only mixed/sparse mappings fall back to page granularity. */
+static int protect_exec_host_span(unsigned int call, uintptr_t address,
+                                  size_t bytes, int protection)
+{
+    int protect_rc;
+    char line[224];
+
+    protect_rc = ps4_host_mprotect((void *)address, bytes, protection);
+    if (protect_rc)
+    {
+        snprintf(line, sizeof(line),
+                 "wine-ps4: exec-pagewise host-protect failed build=10087 call=%u addr=%p bytes=%zu rc=%d\n",
+                 call, (void *)address, bytes, protect_rc);
+        sceKernelDebugOutText(0, line);
+        return -1;
+    }
+    return 0;
+}
+
+/* Protect an executable range without replacing its backing allocation as a
+ * range. Apply the original batch protection first, then migrate only the
+ * individual direct-memory pages whose effective permissions are still not
+ * executable. Caller-backed spans get one host-protection retry per mapping
+ * region. This is the page-at-a-time path that reached gameplay in build
+ * 10078; range replacement is deliberately excluded here for the A/B test. */
 static int protect_exec_range(unsigned int call, uintptr_t address, size_t bytes,
                               int protection)
 {
@@ -498,7 +465,7 @@ static int protect_exec_range(unsigned int call, uintptr_t address, size_t bytes
     {
         PwPs4VirtualQueryInfo info;
         uintptr_t next;
-        size_t span, backed;
+        size_t span;
         int query_rc, effective = -1;
 
         memset(&info, 0, sizeof(info));
@@ -515,34 +482,62 @@ static int protect_exec_range(unsigned int call, uintptr_t address, size_t bytes
             continue;
         }
 
-        backed = pw_wine_dmem_backed(&dmem, at, span);
-        if (!query_rc && backed == span)
+        if (!query_rc)
         {
-            int migrate_rc = migrate_exec_range_to_flex(at, span);
-            int retry_rc = migrate_rc ? -1 :
-                pw_wine_dmem_protect(&dmem, at, span,
-                                     (unsigned)protection & 7);
+            uintptr_t page, host_start = 0;
 
-            memset(&info, 0, sizeof(info));
-            query_rc = sceKernelVirtualQuery((const void *)at, 1,
-                                             &info, sizeof(info));
-            effective = query_rc ? -1 : info.protection;
-            snprintf(line, sizeof(line),
-                     "wine-ps4: exec-range verify call=%u addr=%p bytes=%zu migrate=%d protect=%d query=%d effective=%#x\n",
-                     call, (void *)at, span, migrate_rc, retry_rc,
-                     query_rc, effective);
-            sceKernelDebugOutText(0, line);
-            if (migrate_rc || retry_rc || query_rc || !(effective & PROT_EXEC))
-                return -1;
+            /* Log the selected algorithm, not each successful page. */
+            if (span >= 1024u * 1024u || call <= 16)
+            {
+                static unsigned logs;
+                if (__atomic_fetch_add(&logs, 1, __ATOMIC_RELAXED) < 64)
+                {
+                    snprintf(line, sizeof(line),
+                             "wine-ps4: exec-pagewise build=10087 call=%u addr=%p bytes=%zu prot=%#x\n",
+                             call, (void *)at, span, protection);
+                    sceKernelDebugOutText(0, line);
+                }
+            }
+
+            /* Coalesce caller-backed pages into one retry, while preserving
+             * exact-page migration for each direct-memory-backed page. */
+            for (page = at; page < next; page += PAGE)
+            {
+                int backed = pw_wine_dmem_backed(&dmem, page, PAGE) == PAGE;
+
+                if (backed)
+                {
+                    if (host_start)
+                    {
+                        size_t host_bytes = page - host_start;
+                        if (protect_exec_host_span(call, host_start, host_bytes,
+                                                   protection)) return -1;
+                        host_start = 0;
+                    }
+                    if (protect_exec_page(call, page, protection)) return -1;
+                }
+                else if (!host_start)
+                    host_start = page;
+            }
+            if (host_start)
+            {
+                if (protect_exec_host_span(call, host_start, next - host_start,
+                                           protection)) return -1;
+            }
             at = next;
             continue;
         }
 
-        /* A query failure or a mixture of direct and caller-backed pages
-         * cannot safely be replaced as one allocation. Preserve the proven
-         * per-page behavior only for this exceptional case. */
+        /* A query failure is handled conservatively, one page at a time. */
         for (uintptr_t page = at; page < next; page += PAGE)
-            if (protect_exec_page(call, page, protection)) return -1;
+        {
+            if (pw_wine_dmem_backed(&dmem, page, PAGE) == PAGE)
+            {
+                if (protect_exec_page(call, page, protection)) return -1;
+            }
+            else if (protect_exec_host_span(call, page, PAGE, protection))
+                return -1;
+        }
         at = next;
     }
     return 0;
@@ -748,17 +743,14 @@ int __wine_ps5_mprotect(void *address, size_t bytes, int protection)
     uintptr_t start = (uintptr_t)address;
     int fault_page = start <= 0x004a8330u && bytes > 0x004a8330u - start;
     int trace = call <= 16;
-    int exec_migration_allowed = bytes <= PW_PS4_EXEC_MIGRATE_MAX_BYTES;
-
     if ((protection & PROT_EXEC) && start < 0x100000000ULL &&
         (bytes >= 1024u * 1024u || call <= 16) &&
         __atomic_fetch_add(&exec_range_logs, 1, __ATOMIC_RELAXED) < 64)
     {
         char line[256];
         snprintf(line, sizeof(line),
-                 "wine-ps4: exec-range build=0974 call=%u addr=%p bytes=%zu prot=%#x caller=%p fallback=%s\n",
-                 call, address, bytes, protection, (void *)caller,
-                 exec_migration_allowed ? "bounded" : "skip-large");
+                 "wine-ps4: exec-mprotect build=10087 call=%u addr=%p bytes=%zu prot=%#x caller=%p path=pagewise\n",
+                 call, address, bytes, protection, (void *)caller);
         sceKernelDebugOutText(0, line);
     }
 
@@ -803,7 +795,7 @@ int __wine_ps5_mprotect(void *address, size_t bytes, int protection)
         {
             int rc = 0;
 
-            if ((protection & PROT_EXEC) && exec_migration_allowed)
+            if ((protection & PROT_EXEC) && piece <= 16u * 1024u * 1024u)
                 rc = protect_exec_range(call, at, piece, protection);
             else
                 rc = pw_wine_dmem_protect(&dmem, at, piece,
