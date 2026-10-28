@@ -59,7 +59,7 @@ done
 # which supplies the five __wine_ps5_* entry points over PS4 direct memory.
 dmem=""
 $CC -std=c11 -O2 -Wall -Wextra -Werror -fPIC -c "$root/wine/ps5/pw_wine_dmem.c" -o "$prx/heap/pw_wine_dmem.o"
-$CC -std=c11 -O2 -fPIC -I"$root/wine/ps5" -c "$gladius/src/native/pw_wine_dmem_glue_ps4.c" -o "$prx/heap/pw_wine_dmem_glue_ps4.o"
+$CC -std=c11 -O2 -fPIC -I"$root/wine/ps5" ${PW_PRX_EXTRA_CFLAGS:-} -c "$gladius/src/native/pw_wine_dmem_glue_ps4.c" -o "$prx/heap/pw_wine_dmem_glue_ps4.o"
 dmem="$prx/heap/pw_wine_dmem.o $prx/heap/pw_wine_dmem_glue_ps4.o"
 
 echo "== 2. descriptors (upstream's export lists) =="

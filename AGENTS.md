@@ -5,6 +5,46 @@
   undecodable based only on its `FACECS` header, `file` output, or readable
   strings. Find and run the existing decoder/debugger workflow, then symbolize
   the result against the exact package binaries and symbols.
+- **What the `.sorbisdmp` container actually is** (measured 2026-10-28 on
+  `GLDS10085_1793220239.sorbisdmp`, 306,514 B, so do not re-derive this):
+  64-byte plaintext header — `00 00` then ASCII `FACECS` at offset 2, a u64
+  version/count of 2, then a two-entry table of u64 (offset, size) pairs
+  (`0x130`/`0x4AB12` and `0x130`/`0x4AA32`) — followed by a body from offset
+  `0x58` that is **encrypted**. Measured, not assumed: Shannon entropy
+  **7.9994 bits/byte**, all 256 byte values present, 0.42% zero bytes (random
+  is ~0.39%), and only 74 ASCII runs of >=8 chars in 306 KB where a readable
+  core dump would carry hundreds of module paths and symbol names. Nothing
+  decompresses as raw-deflate, zlib or gzip at any offset in the first 32 KiB.
+  This matches fail0verflow's note that PS4 crash dumps are encrypted from
+  roughly firmware 4.50 onward
+  (https://fail0verflow.com/blog/2017/ps4-crashdump-dump/,
+  https://www.psdevwiki.com/ps4/COREDMP).
+- **There is no local decryptor and the public one does not apply.**
+  SocraticBliss's `ps4_crash_dump_decryptor.py`
+  (https://gist.github.com/SocraticBliss/b787fc8f6685f0d72beabccf8af48062)
+  decrypts a *different* artifact — `orbiscore-systemcrash.orbisstate`, whose
+  body starts at `0x4000` under AES-CBC — and it needs AES + HMAC keys derived
+  from per-console sealed keys (`getSealedKeySecret`, 5.05-era) that are not
+  published and are not on this workstation. The SDK ships `libSceCoredump.so`
+  (a *writer* library) and only `create-fself`, `create-gp4`, `PkgTool.Core`
+  and `readoelf` as executables; none read a dump. So: retain dumps for
+  provenance, but **do not plan an investigation around decrypting one.**
+- **Use the in-process diagnostics instead — that is what "decoded" has always
+  meant here.** `dlls/kernelbase/debug.c` carries `log_exception_context32()`
+  under `#ifdef __i386__`, which emits the records that actually answer a guest
+  fault, e.g.
+  `PW_EXCEPTION32 tid=0090 eip=00a3368c esp=... eax=... ecx=23326f30 ...`,
+  plus `PW_EXCEPTION32 stack words=...`, `pc-page` and `pc-bytes`. In the
+  11:20 2026-10-28 run `ecx` held the exact faulting pointer. These come from
+  `src/wine-patches-ps4/0962`-`0965` and `0973`, they compile only into the
+  **32-bit** `kernelbase.dll`, and that DLL is supplied to the packager through
+  the `PS4_KERNELBASE32_DLL` input of `scripts/build-relocatable-wine-ps4.sh`.
+  The `kernelbase.dll` in `win/wine/lib/wine/i386-windows/` of the ordinary
+  build contains **zero** `PW_EXCEPTION32` strings, so a default build has no
+  guest-fault diagnostics at all. **Before investigating any guest fault,
+  confirm `strings <pkg>/win/wine/lib/wine/i386-windows/kernelbase.dll | grep -c
+  PW_EXCEPTION32` is nonzero**; if it is zero, rebuild that DLL and pass it via
+  `PS4_KERNELBASE32_DLL` rather than inferring the fault from klog.
 - Reuse the established crash workflow; do not rediscover it on every run:
   arm `scripts/watch-coredump.py HOST 2121 KLOG OUT_DIR TITLE_ID` against the
   active appended klog before launch (GoldHEN deletes dumps shortly after

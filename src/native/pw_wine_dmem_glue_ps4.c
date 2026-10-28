@@ -592,7 +592,24 @@ static int protect_exec_page(unsigned int call, uintptr_t page, int protection)
  * title's flexible-memory pool.  Keep the fallback bounded to ordinary
  * image-sized requests; larger ranges keep the original dmem protection
  * behavior and are logged for diagnosis. */
+/* Bound on a single exec-range migration. 0 disables exec migration entirely:
+ * exec_migration_allowed goes false for every nonzero request, so
+ * protect_exec_range() (and the per-page fallback inside it) never runs and
+ * PROT_EXEC on dmem-backed memory falls back to plain pw_wine_dmem_protect().
+ * Overridable at compile time for scoped A/B tests via PW_PRX_EXTRA_CFLAGS. */
+#ifndef PW_PS4_EXEC_MIGRATE_MAX_BYTES
 #define PW_PS4_EXEC_MIGRATE_MAX_BYTES (16u * 1024u * 1024u)
+#endif
+
+/* 1 forces the per-page migration loop (protect_exec_page, one PAGE at a time)
+ * instead of migrating a whole dmem-backed span in one go. Same end state, but
+ * the window in which the range is unmapped shrinks from up to 16 MiB to 16 KiB.
+ * migrate_exec_range_to_flex() snapshots, unmaps, re-mmaps and copies back with
+ * no lock held, so a concurrent write inside that window is silently reverted;
+ * this bounds the exposure. Scoped A/B via PW_PRX_EXTRA_CFLAGS. */
+#ifndef PW_PS4_EXEC_MIGRATE_PER_PAGE_ONLY
+#define PW_PS4_EXEC_MIGRATE_PER_PAGE_ONLY 0
+#endif
 
 static uintptr_t page_down(const void *address) { return (uintptr_t)address & ~(uintptr_t)(PAGE - 1); }
 static size_t page_span(const void *address, size_t bytes)
@@ -641,7 +658,7 @@ static int protect_exec_range(unsigned int call, uintptr_t address, size_t bytes
         }
 
         backed = pw_wine_dmem_backed(&dmem, at, span);
-        if (!query_rc && backed == span)
+        if (!query_rc && backed == span && !PW_PS4_EXEC_MIGRATE_PER_PAGE_ONLY)
         {
             int migrate_rc = migrate_exec_range_to_flex(at, span);
             int retry_rc = migrate_rc ? -1 :
@@ -990,10 +1007,12 @@ unsigned int __wine_ps5_memory_stats(uint64_t *out, unsigned int count)
     static uintptr_t page_watch_start, page_watch_end;
     PwWineDmemStats dmem_stats = { 0 };
     PwWineHeapStats heap_stats;
-    uint64_t values[8];
+    PwWineHeapFailures heap_failures = { 0 };
+    uint64_t values[14];
 
     if (state > 0) pw_wine_dmem_stats(&dmem, &dmem_stats);
     pw_wine_heap_stats(&heap_stats);
+    pw_wine_heap_failures(&heap_failures);
     values[0] = dmem_stats.backed_bytes;
     values[1] = dmem_stats.peak_backed_bytes;
     values[2] = dmem_stats.runs;
@@ -1002,7 +1021,13 @@ unsigned int __wine_ps5_memory_stats(uint64_t *out, unsigned int count)
     values[5] = heap_stats.peak_mapped_bytes;
     values[6] = dmem_stats.low_backed_bytes;
     values[7] = dmem_stats.peak_low_backed_bytes;
-    for (unsigned int i = 0; i < count && i < 8; i++) out[i] = values[i];
+    values[8] = heap_stats.failures;
+    values[9] = heap_failures.last_failed_bytes;
+    values[10] = heap_failures.last_failure_reason;
+    values[11] = heap_failures.backing_refusals;
+    values[12] = heap_failures.last_map_bytes;
+    values[13] = heap_failures.last_map_errno;
+    for (unsigned int i = 0; i < count && i < 14; i++) out[i] = values[i];
 
     watch_oblivion_rx_pages(++page_watch_sample);
 
@@ -1095,5 +1120,5 @@ unsigned int __wine_ps5_memory_stats(uint64_t *out, unsigned int count)
         page_watch_start = start;
         page_watch_end = end;
     }
-    return 8;
+    return 14;
 }

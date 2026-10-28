@@ -1,0 +1,198 @@
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index d26e794141..5f3d45b920 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -105,7 +105,13 @@ WINE_DECLARE_DEBUG_CHANNEL(virtual_ranges);
+  * never skipped. Counters are readable through __wine_virtual_stats. */
+ enum { VM_STAT_MMAP, VM_STAT_MUNMAP, VM_STAT_MPROTECT, VM_STAT_MPROTECT_BYTES,
+        VM_STAT_MPROTECT_SKIPPED, VM_STAT_FAULTS, VM_STAT_IMAGES, VM_STAT_IMAGE_MMAP,
+-       VM_STAT_IMAGE_MPROTECT, VM_STAT_COUNT };
++       VM_STAT_IMAGE_MPROTECT,
++       /* ⚠ Appended, never inserted: wine64_main.c reads v[4]/v[5]/v[6] by
++        * index. A failed mprotect leaves Wine's bookkeeping saying COMMITTED
++        * while the real mapping never got its protection -- which is exactly
++        * the state=MEM_COMMIT + faulting read seen on 2026-10-28. Nothing
++        * counted these before. */
++       VM_STAT_MPROTECT_FAILED, VM_STAT_COMMIT_FAILED, VM_STAT_COUNT };
+ static ULONG64 vm_stats[VM_STAT_COUNT];
+ 
+ static inline void vm_stat_add( unsigned int index, ULONG64 value )
+@@ -264,12 +270,35 @@ static inline int counted_munmap( const char *caller, void *addr, size_t len )
+     return ret;
+ }
+ 
++/* ⚠ The skip above is only sound while this file is the ONLY thing that
++ * remaps these pages, which is what the header comment claims. It is not true
++ * on PS4: pw_wine_dmem_glue_ps4.c's exec migration releases a span and
++ * MAP_FIXED-remaps it without going through these wrappers, so host_prot keeps
++ * the protection from before the remap -- stale rather than "unknown", so the
++ * skip fires on it and the fresh mapping never gets the protection it needs.
++ * The guest then sees MEM_COMMIT/PAGE_READWRITE from VirtualQuery while a
++ * direct load faults (observed 2026-10-28 14:38: fault=2F14827C, state=COMMIT,
++ * protect=PAGE_READWRITE, and ReadProcessMemory returned zeros).
++ * Set PW_PS4_MPROTECT_TRUST_CACHE=0 in the environment to always issue the
++ * mprotect. Read once; default keeps the optimization. */
++static int mprotect_trust_cache(void)
++{
++    static int cached;
++
++    if (!cached)
++    {
++        const char *value = getenv( "PW_PS4_MPROTECT_TRUST_CACHE" );
++        cached = (value && value[0] == '0') ? -1 : 1;
++    }
++    return cached > 0;
++}
++
+ static inline int counted_mprotect( const char *caller, void *addr, size_t len, int prot )
+ {
+     static LONG trace_oblivion_protect_count;
+     BOOL trace = trace_oblivion_mapping_range( addr, len ) &&
+                  __atomic_add_fetch( &trace_oblivion_protect_count, 1, __ATOMIC_RELAXED ) <= 64;
+-    BOOL unchanged = host_prot_unchanged( addr, len, prot );
++    BOOL unchanged = mprotect_trust_cache() && host_prot_unchanged( addr, len, prot );
+     int ret;
+ 
+     if (trace)
+@@ -284,7 +313,16 @@ static inline int counted_mprotect( const char *caller, void *addr, size_t len,
+     vm_stat_add( VM_STAT_MPROTECT, 1 );
+     vm_stat_add( VM_STAT_MPROTECT_BYTES, len );
+     if (!(ret = host_mprotect( addr, len, prot ))) host_prot_record( addr, len, prot | HOST_PROT_KNOWN );
+-    else host_prot_record( addr, len, 0 );
++    else
++    {
++        static unsigned int failed_logged;
++
++        host_prot_record( addr, len, 0 );
++        vm_stat_add( VM_STAT_MPROTECT_FAILED, 1 );
++        if (__atomic_add_fetch( &failed_logged, 1, __ATOMIC_RELAXED ) <= 32)
++            ERR( "PW_VM mprotect FAILED caller=%s addr=%p len=%lx prot=%#x errno=%d\n",
++                 caller, addr, (unsigned long)len, prot, errno );
++    }
+     if (trace)
+         ERR( "PS4_OBLIVION protect result caller=%s skipped=0 rc=%d errno=%d\n",
+              caller, ret, ret ? errno : 0 );
+@@ -2462,7 +2500,20 @@ static BOOL set_vprot( struct file_view *view, void *base, size_t size, BYTE vpr
+         else if (use_kernel_writewatch && view->protect & VPROT_WRITEWATCH) vprot &= ~VPROT_WRITEWATCH;
+         set_page_vprot( base, size, vprot );
+     }
+-    return !mprotect_range( base, size, 0, 0 );
++    if (mprotect_range( base, size, 0, 0 ))
++    {
++        static unsigned int commit_fail_logged;
++
++        /* The page vprot bits above already say COMMITTED; the real protection
++         * did not take. The caller turns this into STATUS_ACCESS_DENIED, but
++         * count it here so a silent partial failure is visible. */
++        vm_stat_add( VM_STAT_COMMIT_FAILED, 1 );
++        if (__atomic_add_fetch( &commit_fail_logged, 1, __ATOMIC_RELAXED ) <= 32)
++            ERR( "PW_VM commit FAILED base=%p size=%lx vprot=%#x\n",
++                 base, (unsigned long)size, vprot );
++        return FALSE;
++    }
++    return TRUE;
+ }
+ 
+ 
+@@ -4685,6 +4736,16 @@ TEB *virtual_alloc_first_teb(void)
+     list_add_head( &teb_list, &thread_data->entry );
+     pthread_key_create( &thread_data_key, NULL );
+     pthread_setspecific( thread_data_key, thread_data );
++#ifdef __PROSPERO__
++    {
++        ULONG_PTR rsp;
++        __asm__ volatile( "movq %%rsp,%0" : "=r" (rsp) );
++        ERR( "PW_INITIAL_THREAD_STACK data=%p teb=%p pthread=%p rsp=%p stack=%p-%p\n",
++             thread_data, thread_data->teb, (void *)(ULONG_PTR)pthread_self(), (void *)rsp,
++             get_kernel_stack( thread_data ),
++             (char *)get_kernel_stack( thread_data ) + kernel_stack_size );
++    }
++#endif
+     return teb;
+ }
+ 
+@@ -5243,6 +5304,58 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec,
+     vprot = get_host_page_vprot( page );
+     vm_stat_add( VM_STAT_FAULTS, 1 );
+ 
++#ifdef __PROSPERO__
++    /* Recover only when Wine already considers the faulting instruction page
++     * executable. A PS4 kernel mapping can remain R-- after an RX request;
++     * reapply Wine's page protection once and retry only after kernel verify. */
++    if ((uintptr_t)rec->ExceptionAddress == (uintptr_t)addr && (vprot & VPROT_EXEC))
++    {
++        struct ps4_virtual_query_info
++        {
++            void *start, *end;
++            int64_t offset;
++            int32_t protection, memory_type;
++            uint8_t flags;
++            char name[32];
++        } info;
++        extern int sceKernelVirtualQuery( const void *, int, void *, size_t );
++        extern int sceKernelDebugOutText( int, const char * );
++        static unsigned int rx_fault_count;
++        unsigned int attempt = __atomic_add_fetch( &rx_fault_count, 1, __ATOMIC_RELAXED );
++        int query_rc, protect_rc = -1, verify_rc = -1, effective = -1;
++
++        memset( &info, 0, sizeof(info) );
++        query_rc = sceKernelVirtualQuery( addr, 1, &info, sizeof(info) );
++        if (!query_rc && (info.protection & PROT_READ) && !(info.protection & PROT_EXEC))
++        {
++            protect_rc = mprotect_range( page, host_page_size, 0, 0 );
++            memset( &info, 0, sizeof(info) );
++            verify_rc = sceKernelVirtualQuery( addr, 1, &info, sizeof(info) );
++            if (!verify_rc) effective = info.protection;
++            if (!verify_rc && (effective & PROT_EXEC))
++            {
++                if (attempt <= 32)
++                {
++                    char line[256];
++                    snprintf( line, sizeof(line),
++                              "ntdll ps4-rx-fault-recovered n=%u addr=%p page=%p wine-vprot=%#x protect=%d effective=%#x\n",
++                              attempt, addr, page, vprot, protect_rc, effective );
++                    sceKernelDebugOutText( 0, line );
++                }
++                ret = STATUS_SUCCESS;
++            }
++            else if (attempt <= 32)
++            {
++                char line[256];
++                snprintf( line, sizeof(line),
++                          "ntdll ps4-rx-fault-unrepaired n=%u addr=%p page=%p wine-vprot=%#x query=%d protect=%d verify=%d effective=%#x\n",
++                          attempt, addr, page, vprot, query_rc, protect_rc, verify_rc, effective );
++                sceKernelDebugOutText( 0, line );
++            }
++        }
++    }
++#endif
++
+ #ifdef __APPLE__
+     /* Rosetta on Apple Silicon misreports certain write faults as read faults. */
+     if (err == EXCEPTION_READ_FAULT && (get_unix_prot( vprot ) & PROT_READ))
+@@ -5630,6 +5743,9 @@ void virtual_set_force_exec( BOOL enable )
+ {
+     struct file_view *view;
+     sigset_t sigset;
++#ifdef __PS4__
++    ULONG_PTR stack_addr = (ULONG_PTR)&sigset;
++#endif
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+     if (!force_exec_prot != !enable)  /* change all existing views */
+@@ -5641,6 +5757,15 @@ void virtual_set_force_exec( BOOL enable )
+             /* file mappings are always accessible */
+             BYTE commit = is_view_valloc( view ) ? 0 : VPROT_COMMITTED;
+ 
++#ifdef __PS4__
++            /* Do not change permissions on the stack this walk is currently
++             * using. On Orbis, mprotecting its direct-memory view can unmap
++             * the return stack while sceKernelMprotect is still executing. */
++            if (stack_addr >= (ULONG_PTR)view->base &&
++                stack_addr - (ULONG_PTR)view->base < view->size)
++                continue;
++#endif
++
+             mprotect_range( view->base, view->size, commit, 0 );
+         }
+     }

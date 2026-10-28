@@ -1,0 +1,184 @@
+diff --git a/dlls/kernelbase/debug.c b/dlls/kernelbase/debug.c
+index 8dbb6779ff..7f8e113e5d 100644
+--- a/dlls/kernelbase/debug.c
++++ b/dlls/kernelbase/debug.c
+@@ -525,6 +525,169 @@ static void format_exception_msg( const EXCEPTION_POINTERS *ptr, char *buffer, i
+     snprintf( buffer + len,  size - len, " at address %p", ptr->ExceptionRecord->ExceptionAddress );
+ }
+ 
++#ifdef __i386__
++/* The PS4 WoW64 route cannot launch winedbg, so retain the fault-time x86
++ * registers and stack at the point where Wine would normally start it. */
++static void log_exception_context32( const EXCEPTION_POINTERS *ptr )
++{
++    const CONTEXT *ctx = ptr->ContextRecord;
++    DWORD stack[8] = {0};
++    SIZE_T bytes_read = 0;
++
++    if (!ctx) return;
++    MESSAGE( "PW_EXCEPTION32 tid=%04lx eip=%08lx esp=%08lx ebp=%08lx eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx edi=%08lx\n",
++             GetCurrentThreadId(), ctx->Eip, ctx->Esp, ctx->Ebp, ctx->Eax,
++             ctx->Ebx, ctx->Ecx, ctx->Edx, ctx->Esi, ctx->Edi );
++
++    if (ReadProcessMemory( GetCurrentProcess(), (const void *)(ULONG_PTR)ctx->Esp,
++                           stack, sizeof(stack), &bytes_read ))
++        MESSAGE( "PW_EXCEPTION32 stack bytes=%lu words=%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx\n",
++                 (ULONG)bytes_read, stack[0], stack[1], stack[2], stack[3],
++                 stack[4], stack[5], stack[6], stack[7] );
++    else
++        MESSAGE( "PW_EXCEPTION32 stack read failed esp=%08lx error=%lu\n",
++                 ctx->Esp, GetLastError() );
++
++    {
++        MEMORY_BASIC_INFORMATION info;
++        DWORD code[2] = {0};
++        SIZE_T query_size, code_size = 0;
++        const void *pc = (const void *)(ULONG_PTR)ctx->Eip;
++
++        query_size = VirtualQuery( pc, &info, sizeof(info) );
++        if (query_size)
++            MESSAGE( "PW_EXCEPTION32 pc-page eip=%08lx query=%lu base=%p alloc=%p size=%lu state=%08lx protect=%08lx type=%08lx\n",
++                     ctx->Eip, (ULONG)query_size, info.BaseAddress, info.AllocationBase,
++                     (ULONG)info.RegionSize, info.State, info.Protect, info.Type );
++        else
++            MESSAGE( "PW_EXCEPTION32 pc-page query failed eip=%08lx error=%lu\n",
++                     ctx->Eip, GetLastError() );
++
++        if (ReadProcessMemory( GetCurrentProcess(), pc, code, sizeof(code), &code_size ))
++            MESSAGE( "PW_EXCEPTION32 pc-bytes eip=%08lx bytes=%lu words=%08lx,%08lx\n",
++                     ctx->Eip, (ULONG)code_size, code[0], code[1] );
++        else
++            MESSAGE( "PW_EXCEPTION32 pc-bytes read failed eip=%08lx error=%lu\n",
++                     ctx->Eip, GetLastError() );
++    }
++
++    {
++        MEMORY_BASIC_INFORMATION info;
++        DWORD data[18] = {0};
++        SIZE_T query_size, data_size = 0;
++        const void *object = (const void *)(ULONG_PTR)ctx->Eax;
++        ULONG_PTR fault = ptr->ExceptionRecord->NumberParameters > 1 ?
++                          ptr->ExceptionRecord->ExceptionInformation[1] : 0;
++
++        /* ⚠ The page that actually faulted, which eax-page below does NOT
++         * answer: eax often holds a scalar (0x65 in the 14:28 run) while the
++         * bad pointer sits in ecx. State tells the story outright --
++         * MEM_COMMIT on an address that still faults means committed but
++         * unbacked; MEM_FREE means the guest is using memory it already
++         * released; MEM_RESERVE means reserved and never committed. */
++        if (fault)
++        {
++            MEMORY_BASIC_INFORMATION finfo;
++            SIZE_T fq = VirtualQuery( (const void *)fault, &finfo, sizeof(finfo) );
++
++            if (fq)
++                MESSAGE( "PW_EXCEPTION32 fault-page fault=%p query=%lu base=%p alloc=%p size=%lu state=%08lx protect=%08lx type=%08lx\n",
++                         (void *)fault, (ULONG)fq, finfo.BaseAddress, finfo.AllocationBase,
++                         (ULONG)finfo.RegionSize, finfo.State, finfo.Protect, finfo.Type );
++            else
++                MESSAGE( "PW_EXCEPTION32 fault-page query failed fault=%p error=%lu\n",
++                         (void *)fault, GetLastError() );
++        }
++
++        query_size = VirtualQuery( object, &info, sizeof(info) );
++        if (query_size)
++            MESSAGE( "PW_EXCEPTION32 eax-page eax=%08lx fault=%p query=%lu base=%p alloc=%p size=%lu state=%08lx protect=%08lx type=%08lx\n",
++                     ctx->Eax, (void *)fault, (ULONG)query_size, info.BaseAddress,
++                     info.AllocationBase, (ULONG)info.RegionSize, info.State,
++                     info.Protect, info.Type );
++        else
++            MESSAGE( "PW_EXCEPTION32 eax-page query failed eax=%08lx fault=%p error=%lu\n",
++                     ctx->Eax, (void *)fault, GetLastError() );
++
++        if (ReadProcessMemory( GetCurrentProcess(), object, data, sizeof(data), &data_size ))
++            MESSAGE( "PW_EXCEPTION32 eax-data eax=%08lx bytes=%lu field10=%08lx field40=%08lx field44=%08lx\n",
++                     ctx->Eax, (ULONG)data_size, data[4], data[16], data[17] );
++        else
++            MESSAGE( "PW_EXCEPTION32 eax-data read failed eax=%08lx error=%lu\n",
++                     ctx->Eax, GetLastError() );
++    }
++
++    {
++        DWORD frame[2];
++        DWORD frame_pointer = ctx->Ebp;
++        unsigned int depth;
++
++        for (depth = 0; depth < 8; ++depth)
++        {
++            SIZE_T frame_size = 0;
++            if (frame_pointer < ctx->Esp || frame_pointer - ctx->Esp > 0x10000) break;
++            if (!ReadProcessMemory( GetCurrentProcess(), (const void *)(ULONG_PTR)frame_pointer,
++                                    frame, sizeof(frame), &frame_size ) || frame_size != sizeof(frame))
++            {
++                MESSAGE( "PW_EXCEPTION32 frame read failed depth=%u ebp=%08lx error=%lu\n",
++                         depth, frame_pointer, GetLastError() );
++                break;
++            }
++            MESSAGE( "PW_EXCEPTION32 frame depth=%u ebp=%08lx saved=%08lx return=%08lx\n",
++                     depth, frame_pointer, frame[0], frame[1] );
++            if (frame[0] <= frame_pointer || frame[0] - frame_pointer > 0x10000) break;
++            frame_pointer = frame[0];
++        }
++    }
++
++    {
++        MEMORY_BASIC_INFORMATION info;
++        DWORD object[2] = {0};
++        SIZE_T query_size, object_size = 0;
++
++        query_size = VirtualQuery( (const void *)(ULONG_PTR)ctx->Esi, &info, sizeof(info) );
++        if (query_size)
++            MESSAGE( "PW_EXCEPTION32 object addr=%08lx query=%lu base=%p alloc=%p size=%lu state=%08lx protect=%08lx type=%08lx\n",
++                     ctx->Esi, (ULONG)query_size, info.BaseAddress, info.AllocationBase,
++                     (ULONG)info.RegionSize, info.State, info.Protect, info.Type );
++        else
++            MESSAGE( "PW_EXCEPTION32 object query failed addr=%08lx error=%lu\n",
++                     ctx->Esi, GetLastError() );
++
++        if (ReadProcessMemory( GetCurrentProcess(), (const void *)(ULONG_PTR)ctx->Esi,
++                               object, sizeof(object), &object_size ))
++            MESSAGE( "PW_EXCEPTION32 object bytes=%lu vtable=%08lx refs=%08lx\n",
++                     (ULONG)object_size, object[0], object[1] );
++        else
++            MESSAGE( "PW_EXCEPTION32 object read failed addr=%08lx error=%lu\n",
++                     ctx->Esi, GetLastError() );
++    }
++
++    {
++        MEMORY_BASIC_INFORMATION info;
++        DWORD candidate[4] = {0};
++        SIZE_T query_size, candidate_size = 0;
++
++        query_size = VirtualQuery( (const void *)(ULONG_PTR)ctx->Edi, &info, sizeof(info) );
++        if (query_size)
++            MESSAGE( "PW_EXCEPTION32 candidate addr=%08lx query=%lu base=%p alloc=%p size=%lu state=%08lx protect=%08lx type=%08lx\n",
++                     ctx->Edi, (ULONG)query_size, info.BaseAddress, info.AllocationBase,
++                     (ULONG)info.RegionSize, info.State, info.Protect, info.Type );
++        else
++            MESSAGE( "PW_EXCEPTION32 candidate query failed addr=%08lx error=%lu\n",
++                     ctx->Edi, GetLastError() );
++
++        if (ReadProcessMemory( GetCurrentProcess(), (const void *)(ULONG_PTR)ctx->Edi,
++                               candidate, sizeof(candidate), &candidate_size ))
++            MESSAGE( "PW_EXCEPTION32 candidate bytes=%lu vtable=%08lx word1=%08lx word2=%08lx word3=%08lx\n",
++                     (ULONG)candidate_size, candidate[0], candidate[1], candidate[2], candidate[3] );
++        else
++            MESSAGE( "PW_EXCEPTION32 candidate read failed addr=%08lx error=%lu\n",
++                     ctx->Edi, GetLastError() );
++    }
++}
++#endif
++
+ 
+ /******************************************************************
+  *		start_debugger
+@@ -545,6 +708,9 @@ static BOOL start_debugger( EXCEPTION_POINTERS *epointers, HANDLE event )
+ 
+     format_exception_msg( epointers, buffer, sizeof(buffer) );
+     MESSAGE( "wine: %s (thread %04lx), starting debugger...\n", buffer, GetCurrentThreadId() );
++#ifdef __i386__
++    log_exception_context32( epointers );
++#endif
+ 
+     InitializeObjectAttributes( &attr, &nameW, 0, 0, NULL );
+     if (!NtOpenKey( &dbg_key, KEY_READ, &attr ))
