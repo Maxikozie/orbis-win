@@ -1,0 +1,52 @@
+From: Codex <codex@localhost>
+Subject: ntdll: log PS4 first-exception context and registers
+
+Log the first exception's code, fault parameters, guest and signal PCs, stack
+bounds, and CONTEXT registers before debugger dispatch. Guard optional TEB
+fields and do not inspect the interrupted stack. Limit output to four entries.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 598293096c..fe9ad0080f 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -1884,6 +1884,39 @@ static void setup_raise_exception( struct thread_data *data, ucontext_t *sigcont
+     XSAVE_AREA_HEADER *src_xs;
+     void *callback;
+ 
++#ifdef __PROSPERO__
++    {
++        static unsigned int trace_count;
++        unsigned int n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++
++        if (n <= 4)
++        {
++            ERR( "PW_EXCEPTION_SETUP n=%u data=%p teb=%p tid=%#lx code=%08x flags=%08x addr=%p params=%u p0=%p p1=%p ctxrip=%p ctxrsp=%p sigrip=%p sigrsp=%p stack_base=%p stack_limit=%p dealloc=%p\n",
++                 n, data, data ? data->teb : NULL,
++                 data && data->teb ? (ULONG_PTR)data->teb->ClientId.UniqueThread : 0,
++                 rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress,
++                 rec->NumberParameters,
++                 rec->NumberParameters > 0 ? (void *)rec->ExceptionInformation[0] : NULL,
++                 rec->NumberParameters > 1 ? (void *)rec->ExceptionInformation[1] : NULL,
++                 (void *)context->Rip, (void *)context->Rsp,
++                 (void *)RIP_sig( sigcontext ), (void *)RSP_sig( sigcontext ),
++                 data && data->teb ? data->teb->Tib.StackBase : NULL,
++                 data && data->teb ? data->teb->Tib.StackLimit : NULL,
++                 data && data->teb ? data->teb->DeallocationStack : NULL );
++            ERR( "PW_EXCEPTION_REGS n=%u rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx rsi=%016llx rdi=%016llx rbp=%016llx r8=%016llx r9=%016llx r10=%016llx r11=%016llx r12=%016llx r13=%016llx r14=%016llx r15=%016llx eflags=%08llx cs=%04x ss=%04x fs=%04x gs=%04x\n",
++                 n, (unsigned long long)context->Rax, (unsigned long long)context->Rbx,
++                 (unsigned long long)context->Rcx, (unsigned long long)context->Rdx,
++                 (unsigned long long)context->Rsi, (unsigned long long)context->Rdi,
++                 (unsigned long long)context->Rbp, (unsigned long long)context->R8,
++                 (unsigned long long)context->R9, (unsigned long long)context->R10,
++                 (unsigned long long)context->R11, (unsigned long long)context->R12,
++                 (unsigned long long)context->R13, (unsigned long long)context->R14,
++                 (unsigned long long)context->R15, (unsigned long long)context->EFlags,
++                 context->SegCs, context->SegSs, context->SegFs, context->SegGs );
++        }
++    }
++#endif
++
+     status = send_debug_event( data, rec, context, TRUE, TRUE );
+     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)
+     {
