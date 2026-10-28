@@ -1,0 +1,62 @@
+From: Codex <codex@local>
+Subject: wow64native: log sampled native umutex owner and fields
+
+Pass the syscall object's first four 32-bit words through the opt-in PC
+sampler. Keep the syscall stack words as well so the owner/flags sample can
+be attributed to UMTX_OP_MUTEX_WAIT and its native caller.
+
+---
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -63,6 +63,7 @@
+                                            unsigned long long *, unsigned long long *,
+                                            unsigned long long *, unsigned long long *,
+                                            unsigned long long *, unsigned long long *,
++                                           unsigned long long *, unsigned long long *,
+                                            unsigned long long *);
+ static pw_native_pc_query profile_pc_query;
+ static int profile_pc_enabled;
+@@ -199,12 +200,14 @@
+                 unsigned long long sample_teb = 0, frames64[8] = {0};
+                 unsigned long long stack_limit = 0, stack_base = 0, stack_words[8] = {0};
+                 unsigned long long stack_deep_words[4] = {0};
++                unsigned long long rsp_words[4] = {0};
++                unsigned long long umtx_words[4] = {0};
+                 int owner_match;
+                 unsigned int frames[8] = {0};
+                 unsigned int frame_count = 0;
+                 int rc;
+                 profile_pc_query(&before, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+-                                 NULL, NULL, NULL, NULL);
++                                 NULL, NULL, NULL, NULL, NULL, NULL);
+                 rc = pthread_kill(entry->native_thread, SIGPROF);
+                 if (!rc)
+                 {
+@@ -214,7 +217,7 @@
+                         nanosleep(&pause, NULL);
+                         profile_pc_query(&sequence, &rip, &rsp, &cs, &rax, &rdi, &rsi, &rdx, &r10, &rbp, &rsp0,
+                                          &sample_teb, frames64, &stack_limit, &stack_base, stack_words,
+-                                         stack_deep_words);
++                                         stack_deep_words, rsp_words, umtx_words);
+                         if (sequence != before) break;
+                     }
+                     owner_match = sample_teb == entry->native_teb;
+@@ -241,7 +244,7 @@
+                             frame = previous;
+                         }
+                     }
+-                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx native_teb=%llx sample_teb=%llx owner_match=%d seq=%llu rip=%llx rsp=%llx rsp0=%llx rbp=%llx ret=%08x frames=%u[%08x/%08x,%08x/%08x,%08x/%08x,%08x/%08x] host_frames=[%llx/%llx,%llx/%llx,%llx/%llx,%llx/%llx] host_bounds=%llx-%llx host_words=[%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx] host_deep=[%llx,%llx,%llx,%llx] cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
++                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx native_teb=%llx sample_teb=%llx owner_match=%d seq=%llu rip=%llx rsp=%llx rsp0=%llx rbp=%llx ret=%08x frames=%u[%08x/%08x,%08x/%08x,%08x/%08x,%08x/%08x] host_frames=[%llx/%llx,%llx/%llx,%llx/%llx,%llx/%llx] host_bounds=%llx-%llx host_words=[%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx] host_deep=[%llx,%llx,%llx,%llx] rsp_words=[%llx,%llx,%llx,%llx] umtx_words=[%llx,%llx,%llx,%llx] cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
+                                  entry->state->guest_fs, entry->native_teb, sample_teb, owner_match, sequence, rip, rsp, rsp0, rbp, frames[1], frame_count,
+                                  frames[0], frames[1], frames[2], frames[3], frames[4], frames[5],
+                                  frames[6], frames[7], frames64[0], frames64[1], frames64[2], frames64[3],
+@@ -249,7 +252,8 @@
+                                  stack_words[0], stack_words[1], stack_words[2], stack_words[3],
+                                  stack_words[4], stack_words[5], stack_words[6], stack_words[7],
+                                  stack_deep_words[0], stack_deep_words[1], stack_deep_words[2], stack_deep_words[3],
+-                                 cs,
++                                 rsp_words[0], rsp_words[1], rsp_words[2], rsp_words[3],
++                                 umtx_words[0], umtx_words[1], umtx_words[2], umtx_words[3], cs,
+                                  rax, rdi, rsi, rdx, r10,
+                                  sequence != before ? "ok" : "timeout");
+                 }

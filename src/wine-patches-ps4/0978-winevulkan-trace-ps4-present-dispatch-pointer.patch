@@ -1,0 +1,59 @@
+From: Codex <codex@localhost>
+Subject: winevulkan: Trace PS4 present dispatch pointers
+
+Log the function table and QueuePresentKHR pointer returned by win32u,
+received by winevulkan, and used by the 32-bit dispatch thunk. This identifies
+whether the PE32 present path is invoking the expected win32u callback.
+
+---
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -3379,6 +3379,17 @@
+ 
+     pthread_once( &init_once, vulkan_init_once );
+     if (!vulkan_handle) return NULL;
++#ifdef __PROSPERO__
++    {
++        static BOOL reported;
++        if (!reported)
++        {
++            ERR( "PW_VK_DISPATCH driver table=%p present=%p\n", &vulkan_funcs,
++                 (void *)(ULONG_PTR)vulkan_funcs.p_vkQueuePresentKHR );
++            reported = TRUE;
++        }
++    }
++#endif
+     return &vulkan_funcs;
+ }
+ 
+diff --git a/dlls/winevulkan/vulkan.c b/dlls/winevulkan/vulkan.c
+--- a/dlls/winevulkan/vulkan.c
++++ b/dlls/winevulkan/vulkan.c
+@@ -252,6 +252,13 @@
+     const struct init_params *params = arg;
+ 
+     vk_funcs = __wine_get_vulkan_driver(WINE_VULKAN_DRIVER_VERSION);
++#ifdef __PROSPERO__
++    if (vk_funcs)
++        ERR("PW_VK_DISPATCH init table=%p present=%p\n", vk_funcs,
++            (void *)(ULONG_PTR)vk_funcs->p_vkQueuePresentKHR);
++    else
++        ERR("PW_VK_DISPATCH init table=NULL\n");
++#endif
+     if (!vk_funcs)
+     {
+         ERR("Failed to load Wine graphics driver supporting Vulkan.\n");
+diff --git a/dlls/winevulkan/vulkan_thunks.c b/dlls/winevulkan/vulkan_thunks.c
+--- a/dlls/winevulkan/vulkan_thunks.c
++++ b/dlls/winevulkan/vulkan_thunks.c
+@@ -69767,7 +69767,8 @@
+ 
+     if (!reported)
+     {
+-        ERR("PW_VK_PRESENT Unix PE32 thunk reached\n");
++        ERR("PW_VK_DISPATCH thunk table=%p present=%p\n", vk_funcs,
++            vk_funcs ? (void *)(ULONG_PTR)vk_funcs->p_vkQueuePresentKHR : NULL);
+         reported = TRUE;
+     }
+ 

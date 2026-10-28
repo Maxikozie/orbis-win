@@ -1,0 +1,29 @@
+From: Codex <codex@localhost>
+Subject: build: extend Wine patch series through 0997
+
+Allow the native syscall stack sample to follow the existing profile patches.
+
+---
+diff --git a/tools/build_wine_ps5.sh b/tools/build_wine_ps5.sh
+--- a/tools/build_wine_ps5.sh
++++ b/tools/build_wine_ps5.sh
+@@ -155,7 +155,7 @@
+     (cd "$ps5opengl_sdk" && sha256sum --status --check manifest.sha256) ||
+     fail "PS5 OpenGL SDK does not match its SHA-256 manifest"
+ 
+-# The series: NNNN-lower-case-name.patch, unique numbers through 0996, each a
++# The series: NNNN-lower-case-name.patch, unique numbers through 0997, each a
+ # mail-formatted patch with a subject. Printed in the order it is applied.
+ series() {
+     [ -d "$patches" ] || fail "no patch directory $patches"
+@@ -169,8 +169,8 @@
+             fail "patch name must be NNNN-lower-case-words.patch: $patch"
+         number=$(printf '%s' "$patch" | cut -c1-4 | sed 's/^0*//')
+         number=${number:-0}
+-        [ "$number" -ge 100 ] && [ "$number" -le 996 ] ||
+-            fail "patch number outside 0100-0996: $patch"
++        [ "$number" -ge 100 ] && [ "$number" -le 997 ] ||
++            fail "patch number outside 0100-0997: $patch"
+         [ "$number" -ne "$last" ] || fail "duplicate patch number: $patch"
+         last=$number
+         grep -q '^Subject: ' "$patches/$patch" || fail "patch has no Subject: $patch"

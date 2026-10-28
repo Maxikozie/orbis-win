@@ -1,0 +1,123 @@
+From: Codex <codex@local>
+Subject: win32u: trace PS4 Vulkan acquire and submit boundaries
+
+The game stops presenting after Start while the Wine process remains alive.
+Trace every swapchain-image acquire entry (with sampled successful returns) so
+a blocked acquire is visible, and sample queue-submit entry/return pairs to
+show whether DXVK continues submitting work. Keep normal submit logging
+bounded and report every submit error.
+
+---
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 740fbc338f..b9b8f537e7 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -1527,6 +1527,9 @@ static VkResult win32u_vkGetPhysicalDeviceImageFormatProperties2KHR( VkPhysicalD
+ static unsigned int ps4_surface_create_count;
+ static unsigned int ps4_swapchain_attempt_count;
+ static unsigned int ps4_swapchain_create_count;
++static unsigned int ps4_acquire_count;
++static unsigned int ps4_queue_submit_count;
++static unsigned int ps4_queue_submit2_count;
+ static unsigned int ps4_queue_present_count;
+ static unsigned int ps4_queue_present_entry_count;
+ #endif
+@@ -2095,11 +2098,21 @@ static VkResult win32u_vkAcquireNextImage2KHR( VkDevice client_device, const VkA
+     struct surface *surface = swapchain->surface;
+     RECT client_rect;
+     VkResult res;
++#ifdef __PROSPERO__
++    unsigned int trace_count = __atomic_add_fetch( &ps4_acquire_count, 1, __ATOMIC_RELAXED );
++    WARN( "PS4 Vulkan acquire2 enter #%u timeout=%llu swapchain=%p\n",
++          trace_count, (unsigned long long)acquire_info->timeout, swapchain->obj.host.swapchain );
++#endif
+ 
+     acquire_info_host.swapchain = swapchain->obj.host.swapchain;
+     acquire_info_host.semaphore = semaphore ? semaphore->host.semaphore : 0;
+     acquire_info_host.fence = fence ? fence->host.fence : 0;
+     res = device->p_vkAcquireNextImage2KHR( device->host.device, &acquire_info_host, image_index );
++#ifdef __PROSPERO__
++    if (res != VK_SUCCESS || !(trace_count % 120))
++        WARN( "PS4 Vulkan acquire2 return #%u result=%d image=%u\n", trace_count, res,
++              image_index ? *image_index : 0 );
++#endif
+ 
+     if (!res && get_surface_rect( surface->hwnd, &client_rect, get_dpi_for_window( surface->hwnd ) ) &&
+         !extents_equals( &swapchain->extents, &client_rect ))
+@@ -2122,10 +2135,20 @@ static VkResult win32u_vkAcquireNextImageKHR( VkDevice client_device, VkSwapchai
+     struct surface *surface = swapchain->surface;
+     RECT client_rect;
+     VkResult res;
++#ifdef __PROSPERO__
++    unsigned int trace_count = __atomic_add_fetch( &ps4_acquire_count, 1, __ATOMIC_RELAXED );
++    WARN( "PS4 Vulkan acquire enter #%u timeout=%llu swapchain=%p\n",
++          trace_count, (unsigned long long)timeout, swapchain->obj.host.swapchain );
++#endif
+ 
+     res = device->p_vkAcquireNextImageKHR( device->host.device, swapchain->obj.host.swapchain, timeout,
+                                               semaphore ? semaphore->host.semaphore : 0, fence ? fence->host.fence : 0,
+                                               image_index );
++#ifdef __PROSPERO__
++    if (res != VK_SUCCESS || !(trace_count % 120))
++        WARN( "PS4 Vulkan acquire return #%u result=%d image=%u\n", trace_count, res,
++              image_index ? *image_index : 0 );
++#endif
+ 
+     if (!res && get_surface_rect( surface->hwnd, &client_rect, get_dpi_for_window( surface->hwnd ) ) &&
+         !extents_equals( &swapchain->extents, &client_rect ))
+@@ -2382,8 +2405,18 @@ static VkResult win32u_vkQueueSubmit( VkQueue client_queue, uint32_t count, cons
+     VkResult res = VK_ERROR_OUT_OF_HOST_MEMORY;
+     VkTimelineSemaphoreSubmitInfo *timelines;
+     struct mempool pool = {0};
++#ifdef __PROSPERO__
++    unsigned int trace_count = __atomic_add_fetch( &ps4_queue_submit_count, 1, __ATOMIC_RELAXED );
++#endif
+ 
+     TRACE( "queue %p, count %u, submits %p, fence %p\n", queue, count, submits, fence );
++#ifdef __PROSPERO__
++    if (trace_count <= 8 || !(trace_count % 120))
++        WARN( "PS4 Vulkan submit enter #%u batches=%u commands=%u waits=%u signals=%u\n",
++              trace_count, count, count && submits ? submits[0].commandBufferCount : 0,
++              count && submits ? submits[0].waitSemaphoreCount : 0,
++              count && submits ? submits[0].signalSemaphoreCount : 0 );
++#endif
+ 
+     if (!(timelines = mem_alloc( &pool, count * sizeof(*timelines) ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
+     memset( timelines, 0, count * sizeof(*timelines) );
+@@ -2531,6 +2564,10 @@ static VkResult win32u_vkQueueSubmit( VkQueue client_queue, uint32_t count, cons
+     }
+ 
+     res = device->p_vkQueueSubmit( queue->host.queue, count, submits, fence ? fence->host.fence : 0 );
++#ifdef __PROSPERO__
++    if (trace_count <= 8 || !(trace_count % 120) || res != VK_SUCCESS)
++        WARN( "PS4 Vulkan submit return #%u result=%d\n", trace_count, res );
++#endif
+ 
+ failed:
+     mem_free( &pool );
+@@ -2542,6 +2579,14 @@ static VkResult queue_submit( struct vulkan_queue *queue, uint32_t count, const
+     struct vulkan_fence *fence = client_fence ? vulkan_fence_from_handle( client_fence ) : NULL;
+     struct mempool pool = {0};
+     VkResult res;
++#ifdef __PROSPERO__
++    unsigned int trace_count = __atomic_add_fetch( &ps4_queue_submit2_count, 1, __ATOMIC_RELAXED );
++    if (trace_count <= 8 || !(trace_count % 120))
++        WARN( "PS4 Vulkan submit2 enter #%u batches=%u commands=%u waits=%u signals=%u\n",
++              trace_count, count, count && submits ? submits[0].commandBufferInfoCount : 0,
++              count && submits ? submits[0].waitSemaphoreInfoCount : 0,
++              count && submits ? submits[0].signalSemaphoreInfoCount : 0 );
++#endif
+ 
+     for (uint32_t i = 0; i < count; i++)
+     {
+@@ -2594,6 +2639,10 @@ static VkResult queue_submit( struct vulkan_queue *queue, uint32_t count, const
+     }
+ 
+     res = p_vkQueueSubmit2( queue->host.queue, count, submits, fence ? fence->host.fence : 0 );
++#ifdef __PROSPERO__
++    if (trace_count <= 8 || !(trace_count % 120) || res != VK_SUCCESS)
++        WARN( "PS4 Vulkan submit2 return #%u result=%d\n", trace_count, res );
++#endif
+ 
+ failed:
+     mem_free( &pool );

@@ -1,0 +1,32 @@
+From: Codex <codex@local>
+Subject: [PATCH] wow64native: log signal capability rejection reason
+
+When native WoW64 initialization falls back, report whether the ntdll signal-capability query is missing or which required bits are absent. Keep the capability gate and translator fallback unchanged.
+
+---
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -190,10 +190,22 @@
+         /* Resolve through ntdll's Wine dl facade: this optional export is
+          * absent in older runtimes, which must keep the backend disabled. */
+         query = dlsym(RTLD_DEFAULT, PW_NATIVE_SIGNAL_QUERY);
+-        if (!query) return STATUS_NOT_SUPPORTED;
++        if (!query)
++        {
++            WINE_MESSAGE("PW_NATIVE_INIT rejected reason=signal_query_missing symbol=%s version=%u\n",
++                         PW_NATIVE_SIGNAL_QUERY, PW_NW64_CAPS_VERSION);
++            return STATUS_NOT_SUPPORTED;
++        }
+         caps = query(PW_NW64_CAPS_VERSION);
+         if ((caps & PW_NW64_CAP_REQUIRED) != PW_NW64_CAP_REQUIRED)
++        {
++            WINE_MESSAGE("PW_NATIVE_INIT rejected reason=signal_caps version=%u caps=0x%08x required=0x%08x missing=0x%08x\n",
++                         PW_NW64_CAPS_VERSION, caps, PW_NW64_CAP_REQUIRED,
++                         PW_NW64_CAP_REQUIRED & ~caps);
+             return STATUS_NOT_SUPPORTED;
++        }
++        WINE_MESSAGE("PW_NATIVE_INIT accepted version=%u caps=0x%08x required=0x%08x\n",
++                     PW_NW64_CAPS_VERSION, caps, PW_NW64_CAP_REQUIRED);
+         params->fs_set_proc = (unsigned long long)sysarch;
+         params->transitions_ready = 1;
+         process_ready = 1;

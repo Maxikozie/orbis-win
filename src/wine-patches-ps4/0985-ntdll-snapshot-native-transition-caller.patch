@@ -1,0 +1,65 @@
+From: Codex <codex@local>
+Subject: ntdll: snapshot the native FS-switch caller frame
+
+Capture fixed words beyond the sysarch return slot in pw_native_switch_fs.
+That assembly frame has no conventional frame pointer, so RBP-based walking
+cannot recover the Wine transition caller. Keep the capture within the sampled
+TEB stack bounds and retain the ordinary bounded words for comparison.
+
+---
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -106,6 +106,7 @@
+ static volatile unsigned long long pw_native_pc_frames64[8];
+ static volatile unsigned long long pw_native_pc_stack_limit, pw_native_pc_stack_base;
+ static volatile unsigned long long pw_native_pc_stack_words[8];
++static volatile unsigned long long pw_native_pc_stack_deep_words[4];
+ 
+ __attribute__((visibility("default")))
+ unsigned int __wine_prospero_native_wow64_caps( unsigned int version )
+@@ -129,7 +130,8 @@
+                                                      unsigned long long *frames64,
+                                                      unsigned long long *stack_limit,
+                                                      unsigned long long *stack_base,
+-                                                     unsigned long long *stack_words )
++                                                     unsigned long long *stack_words,
++                                                     unsigned long long *stack_deep_words )
+ {
+     unsigned long long seq = __atomic_load_n( &pw_native_pc_sequence, __ATOMIC_ACQUIRE );
+     if (sequence) *sequence = seq;
+@@ -150,6 +152,8 @@
+     if (stack_base) *stack_base = __atomic_load_n( &pw_native_pc_stack_base, __ATOMIC_RELAXED );
+     if (stack_words) for (unsigned int i = 0; i < 8; ++i)
+         stack_words[i] = __atomic_load_n( &pw_native_pc_stack_words[i], __ATOMIC_RELAXED );
++    if (stack_deep_words) for (unsigned int i = 0; i < 4; ++i)
++        stack_deep_words[i] = __atomic_load_n( &pw_native_pc_stack_deep_words[i], __ATOMIC_RELAXED );
+     return 1;
+ }
+ 
+@@ -1129,6 +1133,8 @@
+         __atomic_store_n( &pw_native_pc_frames64[i], 0, __ATOMIC_RELAXED );
+         __atomic_store_n( &pw_native_pc_stack_words[i], 0, __ATOMIC_RELAXED );
+     }
++    for (unsigned int i = 0; i < 4; ++i)
++        __atomic_store_n( &pw_native_pc_stack_deep_words[i], 0, __ATOMIC_RELAXED );
+     {
+         ULONG_PTR stack_limit = data->teb ? (ULONG_PTR)data->teb->Tib.StackLimit : 0;
+         ULONG_PTR stack_base = data->teb ? (ULONG_PTR)data->teb->Tib.StackBase : 0;
+@@ -1142,6 +1148,17 @@
+                 __atomic_store_n( &pw_native_pc_stack_words[i],
+                                   *(const volatile ULONG_PTR *)(rsp + i * sizeof(ULONG_PTR)),
+                                   __ATOMIC_RELAXED );
++            /* pw_native_switch_fs saves its caller frame below the sysarch
++             * call. These fixed slots cross that known assembly frame to the
++             * Wine transition caller without relying on an RBP chain. */
++            if (!(rsp & 7) && stack_base - rsp >= 0x368)
++            {
++                static const ULONG_PTR offsets[4] = { 0x310, 0x330, 0x338, 0x360 };
++                for (unsigned int i = 0; i < 4; ++i)
++                    __atomic_store_n( &pw_native_pc_stack_deep_words[i],
++                                      *(const volatile ULONG_PTR *)(rsp + offsets[i]),
++                                      __ATOMIC_RELAXED );
++            }
+         }
+         if (data->teb && (CS_sig(context) & 0xffff) == 0x43)
+         {

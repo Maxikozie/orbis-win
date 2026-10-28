@@ -1,0 +1,20 @@
+diff --git a/src/vulkan/wsi/wsi_common_headless.c b/src/vulkan/wsi/wsi_common_headless.c
+index 72da70e..67b0063 100644
+--- a/src/vulkan/wsi/wsi_common_headless.c
++++ b/src/vulkan/wsi/wsi_common_headless.c
+@@ -873,7 +873,14 @@ wsi_headless_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+    {
+       void *addrs[8];
+       uint32_t pitch_px = 0;
+-      bool direct = chain->base.image_count <= ARRAY_SIZE(addrs);
++      const char *const force_copy_env = getenv("ORBIS_WSI_FORCE_COPY");
++      const bool force_copy = force_copy_env != NULL && force_copy_env[0] != '\0' &&
++                              force_copy_env[0] != '0';
++      bool direct = !force_copy && chain->base.image_count <= ARRAY_SIZE(addrs);
++
++      if (force_copy)
++         mesa_logi("wsi/orbis: ORBIS_WSI_FORCE_COPY - using owned scan-out buffers instead of registering "
++                   "the swapchain images");
+ 
+       for (uint32_t i = 0; direct && i < chain->base.image_count; i++) {
+          const struct wsi_image *img = &chain->images[i].base;

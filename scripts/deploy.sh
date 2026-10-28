@@ -74,6 +74,15 @@ pkg=$(readlink -f "$PKG_DIR/$TITLE_ID.pkg" 2>/dev/null) ||
   die "no package for $TARGET — run: ./scripts/build.sh $TARGET --pkg"
 [[ -f $pkg ]] || die "no package for $TARGET — run: ./scripts/build.sh $TARGET --pkg"
 
+# The launcher app must use the relocatable handoff: the ordinary low-address
+# eboot collides with non-relocatable PE32 games such as Oblivion. Refuse to
+# deploy an older or hand-staged package that silently lacks the high-address
+# Wine PRX.
+if [[ $TARGET == wine-app || $TARGET == wine-app-base ]]; then
+  reloc_prx="$PKG_DIR/pkg-stage/sce_module/relocated_wine_app.prx"
+  [[ -s $reloc_prx ]] || die "package stage lacks relocated_wine_app.prx — rebuild with ./scripts/build-app-ps4.sh --pkg"
+fi
+
 # ⚠ Refuse to upload a package older than what it is built from. deploy.sh
 # only sends an existing .pkg, so forgetting to repackage sends a stale build
 # and the console reports a failure that was already fixed. That cost two
@@ -85,7 +94,7 @@ if [[ $TARGET == wine-app || $TARGET == wine-app-base ]]; then
                 "$ROOT/src/native" -type f -newer "$pkg" -print -quit 2>/dev/null || true)
   if [[ -n $newest ]]; then
     if [[ $TARGET == wine-app ]]; then
-      hint='./scripts/build-app-ps4.sh --pkg --neo'
+      hint='./scripts/build-app-ps4.sh --pkg'
     else
       hint='TITLE_ID=GLDS10041 TITLE="Prospero Wine Base" PKG_OUT="$PWD/pkgout/wine-app-variants/GLDS10041-base" ./scripts/build-app-ps4.sh --pkg'
     fi

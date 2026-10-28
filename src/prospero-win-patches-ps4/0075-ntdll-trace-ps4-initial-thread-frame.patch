@@ -1,0 +1,54 @@
+From: Codex <codex@localhost>
+Subject: [PATCH] ntdll: trace the PS4 initial thread syscall frame
+
+Record the native entry parameters, TEB stack bounds, Wine syscall-frame
+pointer, and the prepared initial CONTEXT before the guest-thread handoff.
+These opt-in markers delimit init_syscall_frame() from the assembly
+syscall-dispatcher transition without changing the frame contents.
+
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -3864,6 +3864,20 @@
+     I386_CONTEXT *wow_context;
+     void *callback;
+ 
++    pw_native_startup_mark( "init_syscall_frame entered", -1, 0 );
++#ifdef __PROSPERO__
++    if (getenv( "WINE_PS5_TRACE_STARTUP"))
++    {
++        char line[320];
++        int len = snprintf( line, sizeof(line),
++                            "wine startup: native_signal init_syscall_frame begin entry=%p arg=%p teb=%p data=%p frame=%p stack=%p..%p framesz=%zu fs=%p\n",
++                            entry, arg, teb, data, frame, (void *)teb->Tib.StackLimit,
++                            (void *)teb->Tib.StackBase, thread_data->frame_size,
++                            thread_data->pthread_teb );
++        if (len > 0) wine_write_stderr( line, len < sizeof(line) ? len : sizeof(line) - 1 );
++    }
++#endif
++
+     assert( thread_data->frame_size == frame_size );
+     thread_data->instrumentation_callback = &instrumentation_callback;
+ 
+@@ -3951,7 +3965,22 @@
+         frame->rip = (ULONG64)callback;
+     }
+ 
++#ifdef __PROSPERO__
++    if (getenv( "WINE_PS5_TRACE_STARTUP"))
++    {
++        char line[320];
++        int len = snprintf( line, sizeof(line),
++                            "wine startup: native_signal init_syscall_frame ready entry=%p arg=%p ctx=%p ctxrip=%llx ctxrsp=%llx frame=%p rip=%llx rsp=%llx cfa=%llx fs=%p\n",
++                            entry, arg, ctx, (unsigned long long)ctx->Rip,
++                            (unsigned long long)ctx->Rsp, frame,
++                            (unsigned long long)frame->rip, (unsigned long long)frame->rsp,
++                            (unsigned long long)frame->syscall_cfa, thread_data->pthread_teb );
++        if (len > 0) wine_write_stderr( line, len < sizeof(line) ? len : sizeof(line) - 1 );
++    }
++#endif
++
+     pthread_sigmask( SIG_UNBLOCK, &server_block_set, NULL );
++    pw_native_startup_mark( "init_syscall_frame returned", -1, 0 );
+ }
+ 
+ 

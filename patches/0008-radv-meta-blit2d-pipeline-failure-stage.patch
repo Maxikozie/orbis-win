@@ -1,0 +1,35 @@
+diff --git a/src/amd/vulkan/meta/radv_meta_blit2d.c b/src/amd/vulkan/meta/radv_meta_blit2d.c
+index 1400339..3778aa1 100644
+--- a/src/amd/vulkan/meta/radv_meta_blit2d.c
++++ b/src/amd/vulkan/meta/radv_meta_blit2d.c
+@@ -13,6 +13,7 @@
+ #include "radv_meta.h"
+ #include "vk_format.h"
+ #include "vk_shader_module.h"
++#include "util/log.h"
+ 
+ enum blit2d_src_type {
+    BLIT2D_SRC_TYPE_IMAGE,
+@@ -489,8 +490,11 @@ get_color_pipeline(struct radv_device *device, enum blit2d_src_type src_type, Vk
+    VkResult result;
+ 
+    result = create_layout(device, src_type, layout_out);
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      mesa_loge("RADV_BLIT2D_PIPELINE_FAIL stage=layout result=%d src=%d format=%d samples=%u/%u",
++                result, src_type, format, src_log2_samples, dst_log2_samples);
+       return result;
++   }
+ 
+    memset(&key, 0, sizeof(key));
+    key.type = RADV_META_OBJECT_KEY_BLIT2D_COLOR;
+@@ -610,6 +614,9 @@ get_color_pipeline(struct radv_device *device, enum blit2d_src_type src_type, Vk
+ 
+    result = vk_meta_create_graphics_pipeline(&device->vk, &device->meta_state.device, &pipeline_create_info, &render,
+                                              &key, sizeof(key), pipeline_out);
++   if (result != VK_SUCCESS)
++      mesa_loge("RADV_BLIT2D_PIPELINE_FAIL stage=graphics result=%d src=%d format=%d samples=%u/%u",
++                result, src_type, format, src_log2_samples, dst_log2_samples);
+ 
+    ralloc_free(vs_module);
+    ralloc_free(fs_module);

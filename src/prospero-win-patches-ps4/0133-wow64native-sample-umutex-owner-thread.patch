@@ -1,0 +1,91 @@
+From: Codex <codex@local>
+Subject: wow64native: sample registered threads for mutex owner PC
+
+When a sampled native WOW64 thread waits on UMTX_OP_MUTEX_WAIT, retain the
+umutex owner TID and briefly sample registered threads regardless of CPU use.
+Emit the matching owner's native PC and stack once it is found, while keeping
+normal high-CPU sampling unchanged outside those short sweeps.
+
+---
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -172,10 +172,14 @@
+ #ifdef __PROSPERO__
+ static void *profile_watch_main(void *unused)
+ {
++    unsigned int owner_tid = 0, owner_scan_cycles = 0;
++    int scan_owner;
+     (void)unused;
+     for (;;)
+     {
+         sleep(2);
++        scan_owner = owner_scan_cycles != 0;
++        if (owner_scan_cycles) --owner_scan_cycles;
+         pthread_mutex_lock(&profile_watch_lock);
+         for (unsigned int i = 0; i < PW_PROFILE_WATCH_MAX_THREADS; ++i)
+         {
+@@ -185,6 +189,7 @@
+             unsigned long long cpu_ns = 0, cpu_delta_ns = 0;
+             struct timespec cpu_time;
+             int changed;
++            int pc_active;
+             if (!entry->state) continue;
+             profile_read(entry->state, &host_calls, &guest_calls, &host_ticks, &guest_ticks,
+                          &unix_calls, &syscall_calls, &last_tsc);
+@@ -193,7 +198,8 @@
+                 cpu_ns = (unsigned long long)cpu_time.tv_sec * 1000000000ull + cpu_time.tv_nsec;
+                 if (entry->samples && cpu_ns >= entry->cpu_ns) cpu_delta_ns = cpu_ns - entry->cpu_ns;
+             }
+-            if (profile_pc_enabled && cpu_delta_ns > 100000000ull)
++            pc_active = cpu_delta_ns > 100000000ull;
++            if (profile_pc_enabled && (pc_active || scan_owner))
+             {
+                 unsigned long long before = 0, sequence = 0, rip = 0, rsp = 0, cs = 0;
+                 unsigned long long rax = 0, rdi = 0, rsi = 0, rdx = 0, r10 = 0, rbp = 0, rsp0 = 0;
+@@ -203,7 +209,7 @@
+                 unsigned long long rsp_words[4] = {0};
+                 unsigned long long umtx_words[4] = {0};
+                 unsigned long long native_tid = 0;
+-                int owner_match;
++                int owner_match, is_waiter, is_owner;
+                 unsigned int frames[8] = {0};
+                 unsigned int frame_count = 0;
+                 int rc;
+@@ -222,6 +228,16 @@
+                         if (sequence != before) break;
+                     }
+                     owner_match = sample_teb == entry->native_teb;
++                    is_waiter = owner_match && (cs & 0xffff) == 0x43 && rax == 0x1c6 && rsi == 0x11;
++                    if (is_waiter)
++                    {
++                        owner_tid = (unsigned int)umtx_words[0] & 0x7fffffff;
++                        owner_scan_cycles = 2;
++                        scan_owner = 1;
++                    }
++                    is_owner = owner_match && owner_tid && native_tid == owner_tid;
++                    if (owner_match && (pc_active || is_waiter || is_owner))
++                    {
+                     /* Walk at most four conventional 32-bit EBP frames. The
+                      * return-address-only sample was not enough to validate
+                      * the caller in stripped game DLLs. Keep every read near
+@@ -245,7 +261,7 @@
+                             frame = previous;
+                         }
+                     }
+-                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx native_teb=%llx sample_teb=%llx owner_match=%d seq=%llu rip=%llx rsp=%llx rsp0=%llx rbp=%llx ret=%08x frames=%u[%08x/%08x,%08x/%08x,%08x/%08x,%08x/%08x] host_frames=[%llx/%llx,%llx/%llx,%llx/%llx,%llx/%llx] host_bounds=%llx-%llx host_words=[%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx] host_deep=[%llx,%llx,%llx,%llx] rsp_words=[%llx,%llx,%llx,%llx] umtx_words=[%llx,%llx,%llx,%llx] native_tid=%llx cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
++                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx native_teb=%llx sample_teb=%llx owner_match=%d seq=%llu rip=%llx rsp=%llx rsp0=%llx rbp=%llx ret=%08x frames=%u[%08x/%08x,%08x/%08x,%08x/%08x,%08x/%08x] host_frames=[%llx/%llx,%llx/%llx,%llx/%llx,%llx/%llx] host_bounds=%llx-%llx host_words=[%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx] host_deep=[%llx,%llx,%llx,%llx] rsp_words=[%llx,%llx,%llx,%llx] umtx_words=[%llx,%llx,%llx,%llx] native_tid=%llx umtx_owner_tid=%x umtx_owner_match=%d cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
+                                  entry->state->guest_fs, entry->native_teb, sample_teb, owner_match, sequence, rip, rsp, rsp0, rbp, frames[1], frame_count,
+                                  frames[0], frames[1], frames[2], frames[3], frames[4], frames[5],
+                                  frames[6], frames[7], frames64[0], frames64[1], frames64[2], frames64[3],
+@@ -254,9 +270,10 @@
+                                  stack_words[4], stack_words[5], stack_words[6], stack_words[7],
+                                  stack_deep_words[0], stack_deep_words[1], stack_deep_words[2], stack_deep_words[3],
+                                  rsp_words[0], rsp_words[1], rsp_words[2], rsp_words[3],
+-                                 umtx_words[0], umtx_words[1], umtx_words[2], umtx_words[3], native_tid, cs,
++                                 umtx_words[0], umtx_words[1], umtx_words[2], umtx_words[3], native_tid, owner_tid, is_owner, cs,
+                                  rax, rdi, rsi, rdx, r10,
+                                  sequence != before ? "ok" : "timeout");
++                    }
+                 }
+                 else WINE_MESSAGE("PW_NATIVE_PC teb=%llx signal-error=%d\n", entry->state->guest_fs, rc);
+             }

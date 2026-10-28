@@ -1,0 +1,37 @@
+diff --git a/src/d3d9/d3d9_common_texture.cpp b/src/d3d9/d3d9_common_texture.cpp
+index ebf9aca..f6b49f0 100644
+--- a/src/d3d9/d3d9_common_texture.cpp
++++ b/src/d3d9/d3d9_common_texture.cpp
+@@ -78,4 +78,16 @@ namespace dxvk {
+ 
+       if (!IsManaged()) {
++        if (unlikely(!m_image->hasStorage())) {
++          Logger::err(str::format("D3D9CommonTexture: image has no backing storage texture=0x",
++            std::hex, reinterpret_cast<uintptr_t>(this), " image=0x",
++            reinterpret_cast<uintptr_t>(m_image.ptr()), " device=0x",
++            reinterpret_cast<uintptr_t>(m_device), " d3dFormat=0x", uint32_t(m_desc.Format),
++            " vkFormat=0x", uint32_t(m_mapping.FormatColor), " pool=0x", uint32_t(m_desc.Pool),
++            " usage=0x", m_desc.Usage, " extent=", std::dec, m_desc.Width, "x", m_desc.Height,
++            "x", m_desc.Depth, " layers=", m_desc.ArraySize, " mips=", m_desc.MipLevels,
++            " shared=", m_desc.IsBackBuffer));
++          throw DxvkError("D3D9: Image has no backing storage.");
++        }
++
+         m_size = m_image->getMemoryInfo().size;
+         if (!m_device->ChangeReportedMemory(-m_size))
+           throw DxvkError("D3D9: Reporting out of memory from tracking.");
+diff --git a/src/dxvk/dxvk_image.h b/src/dxvk/dxvk_image.h
+index 0c80d54..2a1d817 100644
+--- a/src/dxvk/dxvk_image.h
++++ b/src/dxvk/dxvk_image.h
+@@ -521,5 +521,9 @@ namespace dxvk {
+     DxvkResourceMemoryInfo getMemoryInfo() const {
+       return m_storage->getMemoryInfo();
+     }
++
++    bool hasStorage() const {
++      return m_storage != nullptr;
++    }
+ 
+     /**
+      * \brief Get full subresource range of the image

@@ -1,0 +1,90 @@
+From: Codex <codex@local>
+Subject: server: trace Orbis create_mapping stages to klog
+
+Record a bounded set of create_mapping request entries, early failures, and
+completed handle creation through the console debug output channel. Stderr is
+not captured on this console. This identifies the exact server stage pending
+when a WoW64 client waits for the mapping reply; mapping behavior is unchanged.
+
+---
+diff --git a/server/mapping.c b/server/mapping.c
+index 2ddd4d1502..886888817a 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -1647,16 +1647,53 @@ struct object *create_user_data_mapping( struct object *root, struct unicode_str
+ }
+ 
+ /* create a file mapping */
++#ifdef __ORBIS__
++static void pw_mapping_trace( const char *format, ... )
++{
++    extern int sceKernelDebugOutText( int channel, const char *text );
++    char line[256];
++    va_list args;
++
++    va_start( args, format );
++    vsnprintf( line, sizeof(line), format, args );
++    va_end( args );
++    sceKernelDebugOutText( 0, line );
++}
++#endif
++
+ DECL_HANDLER(create_mapping)
+ {
+     struct file *file = NULL;
+     struct mapping_init_data data = { .size = req->size, .file_access = req->file_access };
+     struct object_params params = { .ops = &mapping_ops, .access = req->access, .init_data = &data };
++#ifdef __ORBIS__
++    unsigned int trace_n;
++    int trace;
++
++    static unsigned int trace_count;
++    trace_n = __atomic_add_fetch( &trace_count, 1, __ATOMIC_RELAXED );
++    trace = trace_n <= 256;
++    if (trace)
++        pw_mapping_trace( "wineserver: create_mapping begin n=%u tid=%04x file=%04x flags=%#x size=%lld access=%#x file_access=%#x\n",
++                          trace_n, current->id, req->file_handle, req->flags, (long long)req->size,
++                          req->access, req->file_access );
++#endif
+ 
+-    if (!get_req_object_attributes( &params )) return;
++    if (!get_req_object_attributes( &params ))
++    {
++#ifdef __ORBIS__
++        if (trace) pw_mapping_trace( "wineserver: create_mapping attrs-fail n=%u tid=%04x status=%08x\n",
++                                     trace_n, current->id, get_error() );
++#endif
++        return;
++    }
+ 
+     if (!(data.flags = get_mapping_flags( req->file_handle, req->flags )))
+     {
++#ifdef __ORBIS__
++        if (trace) pw_mapping_trace( "wineserver: create_mapping flags-fail n=%u tid=%04x status=%08x\n",
++                                     trace_n, current->id, get_error() );
++#endif
+         if (params.root) release_object( params.root );
+         return;
+     }
+@@ -1664,6 +1701,10 @@ DECL_HANDLER(create_mapping)
+     {
+         if (!(file = get_file_obj( current->process, req->file_handle, req->file_access )))
+         {
++#ifdef __ORBIS__
++            if (trace) pw_mapping_trace( "wineserver: create_mapping file-fail n=%u tid=%04x status=%08x\n",
++                                         trace_n, current->id, get_error() );
++#endif
+             if (params.root) release_object( params.root );
+             return;
+         }
+@@ -1691,6 +1732,10 @@ DECL_HANDLER(create_mapping)
+ #endif
+ 
+     reply->handle = create_named_obj_handle( current->process, &params );
++#ifdef __ORBIS__
++    if (trace) pw_mapping_trace( "wineserver: create_mapping done n=%u tid=%04x handle=%04x status=%08x fd=%p\n",
++                                 trace_n, current->id, reply->handle, get_error(), (void *)data.fd );
++#endif
+ 
+     if (file) release_object( file );
+     if (data.fd) release_object( data.fd );

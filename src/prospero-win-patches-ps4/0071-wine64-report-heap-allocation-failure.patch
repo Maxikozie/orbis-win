@@ -1,0 +1,206 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Subject: [PATCH] wine64: report Wine heap allocation failures
+
+Expose the last failed Wine heap allocation, attempted mmap size and errno
+through the existing runtime memory log. This distinguishes exhausted direct
+memory from heap-side mapping failures during RADV pipeline creation.
+
+---
+42 insertions(+), 19 deletions(-)
+
+diff --git a/wine/ps5/pw_wine_heap.h b/wine/ps5/pw_wine_heap.h
+--- a/wine/ps5/pw_wine_heap.h
++++ b/wine/ps5/pw_wine_heap.h
+@@ -13,6 +13,8 @@
+ typedef struct PwWineHeapStats {
+     uint64_t live_bytes,peak_live_bytes,mapped_bytes,peak_mapped_bytes;
+     uint64_t allocations,frees,failures,foreign_frees,large_live;
++    uint64_t last_failed_bytes,last_map_bytes,last_map_errno;
++    uint32_t last_failure_reason;
+ } PwWineHeapStats;
+ 
+ void *pw_wine_heap_malloc(size_t bytes);
+diff --git a/wine/ps5/pw_wine_heap.c b/wine/ps5/pw_wine_heap.c
+--- a/wine/ps5/pw_wine_heap.c
++++ b/wine/ps5/pw_wine_heap.c
+@@ -1,5 +1,6 @@
+ /* SPDX-License-Identifier: LGPL-2.1-or-later */
+ #include "pw_wine_heap.h"
++#include <errno.h>
+ #include <pthread.h>
+ #include <string.h>
+ #include <sys/mman.h>
+@@ -39,6 +40,10 @@
+ static void *map(size_t bytes)
+ {
+     void *p=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
++    if(p==MAP_FAILED) {
++        stats.last_map_bytes=bytes;
++        stats.last_map_errno=(uint64_t)errno;
++    }
+     return p==MAP_FAILED?NULL:p;
+ }
+ static void note_mapped(int64_t delta)
+@@ -112,16 +117,16 @@
+ }
+ static void *allocate(size_t bytes)
+ {
+-    if(bytes>UINT32_MAX-PAGE){stats.failures++;return NULL;}
++    if(bytes>UINT32_MAX-PAGE){stats.failures++;stats.last_failed_bytes=bytes;stats.last_failure_reason=1;return NULL;}
+     Header *header;
+     if(bytes+HEADER<=class_bytes(CLASSES-1)) {
+         unsigned index=class_for(bytes);
+-        if(!(header=small_alloc(index))){stats.failures++;return NULL;}
++        if(!(header=small_alloc(index))){stats.failures++;stats.last_failed_bytes=bytes;stats.last_failure_reason=2;return NULL;}
+         *header=(Header){MAGIC_SMALL,index,(uint32_t)bytes};
+     } else {
+         size_t mapped=(bytes+HEADER+sizeof(LargeHeader)+PAGE-1)/PAGE*PAGE;
+         LargeHeader *large=large_count<MAX_LARGE?map(mapped):NULL;
+-        if(!large){stats.failures++;return NULL;}
++        if(!large){stats.failures++;stats.last_failed_bytes=bytes;stats.last_failure_reason=large_count<MAX_LARGE?3:4;return NULL;}
+         *large=(LargeHeader){mapped,bytes};note_mapped((int64_t)mapped);stats.large_live++;
+         header=(Header *)(large+1);*header=(Header){MAGIC_LARGE,CLASSES,(uint32_t)bytes};
+         uint32_t slot=large_slot(header+1);
+@@ -178,7 +183,7 @@
+ void *pw_wine_heap_calloc(size_t count,size_t bytes)
+ {
+     if(bytes && count>SIZE_MAX/bytes) {
+-        pthread_mutex_lock(&lock);stats.failures++;pthread_mutex_unlock(&lock);return NULL;
++        pthread_mutex_lock(&lock);stats.failures++;stats.last_failed_bytes=SIZE_MAX;stats.last_failure_reason=5;pthread_mutex_unlock(&lock);return NULL;
+     }
+     void *result=pw_wine_heap_malloc(count*bytes);
+     if(result)memset(result,0,count*bytes);
+@@ -189,7 +194,7 @@
+     if(!alignment || (alignment&(alignment-1)))return NULL;
+     if(alignment<=HEADER)return pw_wine_heap_malloc(bytes);
+     if(bytes>SIZE_MAX-alignment || alignment>UINT32_MAX) {
+-        pthread_mutex_lock(&lock);stats.failures++;pthread_mutex_unlock(&lock);return NULL;
++        pthread_mutex_lock(&lock);stats.failures++;stats.last_failed_bytes=bytes;stats.last_failure_reason=1;pthread_mutex_unlock(&lock);return NULL;
+     }
+     pthread_mutex_lock(&lock);
+     uint8_t *base=allocate(bytes+alignment),*result=NULL;
+@@ -233,7 +238,7 @@
+     }
+     if(!header) {
+         /* Not ours: its size is unknown, so it cannot be moved safely. */
+-        stats.failures++;pthread_mutex_unlock(&lock);return NULL;
++        stats.failures++;stats.last_failed_bytes=bytes;stats.last_failure_reason=6;pthread_mutex_unlock(&lock);return NULL;
+     }
+     size_t old=header->requested;
+     if(header->magic==MAGIC_SMALL && bytes+HEADER<=class_bytes(header->class_index) &&
+diff --git a/wine/ps5/pw_wine_dmem_ps5.c b/wine/ps5/pw_wine_dmem_ps5.c
+--- a/wine/ps5/pw_wine_dmem_ps5.c
++++ b/wine/ps5/pw_wine_dmem_ps5.c
+@@ -304,7 +304,7 @@
+ {
+     PwWineDmemStats dmem_stats = { 0 };
+     PwWineHeapStats heap_stats;
+-    uint64_t values[8];
++    uint64_t values[13];
+ 
+     if (state > 0) pw_wine_dmem_stats(&dmem, &dmem_stats);
+     pw_wine_heap_stats(&heap_stats);
+@@ -316,6 +316,11 @@
+     values[5] = heap_stats.peak_mapped_bytes;
+     values[6] = dmem_stats.low_backed_bytes;
+     values[7] = dmem_stats.peak_low_backed_bytes;
+-    for (unsigned int i = 0; i < count && i < 8; i++) out[i] = values[i];
+-    return 8;
+-}
++    values[8] = heap_stats.failures;
++    values[9] = heap_stats.last_failed_bytes;
++    values[10] = heap_stats.last_map_bytes;
++    values[11] = heap_stats.last_map_errno;
++    values[12] = heap_stats.last_failure_reason;
++    for (unsigned int i = 0; i < count && i < 13; i++) out[i] = values[i];
++    return 13;
++}
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1541,20 +1541,24 @@
+                 }
+             }
+             if (tick % 300 == 0) {
+-                uint64_t m[8] = { 0 };
++                uint64_t m[13] = { 0 };
+                 size_t flexible = 0;
+ 
+-                if (start.memory_stats) start.memory_stats(m, 8);
++                if (start.memory_stats) start.memory_stats(m, 13);
+                 (void)sceKernelAvailableFlexibleMemorySize(&flexible);
+                 /* dmem_low: the part below 4 GiB, where an i386 guest's own
+                  * memory lives (2 GiB, or 4 GiB when large-address-aware). */
+                 PS5LOG_LOG("PW_WINE64 memory flexible_free=%zuK dmem=%lluK dmem_peak=%lluK runs=%llu "
+-                           "dmem_failures=%llu heap=%lluK heap_peak=%lluK dmem_low=%lluK dmem_low_peak=%lluK",
++                           "dmem_failures=%llu heap=%lluK heap_peak=%lluK dmem_low=%lluK dmem_low_peak=%lluK "
++                           "heap_failures=%llu heap_last_failed=%llu heap_last_map=%llu heap_last_map_errno=%llu "
++                           "heap_last_failure_reason=%llu",
+                            flexible >> 10, (unsigned long long)(m[0] >> 10),
+                            (unsigned long long)(m[1] >> 10), (unsigned long long)m[2],
+                            (unsigned long long)m[3], (unsigned long long)(m[4] >> 10),
+                            (unsigned long long)(m[5] >> 10), (unsigned long long)(m[6] >> 10),
+-                           (unsigned long long)(m[7] >> 10));
++                           (unsigned long long)(m[7] >> 10), (unsigned long long)m[8],
++                           (unsigned long long)m[9], (unsigned long long)m[10],
++                           (unsigned long long)m[11], (unsigned long long)m[12]);
+             }
+         }
+     }
+diff --git a/tests/test_pw_wine_dmem_ps5.c b/tests/test_pw_wine_dmem_ps5.c
+--- a/tests/test_pw_wine_dmem_ps5.c
++++ b/tests/test_pw_wine_dmem_ps5.c
+@@ -29,6 +29,12 @@
+ static int phys_fd, refuse_map, cpu_only_refused;
+ static unsigned char allocated[PHYS_PAGES];
+ 
++int sceKernelDebugOutText(int channel, const char *text)
++{
++    (void)channel;
++    (void)text;
++    return 0;
++}
+ 
+ int sceKernelReserveVirtualRange(void **address, size_t bytes, int flags, size_t alignment)
+ {
+@@ -120,8 +126,8 @@
+         assert(used() == 0);
+         assert(!__wine_ps5_mprotect(base, PAGE, PROT_READ) && !__wine_ps5_munmap(base, PAGE));
+         {
+-            uint64_t counters[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+-            assert(__wine_ps5_memory_stats(counters, 8) == 8 && !counters[0] && !counters[2] && !counters[6]);
++            uint64_t counters[13] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
++            assert(__wine_ps5_memory_stats(counters, 13) == 13 && !counters[0] && !counters[2] && !counters[6]);
+         }
+         _exit(0);
+     }
+@@ -161,12 +167,12 @@
+         /* The title's counters: backed now, peak (the self-check's page was
+          * the first), runs, refusals; then the heap's; then the part below
+          * 4 GiB, all of it for a region below 4 GiB. */
+-        uint64_t counters[8] = { 0 };
++        uint64_t counters[13] = { 0 };
+         const uint64_t low = (uintptr_t)base < ((uintptr_t)1 << 32) ? 2 * PAGE : 0;
+-        assert(__wine_ps5_memory_stats(counters, 8) == 8);
++        assert(__wine_ps5_memory_stats(counters, 13) == 13);
+         assert(counters[0] == 2 * PAGE && counters[1] == 2 * PAGE && counters[2] == 1 && counters[3] == 0);
+         assert(counters[6] == low && counters[7] == low);
+-        assert(__wine_ps5_memory_stats(counters, 1) == 8);
++        assert(__wine_ps5_memory_stats(counters, 1) == 13);
+     }
+     memset(base, 0x33, 2 * PAGE);
+     /* Read-execute, then back: the bytes stay. */
+diff --git a/tests/test_pw_wine_heap.c b/tests/test_pw_wine_heap.c
+--- a/tests/test_pw_wine_heap.c
++++ b/tests/test_pw_wine_heap.c
+@@ -65,6 +65,7 @@
+     assert(!pw_wine_heap_calloc(SIZE_MAX/2,4));
+     assert(!pw_wine_heap_malloc(SIZE_MAX-8));
+     pw_wine_heap_stats(&s);assert(s.failures==failures+2);
++    assert(s.last_failed_bytes==SIZE_MAX-8 && s.last_failure_reason==1);
+     /* Pointers the heap never returned are left alone and counted. */
+     void *libc=malloc(64);uint8_t local[32];
+     pw_wine_heap_free(libc);pw_wine_heap_free(local+16);pw_wine_heap_free(zero+16);
+-- 
+2.43.0

@@ -24,9 +24,38 @@ OBJ=${PW_APP_OBJ:-$ROOT/build/wine-app/obj}
 TITLE_ID="${TITLE_ID:-GLDS10005}"
 TITLE="${TITLE:-Prospero Wine}"
 export OO_PS4_TOOLCHAIN=$BUNDLE/sdk
-PKG=0; NEO=0
-for a in "$@"; do case $a in --pkg) PKG=1;; --neo) NEO=1;; esac; done
+PKG=0; NEO=0; LOW_BASE=0; RELOC_STAGE=0
+for a in "$@"; do
+  case $a in
+    --pkg) PKG=1 ;;
+    --neo) NEO=1 ;;
+    --non-relocatable) LOW_BASE=1 ;;
+    --relocatable-stage) RELOC_STAGE=1 ;;
+  esac
+done
 say(){ printf '== %s\n' "$*"; }
+
+# All installable Wine packages use the high-address PRX + low-address handoff
+# by default. Oblivion's non-relocatable PE32 image occupies 0x400000, which
+# collides with the ordinary eboot. Keep the old layout only for an explicit
+# diagnostic build; the relocatable script calls this file with the private
+# --relocatable-stage flag to assemble its base payload.
+if (( PKG && !LOW_BASE && !RELOC_STAGE )); then
+  OUT="${PKG_OUT:-$ROOT/pkgout/wine-app}"
+  BASE_OUT="${PKG_BASE_OUT:-$ROOT/pkgout/wine-app-relocatable-base}"
+  args=()
+  (( NEO )) && args+=(--neo)
+  exec env \
+    TITLE_ID="$TITLE_ID" TITLE="$TITLE" PKG_OUT="$OUT" PKG_BASE_OUT="$BASE_OUT" \
+    PW_ROOT="$PW" PW_APP_OBJ="$OBJ" \
+    PW_WINE64_WAIT_WATCHDOG="$PW_WINE64_WAIT_WATCHDOG" \
+    PW_WINE64_SERVER_DIRECT_OFF="$PW_WINE64_SERVER_DIRECT_OFF" \
+    PW_WINE64_HEAP_FLEXIBLE="$PW_WINE64_HEAP_FLEXIBLE" \
+    PS4_KERNELBASE32_DLL="${PS4_KERNELBASE32_DLL:-}" \
+    PS4_IPHLPAPI32_DLL="${PS4_IPHLPAPI32_DLL:-}" \
+    PS4_NTDLL32_DLL="${PS4_NTDLL32_DLL:-}" \
+    "$ROOT/scripts/build-relocatable-wine-ps4.sh" "${args[@]}"
+fi
 
 rm -rf "$OBJ"; mkdir -p "$OBJ"
 INC="-I$PW -I$PW/include -I$PW/src -I$PW/native -I$ROOT/src/native"
@@ -40,6 +69,7 @@ INC="-I$PW -I$PW/include -I$PW/src -I$PW/native -I$ROOT/src/native"
 PS5LOG_NET="-include $PW/native/ps5log/ps5log_ps5_net.h"
 PW_WINE64_WAIT_WATCHDOG="${PW_WINE64_WAIT_WATCHDOG:-0}"
 PW_WINE64_SERVER_DIRECT_OFF="${PW_WINE64_SERVER_DIRECT_OFF:-0}"
+PW_WINE64_HEAP_FLEXIBLE="${PW_WINE64_HEAP_FLEXIBLE:-0}"
 case "$PW_WINE64_WAIT_WATCHDOG" in
   0|1) ;;
   *) echo "PW_WINE64_WAIT_WATCHDOG must be 0 or 1" >&2; exit 2 ;;
@@ -48,7 +78,11 @@ case "$PW_WINE64_SERVER_DIRECT_OFF" in
   0|1) ;;
   *) echo "PW_WINE64_SERVER_DIRECT_OFF must be 0 or 1" >&2; exit 2 ;;
 esac
-CFL="-std=gnu11 -O2 -fPIC -DPW_WINE64_WAIT_WATCHDOG=$PW_WINE64_WAIT_WATCHDOG -DPW_WINE64_SERVER_DIRECT_OFF=$PW_WINE64_SERVER_DIRECT_OFF $INC $PS5LOG_NET"
+case "$PW_WINE64_HEAP_FLEXIBLE" in
+  0|1) ;;
+  *) echo "PW_WINE64_HEAP_FLEXIBLE must be 0 or 1" >&2; exit 2 ;;
+esac
+CFL="-std=gnu11 -O2 -fPIC -DPW_WINE64_WAIT_WATCHDOG=$PW_WINE64_WAIT_WATCHDOG -DPW_WINE64_SERVER_DIRECT_OFF=$PW_WINE64_SERVER_DIRECT_OFF -DPW_WINE64_HEAP_FLEXIBLE=$PW_WINE64_HEAP_FLEXIBLE $INC $PS5LOG_NET"
 
 say "compile: portable core (DBT + launcher) and the portable half of native/"
 for f in "$PW"/src/*.c "$PW"/native/wine64_main.c "$PW"/native/pw_data_mount.c \
@@ -78,9 +112,10 @@ say "compile: this port's platform layer"
 # carry the translator's diagnostics, so it needs the same logger the PRX has.
 for f in "$ROOT"/src/native/pw_videoout_ps4.c "$ROOT"/src/native/pw_pad_ps4.c \
          "$ROOT"/src/native/pw_audio_ps4.c "$ROOT"/src/native/pw_platform_bind_ps4.c \
-         "$ROOT"/src/native/pw_wow_log_ps4.c; do
+         "$ROOT"/src/native/pw_wow_log_ps4.c "$ROOT"/src/native/pw_osk_ps4.c; do
   $CC $CFL -c "$f" -o "$OBJ/ps4_$(basename "$f" .c).o"
 done
+$CC $CFL -c "$ROOT/src/native/pw_netctl_ps4.c" -o "$OBJ/ps4_pw_netctl_ps4.o"
 
 say "link"
 # ⚠ DO NOT LINK AGAINST ntdll. The title resolves Wine's entry points at RUNTIME
@@ -126,7 +161,7 @@ say "link"
 # A base in the ELF does not move a PIE -- the loader adds its own bias on top
 # and the title died on an unmapped page. The attempted relocation is disabled.
 $CC -o "$OBJ/../wine_app.elf" "$OBJ"/*.o \
-    -lSceNet -lSceAudioOut -lSceSystemService \
+    -lSceNet -lSceNetCtl -lSceAudioOut -lSceSystemService -lSceSysmodule \
     -lSceGnmDriver -lSceVideoOut -lScePad -lSceUserService
 printf '   elf %s\n' "$(du -h "$OBJ/../wine_app.elf" | cut -f1)"
 
@@ -210,6 +245,20 @@ if (( PKG )); then
     echo "   X PS4_NTDLL32_DLL does not exist: $PS4_NTDLL32_DLL" >&2
     exit 1
   fi
+  # Optional i386 Wine build containing bounded fault-time exception context.
+  PS4_KERNELBASE32_DLL="${PS4_KERNELBASE32_DLL:-}"
+  if [[ -n "$PS4_KERNELBASE32_DLL" && ! -f "$PS4_KERNELBASE32_DLL" ]]; then
+    echo "   X PS4_KERNELBASE32_DLL does not exist: $PS4_KERNELBASE32_DLL" >&2
+    exit 1
+  fi
+  # Optional PS4 i386 iphlpapi build. The pinned host Wine PE set does not
+  # contain the PS4 NSI fallback, so diagnostics or PS4 adapter behavior must
+  # be selected explicitly for packages that need it.
+  PS4_IPHLPAPI32_DLL="${PS4_IPHLPAPI32_DLL:-}"
+  if [[ -n "$PS4_IPHLPAPI32_DLL" && ! -f "$PS4_IPHLPAPI32_DLL" ]]; then
+    echo "   X PS4_IPHLPAPI32_DLL does not exist: $PS4_IPHLPAPI32_DLL" >&2
+    exit 1
+  fi
   # The PS4 Unix companion uses ABI v3. The host install tree also contains an
   # upstream ABI-v4 wow64native.dll, which must never enter a PS4 package.
   # Default to the known-matching PS4 PE build and fail closed if it is absent
@@ -266,15 +315,24 @@ if (( PKG )); then
     for f in "$PELIB/$arch"/*; do
       [ -f "$f" ] || continue
       case $f in *.a) continue ;; esac
+      dest_basename=${f##*/}
       if [[ -n "$PS4_NTDLL32_DLL" && $arch == i386-windows && ${f##*/} == ntdll.dll ]]; then
         f=$PS4_NTDLL32_DLL
+      fi
+      if [[ -n "$PS4_KERNELBASE32_DLL" && $arch == i386-windows && ${f##*/} == kernelbase.dll ]]; then
+        f=$PS4_KERNELBASE32_DLL
+        dest_basename=kernelbase.dll
+      fi
+      if [[ -n "$PS4_IPHLPAPI32_DLL" && $arch == i386-windows && ${f##*/} == iphlpapi.dll ]]; then
+        f=$PS4_IPHLPAPI32_DLL
+        dest_basename=iphlpapi.dll
       fi
       if [[ $arch == x86_64-windows && ${f##*/} == wow64native.dll ]]; then
         # Deliberately discard the ABI-v4 file from PELIB rather than adding it
         # to EXTRA. Only the pinned PS4 ABI-v3 override is packaged below.
         continue
       fi
-      EXTRA+=(--extra "$f:win/wine/lib/wine/$arch/$(basename "$f")")
+      EXTRA+=(--extra "$f:win/wine/lib/wine/$arch/$dest_basename")
       n=$((n+1))
     done
     printf '   pe %s: %s modules\n' "$arch" "$n"

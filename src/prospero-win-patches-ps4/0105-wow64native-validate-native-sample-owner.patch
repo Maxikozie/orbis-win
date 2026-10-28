@@ -1,0 +1,66 @@
+From: Codex <codex@local>
+Subject: wow64native: validate native PC sample ownership
+
+Log the TEB captured by the signal handler and compare it with the watcher
+entry's TEB. Only walk frames when those identities match; otherwise preserve
+the sample and mark it as potentially overwritten by another thread's signal.
+
+---
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -58,7 +58,7 @@
+                                            unsigned long long *, unsigned long long *,
+                                            unsigned long long *, unsigned long long *,
+                                            unsigned long long *, unsigned long long *,
+-                                           unsigned long long *);
++                                           unsigned long long *, unsigned long long *);
+ static pw_native_pc_query profile_pc_query;
+ static int profile_pc_enabled;
+ static pthread_mutex_t profile_watch_lock = PTHREAD_MUTEX_INITIALIZER;
+@@ -156,10 +156,12 @@
+             {
+                 unsigned long long before = 0, sequence = 0, rip = 0, rsp = 0, cs = 0;
+                 unsigned long long rax = 0, rdi = 0, rsi = 0, rdx = 0, r10 = 0, rbp = 0, rsp0 = 0;
++                unsigned long long sample_teb = 0;
++                int owner_match;
+                 unsigned int frames[8] = {0};
+                 unsigned int frame_count = 0;
+                 int rc;
+-                profile_pc_query(&before, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
++                profile_pc_query(&before, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+                 rc = pthread_kill(entry->native_thread, SIGPROF);
+                 if (!rc)
+                 {
+@@ -167,16 +169,17 @@
+                     for (unsigned int attempt = 0; attempt < 50; ++attempt)
+                     {
+                         nanosleep(&pause, NULL);
+-                        profile_pc_query(&sequence, &rip, &rsp, &cs, &rax, &rdi, &rsi, &rdx, &r10, &rbp, &rsp0);
++                        profile_pc_query(&sequence, &rip, &rsp, &cs, &rax, &rdi, &rsi, &rdx, &r10, &rbp, &rsp0, &sample_teb);
+                         if (sequence != before) break;
+                     }
++                    owner_match = sample_teb == entry->state->guest_fs;
+                     /* Walk at most four conventional 32-bit EBP frames. The
+                      * return-address-only sample was not enough to validate
+                      * the caller in stripped game DLLs. Keep every read near
+                      * the sampled guest stack and stop on a non-monotonic or
+                      * implausible frame pointer. This is opt-in diagnostic
+                      * code and runs on the watcher thread. */
+-                    if ((cs & 0xffff) == 0x33 && rbp >= rsp && rbp - rsp < 0x100000 &&
++                    if (owner_match && (cs & 0xffff) == 0x33 && rbp >= rsp && rbp - rsp < 0x100000 &&
+                         rbp < 0x7ffff000)
+                     {
+                         unsigned long long frame = rbp;
+@@ -193,8 +196,8 @@
+                             frame = previous;
+                         }
+                     }
+-                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx seq=%llu rip=%llx rsp=%llx rsp0=%llx rbp=%llx ret=%08x frames=%u[%08x/%08x,%08x/%08x,%08x/%08x,%08x/%08x] cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
+-                                 entry->state->guest_fs, sequence, rip, rsp, rsp0, rbp, frames[1], frame_count,
++                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx sample_teb=%llx owner_match=%d seq=%llu rip=%llx rsp=%llx rsp0=%llx rbp=%llx ret=%08x frames=%u[%08x/%08x,%08x/%08x,%08x/%08x,%08x/%08x] cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
++                                 entry->state->guest_fs, sample_teb, owner_match, sequence, rip, rsp, rsp0, rbp, frames[1], frame_count,
+                                  frames[0], frames[1], frames[2], frames[3], frames[4], frames[5],
+                                  frames[6], frames[7], cs,
+                                  rax, rdi, rsi, rdx, r10,
+-- 
+2.43.0

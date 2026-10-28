@@ -1,0 +1,46 @@
+From: Codex <codex@local>
+Subject: ntdll: tag native PC samples with their owning TEB
+
+The opt-in native PC snapshot is shared across threads. Record the TEB that
+owned each signal snapshot so the watcher can detect a sample overwritten by a
+signal from another thread before attributing its PC or stack.
+
+---
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -102,6 +102,7 @@
+ static volatile unsigned long long pw_native_pc_rax, pw_native_pc_rdi, pw_native_pc_rsi;
+ static volatile unsigned long long pw_native_pc_rdx, pw_native_pc_r10, pw_native_pc_rbp;
+ static volatile unsigned long long pw_native_pc_rsp0;
++static volatile unsigned long long pw_native_pc_teb;
+ 
+ __attribute__((visibility("default")))
+ unsigned int __wine_prospero_native_wow64_caps( unsigned int version )
+@@ -120,7 +121,8 @@
+                                                      unsigned long long *rdx,
+                                                      unsigned long long *r10,
+                                                      unsigned long long *rbp,
+-                                                     unsigned long long *rsp0 )
++                                                     unsigned long long *rsp0,
++                                                     unsigned long long *sample_teb )
+ {
+     unsigned long long seq = __atomic_load_n( &pw_native_pc_sequence, __ATOMIC_ACQUIRE );
+     if (sequence) *sequence = seq;
+@@ -134,6 +136,7 @@
+     if (r10) *r10 = __atomic_load_n( &pw_native_pc_r10, __ATOMIC_RELAXED );
+     if (rbp) *rbp = __atomic_load_n( &pw_native_pc_rbp, __ATOMIC_RELAXED );
+     if (rsp0) *rsp0 = __atomic_load_n( &pw_native_pc_rsp0, __ATOMIC_RELAXED );
++    if (sample_teb) *sample_teb = __atomic_load_n( &pw_native_pc_teb, __ATOMIC_RELAXED );
+     return 1;
+ }
+ 
+@@ -1107,6 +1110,7 @@
+     __atomic_store_n( &pw_native_pc_rdx, RDX_sig(context), __ATOMIC_RELAXED );
+     __atomic_store_n( &pw_native_pc_r10, R10_sig(context), __ATOMIC_RELAXED );
+     __atomic_store_n( &pw_native_pc_rbp, RBP_sig(context), __ATOMIC_RELAXED );
++    __atomic_store_n( &pw_native_pc_teb, (uintptr_t)data->teb, __ATOMIC_RELAXED );
+     {
+         unsigned long long rsp = RSP_sig(context), rsp0 = 0;
+ 
+-- 
+2.43.0

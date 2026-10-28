@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace PS4 WoW64 module registration steps
+
+The heap trace confirms image-header parsing and all three allocations return.
+Mark the following list setup, path processing, and loader-list insertion steps
+so the next run localizes the failing operation. Diagnostics only.
+
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -1570,25 +1570,35 @@
+         return NULL;
+     }
+     ERR( "wine startup: alloc_module heap DDAG result=%p\n", wm->ldr.DdagNode );
++    ERR( "wine startup: alloc_module before DDAG list init\n" );
+     InitializeListHead(&wm->ldr.DdagNode->Modules);
++    ERR( "wine startup: alloc_module after DDAG list init\n" );
+     InsertTailList(&wm->ldr.DdagNode->Modules, &wm->ldr.NodeModuleLink);
++    ERR( "wine startup: alloc_module after DDAG module link\n" );
+ 
+     if (nt_name->Length >= 8 * sizeof(WCHAR) && !wcsncmp(nt_name->Buffer + 4, L"UNC\\", 4))
+     {
++        ERR( "wine startup: alloc_module copying UNC path\n" );
+         buffer[0] = '\\';
+         memcpy( buffer + 1, nt_name->Buffer + 7 /* \??\UNC prefix */, nt_name->Length - 7 * sizeof(WCHAR) );
+         buffer[nt_name->Length/sizeof(WCHAR) - 6] = 0;
+     }
+     else
+     {
++        ERR( "wine startup: alloc_module copying DOS path\n" );
+         memcpy( buffer, nt_name->Buffer + 4 /* \??\ prefix */, nt_name->Length - 4 * sizeof(WCHAR) );
+         buffer[nt_name->Length/sizeof(WCHAR) - 4] = 0;
+     }
++    ERR( "wine startup: alloc_module path copied buffer=%p\n", buffer );
+     if ((p = wcsrchr( buffer, '\\' ))) p++;
+     else p = buffer;
++    ERR( "wine startup: alloc_module basename found p=%p\n", p );
+     RtlInitUnicodeString( &wm->ldr.FullDllName, buffer );
++    ERR( "wine startup: alloc_module full name initialized length=%u\n", wm->ldr.FullDllName.Length );
+     RtlInitUnicodeString( &wm->ldr.BaseDllName, p );
++    ERR( "wine startup: alloc_module base name initialized length=%u\n", wm->ldr.BaseDllName.Length );
+ 
++    ERR( "wine startup: alloc_module checking native subsystem\n" );
+     if (!is_dll_native_subsystem( &wm->ldr, nt, p ))
+     {
+         if (nt->FileHeader.Characteristics & IMAGE_FILE_DLL)
+@@ -1597,13 +1607,17 @@
+             wm->ldr.EntryPoint = (char *)hModule + nt->OptionalHeader.AddressOfEntryPoint;
+     }
+ 
++    ERR( "wine startup: alloc_module inserting load-order link\n" );
+     InsertTailList(&NtCurrentTeb()->Peb->LdrData->InLoadOrderModuleList,
+                    &wm->ldr.InLoadOrderLinks);
++    ERR( "wine startup: alloc_module inserting memory-order link\n" );
+     InsertTailList(&NtCurrentTeb()->Peb->LdrData->InMemoryOrderModuleList,
+                    &wm->ldr.InMemoryOrderLinks);
++    ERR( "wine startup: alloc_module hashing basename\n" );
+     InsertTailList(&hash_table[hash_basename( &wm->ldr.BaseDllName )], &wm->ldr.HashLinks);
+     if (rtl_rb_tree_put( &base_address_index_tree, wm->ldr.DllBase, &wm->ldr.BaseAddressIndexNode, base_address_compare ))
+         ERR( "rtl_rb_tree_put failed.\n" );
++    ERR( "wine startup: alloc_module base-address tree inserted\n" );
+     /* wait until init is called for inserting into InInitializationOrderModuleList */
+ 
+     if (!(nt->OptionalHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT))

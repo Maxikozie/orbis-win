@@ -199,7 +199,11 @@ int main(int argc, char **argv)
     uint32_t handle = sceKernelLoadStartModule(
         "/app0/sce_module/relocated_wine_app.prx", 0, NULL, 0, NULL, &result);
     if (handle & 0x80000000u) {
-        sceKernelDebugOutText(0, "relocwine: app PRX load failed\n");
+        char line[128];
+        snprintf(line, sizeof(line),
+                 "relocwine: app PRX load failed handle=0x%x result=0x%x\n",
+                 handle, result);
+        sceKernelDebugOutText(0, line);
         for (;;) sceKernelUsleep(1000000);
     }
     Segment items[MAX_SEGMENTS];

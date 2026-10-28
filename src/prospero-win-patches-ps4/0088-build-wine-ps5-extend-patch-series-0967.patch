@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] build: accept PS4 Wine patch 0967
+
+Allow the generic active-stack exclusion to follow the current PS4 Wine
+patch series.
+
+---
+diff --git a/tools/build_wine_ps5.sh b/tools/build_wine_ps5.sh
+--- a/tools/build_wine_ps5.sh
++++ b/tools/build_wine_ps5.sh
+@@ -167,7 +167,7 @@ series() {
+         number=$(printf '%s' "$patch" | cut -c1-4 | sed 's/^0*//')
+         number=${number:-0}
+-        [ "$number" -ge 100 ] && [ "$number" -le 966 ] ||
+-            fail "patch number outside 0100-0966: $patch"
++        [ "$number" -ge 100 ] && [ "$number" -le 967 ] ||
++            fail "patch number outside 0100-0967: $patch"
+         [ "$number" -ne "$last" ] || fail "duplicate patch number: $patch"
+         last=$number
+         grep -q '^Subject: ' "$patches/$patch" || fail "patch has no Subject: $patch"
+-- 
+2.43.0

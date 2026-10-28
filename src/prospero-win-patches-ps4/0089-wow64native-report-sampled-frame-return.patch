@@ -1,0 +1,58 @@
+From: Codex <codex@local>
+Subject: wow64native: report sampled guest frame return address
+
+Report the captured guest EBP and, for a plausible 32-bit frame, its return
+address. This lets the native PC sampler identify the caller of a hot wait
+loop in a stripped game DLL. The memory read is confined to the opt-in profile
+path and guarded to a stack frame close to the sampled ESP.
+
+---
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -57,7 +57,7 @@
+                                            unsigned long long *, unsigned long long *,
+                                            unsigned long long *, unsigned long long *,
+                                            unsigned long long *, unsigned long long *,
+-                                           unsigned long long *);
++                                           unsigned long long *, unsigned long long *);
+ static pw_native_pc_query profile_pc_query;
+ static int profile_pc_enabled;
+ static pthread_mutex_t profile_watch_lock = PTHREAD_MUTEX_INITIALIZER;
+@@ -154,9 +154,10 @@
+             if (profile_pc_enabled && cpu_delta_ns > 100000000ull)
+             {
+                 unsigned long long before = 0, sequence = 0, rip = 0, rsp = 0, cs = 0;
+-                unsigned long long rax = 0, rdi = 0, rsi = 0, rdx = 0, r10 = 0;
++                unsigned long long rax = 0, rdi = 0, rsi = 0, rdx = 0, r10 = 0, rbp = 0;
++                unsigned int frame_return = 0;
+                 int rc;
+-                profile_pc_query(&before, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
++                profile_pc_query(&before, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+                 rc = pthread_kill(entry->native_thread, SIGPROF);
+                 if (!rc)
+                 {
+@@ -164,11 +165,19 @@
+                     for (unsigned int attempt = 0; attempt < 50; ++attempt)
+                     {
+                         nanosleep(&pause, NULL);
+-                        profile_pc_query(&sequence, &rip, &rsp, &cs, &rax, &rdi, &rsi, &rdx, &r10);
++                        profile_pc_query(&sequence, &rip, &rsp, &cs, &rax, &rdi, &rsi, &rdx, &r10, &rbp);
+                         if (sequence != before) break;
+                     }
+-                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx seq=%llu rip=%llx rsp=%llx cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
+-                                 entry->state->guest_fs, sequence, rip, rsp, cs,
++                    /* For a 32-bit frame pointer close to ESP, copy the caller
++                     * return address from [EBP+4]. This runs on the watcher
++                     * thread after the signal snapshot, and is opt-in with
++                     * native profiling; it identifies waits inside stripped
++                     * game DLLs without a core dump. */
++                    if ((cs & 0xffff) == 0x33 && rbp >= rsp && rbp - rsp < 0x100000 &&
++                        rbp < 0x7ffff000)
++                        memcpy(&frame_return, (const void *)(uintptr_t)(rbp + 4), sizeof(frame_return));
++                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx seq=%llu rip=%llx rsp=%llx rbp=%llx ret=%08x cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
++                                 entry->state->guest_fs, sequence, rip, rsp, rbp, frame_return, cs,
+                                  rax, rdi, rsi, rdx, r10,
+                                  sequence != before ? "ok" : "timeout");
+                 }
+-- 
+2.43.0

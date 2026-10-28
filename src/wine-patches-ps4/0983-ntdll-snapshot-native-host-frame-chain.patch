@@ -1,0 +1,68 @@
+From: Codex <codex@local>
+Subject: ntdll: snapshot native host frame chain in profile signal
+
+Capture up to four validated 64-bit frame records while the sampled thread is
+still interrupted. This lets the watcher identify callers above libkernel
+syscall wrappers without reading a resumed thread's stack.
+
+---
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -103,6 +103,7 @@
+ static volatile unsigned long long pw_native_pc_rdx, pw_native_pc_r10, pw_native_pc_rbp;
+ static volatile unsigned long long pw_native_pc_rsp0;
+ static volatile unsigned long long pw_native_pc_teb;
++static volatile unsigned long long pw_native_pc_frames64[8];
+ 
+ __attribute__((visibility("default")))
+ unsigned int __wine_prospero_native_wow64_caps( unsigned int version )
+@@ -122,7 +123,8 @@
+                                                      unsigned long long *r10,
+                                                      unsigned long long *rbp,
+                                                      unsigned long long *rsp0,
+-                                                     unsigned long long *sample_teb )
++                                                     unsigned long long *sample_teb,
++                                                     unsigned long long *frames64 )
+ {
+     unsigned long long seq = __atomic_load_n( &pw_native_pc_sequence, __ATOMIC_ACQUIRE );
+     if (sequence) *sequence = seq;
+@@ -137,6 +139,8 @@
+     if (rbp) *rbp = __atomic_load_n( &pw_native_pc_rbp, __ATOMIC_RELAXED );
+     if (rsp0) *rsp0 = __atomic_load_n( &pw_native_pc_rsp0, __ATOMIC_RELAXED );
+     if (sample_teb) *sample_teb = __atomic_load_n( &pw_native_pc_teb, __ATOMIC_RELAXED );
++    if (frames64) for (unsigned int i = 0; i < 8; ++i)
++        frames64[i] = __atomic_load_n( &pw_native_pc_frames64[i], __ATOMIC_RELAXED );
+     return 1;
+ }
+ 
+@@ -1111,6 +1115,28 @@
+     __atomic_store_n( &pw_native_pc_r10, R10_sig(context), __ATOMIC_RELAXED );
+     __atomic_store_n( &pw_native_pc_rbp, RBP_sig(context), __ATOMIC_RELAXED );
+     __atomic_store_n( &pw_native_pc_teb, (uintptr_t)data->teb, __ATOMIC_RELAXED );
++    for (unsigned int i = 0; i < 8; ++i)
++        __atomic_store_n( &pw_native_pc_frames64[i], 0, __ATOMIC_RELAXED );
++    if (data->teb && (CS_sig(context) & 0xffff) == 0x43)
++    {
++        ULONG_PTR frame = RBP_sig(context);
++        ULONG_PTR stack_limit = (ULONG_PTR)data->teb->Tib.StackLimit;
++        ULONG_PTR stack_base = (ULONG_PTR)data->teb->Tib.StackBase;
++        if (stack_base > stack_limit && stack_base - stack_limit >= 2 * sizeof(ULONG_PTR) &&
++            (frame & 7) == 0 && frame >= stack_limit && frame <= stack_base - 2 * sizeof(ULONG_PTR))
++        {
++            for (unsigned int i = 0; i < 4; ++i)
++            {
++                ULONG_PTR previous = *(const volatile ULONG_PTR *)frame;
++                ULONG_PTR ret = *(const volatile ULONG_PTR *)(frame + sizeof(ULONG_PTR));
++                __atomic_store_n( &pw_native_pc_frames64[2 * i], previous, __ATOMIC_RELAXED );
++                __atomic_store_n( &pw_native_pc_frames64[2 * i + 1], ret, __ATOMIC_RELAXED );
++                if (previous <= frame || previous >= stack_base - 2 * sizeof(ULONG_PTR) ||
++                    previous - frame > 0x100000) break;
++                frame = previous;
++            }
++        }
++    }
+     {
+         unsigned long long rsp = RSP_sig(context), rsp0 = 0;
+ 
+-- 
+2.43.0

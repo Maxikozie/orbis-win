@@ -1,0 +1,16 @@
+diff --git a/src/amd/vulkan/radv_cs.c b/src/amd/vulkan/radv_cs.c
+index bd0caae..71223aa 100644
+--- a/src/amd/vulkan/radv_cs.c
++++ b/src/amd/vulkan/radv_cs.c
+@@ -495,7 +495,10 @@ radv_finalize_cmd_stream(const struct radv_device *device, struct radv_cmd_strea
+ {
+    struct radeon_winsys *ws = device->ws;
+ 
+-   return ws->cs_finalize(cs->b);
++   VkResult result = ws->cs_finalize(cs->b);
++   if (result != VK_SUCCESS)
++      mesa_loge("RADV_CS_FINALIZE failed result=%d ip=%d cs=%p", result, cs->hw_ip, (void *)cs);
++   return result;
+ }
+ 
+ void

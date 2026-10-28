@@ -1,0 +1,24 @@
+diff --git a/src/dxvk/dxvk_descriptor.cpp b/src/dxvk/dxvk_descriptor.cpp
+index 120c9f1..ec4d0ca 100644
+--- a/src/dxvk/dxvk_descriptor.cpp
++++ b/src/dxvk/dxvk_descriptor.cpp
+@@ -307,8 +307,10 @@ namespace dxvk {
+ 
+     VkDescriptorPool pool = VK_NULL_HANDLE;
+ 
+-    if (vk->vkCreateDescriptorPool(vk->device(), &info, nullptr, &pool) != VK_SUCCESS)
+-      throw DxvkError("DxvkDescriptorPool: Failed to create descriptor pool");
++    VkResult vr = vk->vkCreateDescriptorPool(vk->device(), &info, nullptr, &pool);
++    if (vr != VK_SUCCESS)
++      throw DxvkError(str::format("DxvkDescriptorPool: Failed to create descriptor pool: ", vr,
++        " maxSets=", m_maxSets));
+ 
+     m_device->addStatCtr(DxvkStatCounter::DescriptorPoolCount, 1);
+     return pool;
+@@ -331,4 +333,4 @@ namespace dxvk {
+     vk->vkDestroyDescriptorPool(vk->device(), pool, nullptr);
+   }
+ 
+-}
+\ No newline at end of file
++}

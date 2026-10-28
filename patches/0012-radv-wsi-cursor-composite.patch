@@ -1,0 +1,160 @@
+--- a/src/vulkan/wsi/wsi_orbis.c
++++ b/src/vulkan/wsi/wsi_orbis.c
+@@ -10,6 +10,7 @@
+ #include "wsi_orbis.h"
+ 
+ #include <inttypes.h>
++#include <pthread.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+@@ -17,6 +18,124 @@
+ #include "util/os_time.h"
+ #include "util/macros.h"
+ 
++/* Wine's Vulkan cursor hook hands us a transient straight-alpha ARGB image.
++ * Keep a private copy so win32u can release its cursor lock as soon as this
++ * update returns. Presentation composites the copy after the GPU wait and
++ * before the scan-out flip. */
++static struct {
++   pthread_mutex_t mutex;
++   uint32_t *pixels;
++   size_t capacity;
++   uint32_t width, height, screen_width, screen_height;
++   int32_t x, y;
++   bool visible;
++} wsi_orbis_cursor = { .mutex = PTHREAD_MUTEX_INITIALIZER };
++
++int
++wsi_orbis_cursor_update(const uint32_t *argb, uint32_t width, uint32_t height,
++                        int32_t x, int32_t y, uint32_t screen_width, uint32_t screen_height)
++{
++   size_t bytes;
++
++   pthread_mutex_lock(&wsi_orbis_cursor.mutex);
++   if (!argb || !width || !height) {
++      wsi_orbis_cursor.visible = false;
++      pthread_mutex_unlock(&wsi_orbis_cursor.mutex);
++      return 0;
++   }
++
++   if (width > 512 || height > 512 || !screen_width || !screen_height) {
++      wsi_orbis_cursor.visible = false;
++      pthread_mutex_unlock(&wsi_orbis_cursor.mutex);
++      return -1;
++   }
++
++   bytes = (size_t)width * height * sizeof(*argb);
++   if (wsi_orbis_cursor.capacity < bytes) {
++      uint32_t *pixels = realloc(wsi_orbis_cursor.pixels, bytes);
++      if (!pixels) {
++         wsi_orbis_cursor.visible = false;
++         pthread_mutex_unlock(&wsi_orbis_cursor.mutex);
++         return -1;
++      }
++      wsi_orbis_cursor.pixels = pixels;
++      wsi_orbis_cursor.capacity = bytes;
++   }
++
++   memcpy(wsi_orbis_cursor.pixels, argb, bytes);
++   wsi_orbis_cursor.width = width;
++   wsi_orbis_cursor.height = height;
++   wsi_orbis_cursor.x = x;
++   wsi_orbis_cursor.y = y;
++   wsi_orbis_cursor.screen_width = screen_width;
++   wsi_orbis_cursor.screen_height = screen_height;
++   wsi_orbis_cursor.visible = true;
++   pthread_mutex_unlock(&wsi_orbis_cursor.mutex);
++   return 0;
++}
++
++static inline uint8_t
++wsi_orbis_blend_channel(uint8_t source, uint8_t destination, uint8_t alpha)
++{
++   return (uint8_t)(((unsigned)source * alpha + (unsigned)destination * (255 - alpha) + 127) / 255);
++}
++
++static int64_t
++wsi_orbis_scale_position(int32_t pos, uint32_t output_size, uint32_t screen_size)
++{
++   const int64_t value = (int64_t)pos * output_size;
++   if (value >= 0)
++      return value / screen_size;
++   return -((-value + screen_size - 1) / screen_size);
++}
++
++static void
++wsi_orbis_cursor_composite(uint8_t *dst, uint32_t pitch, uint32_t output_width, uint32_t output_height)
++{
++   pthread_mutex_lock(&wsi_orbis_cursor.mutex);
++   if (wsi_orbis_cursor.visible) {
++      const uint32_t source_width = wsi_orbis_cursor.width;
++      const uint32_t source_height = wsi_orbis_cursor.height;
++      const uint32_t screen_width = wsi_orbis_cursor.screen_width;
++      const uint32_t screen_height = wsi_orbis_cursor.screen_height;
++      const uint32_t scaled_width = MAX2(1, (uint32_t)(((uint64_t)source_width * output_width + screen_width - 1) /
++                                                        screen_width));
++      const uint32_t scaled_height = MAX2(1, (uint32_t)(((uint64_t)source_height * output_height + screen_height - 1) /
++                                                         screen_height));
++      const int64_t left = wsi_orbis_scale_position(wsi_orbis_cursor.x, output_width, screen_width);
++      const int64_t top = wsi_orbis_scale_position(wsi_orbis_cursor.y, output_height, screen_height);
++
++      for (uint32_t cy = 0; cy < scaled_height; cy++) {
++         const int64_t dy = top + cy;
++         if (dy < 0 || dy >= output_height)
++            continue;
++         const uint32_t sy = (uint32_t)((uint64_t)cy * source_height / scaled_height);
++         const uint32_t *source = wsi_orbis_cursor.pixels + (size_t)sy * source_width;
++         uint8_t *row = dst + (size_t)dy * pitch;
++
++         for (uint32_t cx = 0; cx < scaled_width; cx++) {
++            const int64_t dx = left + cx;
++            if (dx < 0 || dx >= output_width)
++               continue;
++            const uint32_t sx = (uint32_t)((uint64_t)cx * source_width / scaled_width);
++            const uint32_t argb = source[sx];
++            const uint8_t alpha = (uint8_t)(argb >> 24);
++            if (!alpha)
++               continue;
++
++            /* Scan-out is A8B8G8R8: on this little-endian target its bytes are
++             * R, G, B, A. Wine supplies straight-alpha pixels as 0xAARRGGBB. */
++            uint8_t *pixel = row + (size_t)dx * 4;
++            pixel[0] = wsi_orbis_blend_channel((uint8_t)(argb >> 16), pixel[0], alpha);
++            pixel[1] = wsi_orbis_blend_channel((uint8_t)(argb >> 8), pixel[1], alpha);
++            pixel[2] = wsi_orbis_blend_channel((uint8_t)argb, pixel[2], alpha);
++            pixel[3] = 0xff;
++         }
++      }
++   }
++   pthread_mutex_unlock(&wsi_orbis_cursor.mutex);
++}
++
+ /* ⚠ THE SDK IS ON THE CONSOLE'S SIDE OF THE SEAM, AND SO IS THE TELEVISION.
+  *
+  * ac_orbis_drm.c splits the same way and states the principle: -Dplatforms=orbis selects the ARM, not the
+@@ -886,6 +1005,10 @@
+     * measuring alongside. `src` holds the same pixels in the driver's cached ONION arena. */
+    wsi_orbis_frame_stats(src, so->width, so->height, src_pitch);
+ 
++   /* Overlay the desktop cursor after the scene has been copied and before
++    * video-out takes ownership of this buffer. */
++   wsi_orbis_cursor_composite(dst, dst_pitch, so->width, so->height);
++
+    if (trace)
+       mesa_logi("wsi/orbis: present copied %u KiB, flipping index %u",
+                 (unsigned)((uint64_t)dst_pitch * so->height / 1024), index);
+--- a/src/vulkan/wsi/wsi_orbis.h
++++ b/src/vulkan/wsi/wsi_orbis.h
+@@ -63,6 +63,11 @@
+ 
+ void wsi_orbis_scanout_destroy(struct wsi_orbis_scanout *so);
+ 
++/* Copies a Wine Vulkan cursor image for composition into the next scan-out frame.
++ * argb is straight-alpha 0xAARRGGBB and is copied before this call returns. */
++int wsi_orbis_cursor_update(const uint32_t *argb, uint32_t width, uint32_t height,
++                            int32_t x, int32_t y, uint32_t screen_width, uint32_t screen_height);
++
+ #ifdef __cplusplus
+ }
+ #endif

@@ -1,0 +1,83 @@
+From: Codex <codex@local>
+Subject: server: trace AFD socket creation and named-pipe teardown on PS4
+
+The translator A/B reproduced the AFD create syscall fault, with the server
+PC resolving to a release path in wineserver. Log the AFD socket object and
+its preexisting fd around init_socket(), plus the bounded named-pipe teardown
+state, through klog. This distinguishes an invalid socket fd from corruption
+during pipe cleanup without enabling a broad server trace.
+
+---
+diff --git a/server/named_pipe.c b/server/named_pipe.c
+index 1e51158a1c..3f329f6856 100644
+--- a/server/named_pipe.c
++++ b/server/named_pipe.c
+@@ -430,6 +430,22 @@ static void pipe_end_destroy( struct object *obj )
+     struct pipe_end *pipe_end = (struct pipe_end *)obj;
+     struct pipe_message *message;
+ 
++#ifdef __PROSPERO__
++    {
++        extern int sceKernelDebugOutText( int channel, const char *text );
++        static unsigned int logged;
++        if (logged++ < 16)
++        {
++            char line[192];
++            snprintf( line, sizeof(line),
++                      "wineserver: pipe_end_destroy obj=%p ref=%u handles=%u fd=%p pipe=%p connection=%p state=%u\n",
++                      obj, obj->refcount, obj->handle_count, pipe_end->fd, pipe_end->pipe,
++                      pipe_end->connection, pipe_end->state );
++            sceKernelDebugOutText( 0, line );
++        }
++    }
++#endif
++
+     pipe_end_disconnect( pipe_end, STATUS_PIPE_BROKEN );
+ 
+     while (!list_empty( &pipe_end->message_queue ))
+diff --git a/server/sock.c b/server/sock.c
+index 12eead9030..8c1358f518 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -2526,13 +2526,38 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
+     case IOCTL_AFD_WINE_CREATE:
+     {
+         const struct afd_create_params *params = get_req_data();
++        int status;
+ 
+         if (get_req_data_size() != sizeof(*params))
+         {
+             set_error( STATUS_INVALID_PARAMETER );
+             return;
+         }
+-        init_socket( sock, params->family, params->type, params->protocol );
++#ifdef __PROSPERO__
++        {
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            static unsigned int logged;
++            if (logged++ < 16)
++            {
++                char line[192];
++                snprintf( line, sizeof(line),
++                          "wineserver: AFD create sock=%p fd=%p family=%d type=%d protocol=%d\n",
++                          sock, sock->fd, params->family, params->type, params->protocol );
++                sceKernelDebugOutText( 0, line );
++            }
++        }
++#endif
++        status = init_socket( sock, params->family, params->type, params->protocol );
++#ifdef __PROSPERO__
++        if (status)
++        {
++            extern int sceKernelDebugOutText( int channel, const char *text );
++            char line[160];
++            snprintf( line, sizeof(line), "wineserver: AFD create failed sock=%p fd=%p error=%08x\n",
++                      sock, sock->fd, get_error() );
++            sceKernelDebugOutText( 0, line );
++        }
++#endif
+         return;
+     }
+ 
+-- 
+2.43.0

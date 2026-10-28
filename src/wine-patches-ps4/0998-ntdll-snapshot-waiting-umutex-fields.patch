@@ -1,0 +1,70 @@
+From: Codex <codex@local>
+Subject: ntdll: snapshot owner and flags for native mutex wait samples
+
+When the native sampler catches FreeBSD UMTX_OP_MUTEX_WAIT, copy the first
+four 32-bit fields from its validated user mutex: owner, flags, and both
+priority ceilings. This distinguishes a contended mutex from an ownerless or
+inconsistent wait without adding logging to every syscall.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 163c74393d..2ee24bf55c 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -108,6 +108,7 @@ static volatile unsigned long long pw_native_pc_stack_limit, pw_native_pc_stack_
+ static volatile unsigned long long pw_native_pc_stack_words[8];
+ static volatile unsigned long long pw_native_pc_stack_deep_words[4];
+ static volatile unsigned long long pw_native_pc_rsp_words[4];
++static volatile unsigned long long pw_native_pc_umtx_words[4];
+ 
+ __attribute__((visibility("default")))
+ unsigned int __wine_prospero_native_wow64_caps( unsigned int version )
+@@ -133,7 +134,8 @@ unsigned int __wine_prospero_native_profile_sample( unsigned long long *sequence
+                                                      unsigned long long *stack_base,
+                                                      unsigned long long *stack_words,
+                                                      unsigned long long *stack_deep_words,
+-                                                     unsigned long long *rsp_words )
++                                                     unsigned long long *rsp_words,
++                                                     unsigned long long *umtx_words )
+ {
+     unsigned long long seq = __atomic_load_n( &pw_native_pc_sequence, __ATOMIC_ACQUIRE );
+     if (sequence) *sequence = seq;
+@@ -158,6 +160,8 @@ unsigned int __wine_prospero_native_profile_sample( unsigned long long *sequence
+         stack_deep_words[i] = __atomic_load_n( &pw_native_pc_stack_deep_words[i], __ATOMIC_RELAXED );
+     if (rsp_words) for (unsigned int i = 0; i < 4; ++i)
+         rsp_words[i] = __atomic_load_n( &pw_native_pc_rsp_words[i], __ATOMIC_RELAXED );
++    if (umtx_words) for (unsigned int i = 0; i < 4; ++i)
++        umtx_words[i] = __atomic_load_n( &pw_native_pc_umtx_words[i], __ATOMIC_RELAXED );
+     return 1;
+ }
+ 
+@@ -1141,6 +1145,7 @@ static void __attribute__((used)) profile_handler( int signal, siginfo_t *siginf
+     {
+         __atomic_store_n( &pw_native_pc_stack_deep_words[i], 0, __ATOMIC_RELAXED );
+         __atomic_store_n( &pw_native_pc_rsp_words[i], 0, __ATOMIC_RELAXED );
++        __atomic_store_n( &pw_native_pc_umtx_words[i], 0, __ATOMIC_RELAXED );
+     }
+     /* TEB StackLimit does not cover the native stack used by some PS4 thread
+      * paths. For the known libkernel _umtx_op syscall sample, RSP is valid
+@@ -1155,6 +1160,21 @@ static void __attribute__((used)) profile_handler( int signal, siginfo_t *siginf
+                                   *(const volatile ULONG_PTR *)(rsp + i * sizeof(ULONG_PTR)),
+                                   __ATOMIC_RELAXED );
+     }
++    /* A blocked UMTX_OP_MUTEX_WAIT has already had its object validated by
++     * the kernel. Snapshot the first four 32-bit umutex fields while stopped:
++     * m_owner (including UMUTEX_CONTESTED), m_flags, and both ceilings. */
++    {
++        ULONG_PTR obj = RDI_sig(context);
++        if ((CS_sig(context) & 0xffff) == 0x43 && RAX_sig(context) == 0x1c6 &&
++            RSI_sig(context) == 0x11 && obj >= 0x10000 &&
++            obj < 0x0000800000000000ull && obj <= ~0ull - 4 * sizeof(uint32_t) &&
++            !(obj & (sizeof(uint32_t) - 1)))
++            for (unsigned int i = 0; i < 4; ++i)
++                __atomic_store_n( &pw_native_pc_umtx_words[i],
++                                  __atomic_load_n( (const volatile uint32_t *)(obj + i * sizeof(uint32_t)),
++                                                   __ATOMIC_RELAXED ),
++                                  __ATOMIC_RELAXED );
++    }
+     {
+         ULONG_PTR stack_limit = data->teb ? (ULONG_PTR)data->teb->Tib.StackLimit : 0;
+         ULONG_PTR stack_base = data->teb ? (ULONG_PTR)data->teb->Tib.StackBase : 0;

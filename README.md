@@ -169,14 +169,14 @@ for the composition fix and the next title tests.
 ```sh
 ./scripts/logs.sh klog &               # FIRST. See the warning below.
 python3 ./scripts/ps5logd.py &         # runtime TCP logs, port 9300; only one receiver
-./scripts/build-app-ps4.sh --pkg --neo && ./scripts/deploy.sh wine-app
+./scripts/build-app-ps4.sh --pkg && ./scripts/deploy.sh wine-app
 ./scripts/build.sh threadprobe --pkg --neo --deploy    # only if a number is disputed
 ```
 
 For a side-by-side GTA IV Neo/base comparison, install the Neo package as
-`GLDS10005` and the base package as `GLDS10041`. Deploy them separately with
-`./scripts/deploy.sh wine-app` and `./scripts/deploy.sh wine-app-base`. To
-rebuild the base package without overwriting the default Neo output:
+`GLDS10005` and the base package as `GLDS10041`. `build-app-ps4.sh --pkg`
+now creates the relocatable package by default; append `--neo` only for a Neo
+build. To build the base comparison without overwriting the default output:
 
 ```sh
 TITLE_ID=GLDS10041 TITLE="Prospero Wine Base" \
@@ -222,10 +222,13 @@ the exact failure all day into a channel nobody was recording.
 own diagnostics. Use `ERR()` in ntdll (it arrives even from a thread with no
 TEB) and `sceKernelDebugOutText` in wineserver.
 
-⚠ **Build the normal PS4 Pro package with `--neo`.** `build-app-ps4.sh` defaults
-to `NEO=0`, and a package built without it runs a Pro as a base PS4 — the only
-sign is `device "PS5" 1002:9920` in the log. The separately named
-`GLDS10041` package above is the deliberate base-mode comparison build.
+⚠ **Installable Wine packages are relocatable by default.**
+`build-app-ps4.sh --pkg` delegates to `build-relocatable-wine-ps4.sh`, and
+deployment refuses a Wine package whose stage lacks
+`sce_module/relocated_wine_app.prx`. This keeps non-relocatable PE32 games such
+as Oblivion from colliding with the low-address eboot. Use
+`--non-relocatable` only for an explicit low-base diagnostic build. `--neo`
+remains an independent opt-in for Neo-mode comparison packages.
 
 ⚠ **`scripts/prx-ps4.sh` empties `prx/sce_module`** and rebuilds only its own
 nine modules. Run `radv-`, `freetype-` and `wineps5-prx-ps4.sh` after it, or the
@@ -236,8 +239,11 @@ twelve modules.
 context from patches later in the series and will not apply at its own position.
 Put the change after the patch that owns that code, or fold it in — the NULL
 `thread_data` guard went into `0882`, which introduces the thread that has no
-Wine data. The base series is `0100-0899`; local follow-up patches `0900-0961`
-are appended after it, and the build accepts through `0961`.
+Wine data. Local follow-up patches `0900-0967` are appended after the base
+series. Patch `0966` is the generic RX-fault repair; `0967` skips the active
+stack view during the one-time force-exec walk. For the tested build, use the
+filtered patch list in `codex_scratch/wine-patches-0967` because diagnostic
+patches `0962-0965` conflict with the clean full-series application.
 
 ⚠ **`prospero-win/` is gitignored and is its own tree.** Work there survives
 only as a patch in `src/prospero-win-patches-ps4/`. Verify one with

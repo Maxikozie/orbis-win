@@ -1,0 +1,48 @@
+From: Codex <codex@local>
+Subject: wow64native: compare sample owner with native TEB
+
+The signal handler records Wine's native TEB. Keep that identity in each watch
+entry and compare against it; guest_fs is the 32-bit guest TEB and is a
+different address in native WoW64 mode.
+
+---
+--- a/wine/wow64native/unix.c
++++ b/wine/wow64native/unix.c
+@@ -47,6 +47,7 @@
+ {
+     struct pw_native_thread_state *state;
+     pthread_t native_thread;
++    unsigned long long native_teb;
+     clockid_t cpu_clock;
+     int cpu_clock_valid;
+     unsigned long long cpu_ns;
+@@ -172,7 +173,7 @@
+                         profile_pc_query(&sequence, &rip, &rsp, &cs, &rax, &rdi, &rsi, &rdx, &r10, &rbp, &rsp0, &sample_teb);
+                         if (sequence != before) break;
+                     }
+-                    owner_match = sample_teb == entry->state->guest_fs;
++                    owner_match = sample_teb == entry->native_teb;
+                     /* Walk at most four conventional 32-bit EBP frames. The
+                      * return-address-only sample was not enough to validate
+                      * the caller in stripped game DLLs. Keep every read near
+@@ -196,8 +197,8 @@
+                             frame = previous;
+                         }
+                     }
+-                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx sample_teb=%llx owner_match=%d seq=%llu rip=%llx rsp=%llx rsp0=%llx rbp=%llx ret=%08x frames=%u[%08x/%08x,%08x/%08x,%08x/%08x,%08x/%08x] cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
+-                                 entry->state->guest_fs, sample_teb, owner_match, sequence, rip, rsp, rsp0, rbp, frames[1], frame_count,
++                    WINE_MESSAGE("PW_NATIVE_PC teb=%llx native_teb=%llx sample_teb=%llx owner_match=%d seq=%llu rip=%llx rsp=%llx rsp0=%llx rbp=%llx ret=%08x frames=%u[%08x/%08x,%08x/%08x,%08x/%08x,%08x/%08x] cs=%llx rax=%llx rdi=%llx rsi=%llx rdx=%llx r10=%llx sample=%s\n",
++                                 entry->state->guest_fs, entry->native_teb, sample_teb, owner_match, sequence, rip, rsp, rsp0, rbp, frames[1], frame_count,
+                                  frames[0], frames[1], frames[2], frames[3], frames[4], frames[5],
+                                  frames[6], frames[7], cs,
+                                  rax, rdi, rsi, rdx, r10,
+@@ -239,6 +240,7 @@
+         {
+             profile_watch_entries[i].state = state;
+             profile_watch_entries[i].native_thread = pthread_self();
++            profile_watch_entries[i].native_teb = (unsigned long long)(uintptr_t)NtCurrentTeb();
+             profile_watch_entries[i].cpu_clock = cpu_clock;
+             profile_watch_entries[i].cpu_clock_valid = cpu_clock_valid;
+             profile_watch_entries[i].cpu_ns = 0;
+-- 
+2.43.0

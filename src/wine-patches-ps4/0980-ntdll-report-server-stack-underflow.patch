@@ -1,0 +1,47 @@
+From: Codex <codex@localhost>
+Subject: ntdll: report thread and stack bounds when a syscall faults below its stack
+
+When an access violation occurs below the Wine kernel stack, log the thread
+data, TEB, expected stack bounds, and saved frame return address when that slot
+is within the associated allocation. This identifies the caller without
+blindly dereferencing a potentially corrupt frame pointer.
+
+---
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2617,6 +2617,34 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *sigconte
+     ERR_(seh)( "fault regs r14=%016lx r15=%016lx\n", context->R14, context->R15 );
+ 
+     /* Context.Rsp can be an unmapped WoW64 stack address. */
++    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION &&
++        context->Rsp < (ULONG_PTR)get_kernel_stack( data ))
++    {
++        ULONG_PTR stack_low = (ULONG_PTR)get_kernel_stack( data );
++        ULONG_PTR stack_high = stack_low + kernel_stack_size;
++        ULONG_PTR data_low = (ULONG_PTR)data;
++        ULONG_PTR data_high = data_low + signal_stack_mask + 1 + kernel_stack_size;
++        ULONG_PTR caller = 0;
++
++        /* A faulting RBP can be corrupt. Read its saved return address only
++         * when the slot is still inside the allocation associated with this
++         * thread; the fault handler must not create a second fault. */
++        if (context->Rbp >= data_low && context->Rbp <= data_high - 2 * sizeof(ULONG_PTR))
++            caller = *(ULONG_PTR *)(context->Rbp + sizeof(ULONG_PTR));
++
++        ERR_(seh)( "PW_FAULT_STACK tid=%04x data=%p teb=%p stack=%p-%p rsp=%p rbp=%p caller=%p\n",
++                   (unsigned)data->tid, data, data->teb, (void *)stack_low,
++                   (void *)stack_high, (void *)context->Rsp, (void *)context->Rbp,
++                   (void *)caller );
++        if (caller)
++        {
++            char caller_module[256];
++            unsigned long caller_offset;
++
++            if (pw_module_at( (void *)caller, caller_module, sizeof(caller_module), &caller_offset ))
++                ERR_(seh)( "PW_FAULT_STACK caller=%s+%#lx\n", caller_module, caller_offset );
++        }
++    }
+ #endif
+ 
+     if (data->jmp_buf)

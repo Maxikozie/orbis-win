@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] ntdll: trace PS4 force-exec mprotect range
+
+The force-exec walk reaches its first high-address reserved view and then
+faults in the kernel protection call. Log the grouped protection request and
+its return, plus the view boundary. Instrumentation only.
+
+---
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index d26e794141..f3e3bb3ab5 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2406,6 +2406,12 @@ static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear )
+     int rc;
+     BOOL trace_oblivion = (ULONG_PTR)base <= 0x004a8330 &&
+                           (ULONG_PTR)base + size > 0x004a8330;
++    BOOL trace_force_exec = (ULONG_PTR)base >= 0x1000000000 &&
++                            (ULONG_PTR)base < 0x1000110000;
++
++    if (trace_force_exec)
++        ERR( "wine startup: force-exec mprotect_range enter base=%p size=%lu set=%02x clear=%02x host_page=%lu\n",
++             base, (unsigned long)size, set, clear, (unsigned long)host_page_size );
+ 
+     if (trace_oblivion)
+     {
+@@ -2425,8 +2431,14 @@ static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear )
+         vprot = get_host_page_vprot( addr + count * host_page_size );
+         next = get_unix_prot( (vprot & ~clear) | set );
+         if (next == prot) continue;
++        if (trace_force_exec)
++            ERR( "wine startup: force-exec mprotect_range group addr=%p size=%lu prot=%x next=%x\n",
++                 addr, (unsigned long)(count * host_page_size), prot, next );
+         if (mprotect_exec( addr, count * host_page_size, prot ))
+         {
++            if (trace_force_exec)
++                ERR( "wine startup: force-exec mprotect_range group failed addr=%p size=%lu prot=%x\n",
++                     addr, (unsigned long)(count * host_page_size), prot );
+             if (trace_oblivion)
+                 ERR( "PS4_OBLIVION mprotect-range fail addr=%p size=%lu prot=%x\n",
+                      addr, (unsigned long)(count * host_page_size), prot );
+@@ -2436,7 +2448,12 @@ static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear )
+         prot = next;
+         count = 0;
+     }
++    if (trace_force_exec)
++        ERR( "wine startup: force-exec mprotect_range final addr=%p size=%lu prot=%x\n",
++             addr, (unsigned long)(count * host_page_size), prot );
+     rc = mprotect_exec( addr, count * host_page_size, prot );
++    if (trace_force_exec)
++        ERR( "wine startup: force-exec mprotect_range leave rc=%d\n", rc );
+     if (trace_oblivion)
+         ERR( "PS4_OBLIVION mprotect-range leave addr=%p size=%lu prot=%x rc=%d\n",
+              addr, (unsigned long)(count * host_page_size), prot, rc );
+@@ -5630,8 +5647,11 @@ void virtual_set_force_exec( BOOL enable )
+ {
+     struct file_view *view;
+     sigset_t sigset;
++    unsigned int index = 0;
+ 
++    ERR( "wine startup: virtual_set_force_exec begin enable=%d current=%d\n", enable, force_exec_prot );
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++    ERR( "wine startup: virtual_set_force_exec lock acquired\n" );
+     if (!force_exec_prot != !enable)  /* change all existing views */
+     {
+         force_exec_prot = enable;
+@@ -5641,10 +5661,22 @@ void virtual_set_force_exec( BOOL enable )
+             /* file mappings are always accessible */
+             BYTE commit = is_view_valloc( view ) ? 0 : VPROT_COMMITTED;
+ 
+-            mprotect_range( view->base, view->size, commit, 0 );
++            ERR( "wine startup: virtual_set_force_exec view[%u] begin base=%p size=%lu commit=%u\n",
++                 index, view->base, (unsigned long)view->size, commit );
++            {
++                int rc;
++                if (index == 7)
++                    ERR( "wine startup: force-exec view[7] mprotect_range call begin\n" );
++                rc = mprotect_range( view->base, view->size, commit, 0 );
++                if (index == 7)
++                    ERR( "wine startup: force-exec view[7] mprotect_range call returned rc=%d\n", rc );
++            }
++            ERR( "wine startup: virtual_set_force_exec view[%u] complete\n", index++ );
+         }
+     }
++    ERR( "wine startup: virtual_set_force_exec leaving lock\n" );
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++    ERR( "wine startup: virtual_set_force_exec complete\n" );
+ }
+ 
+ 

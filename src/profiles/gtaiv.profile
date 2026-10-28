@@ -25,3 +25,5 @@ winedebug = +tid,err+all,+loaddll
 desktop = 1920x1080
 [input]
 mode = xinput
+[runtime]
+cpu = native

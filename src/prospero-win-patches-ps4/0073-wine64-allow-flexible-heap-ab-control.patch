@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Subject: [PATCH] wine64: allow an A/B control for direct heap backing
+
+The PS4 direct-memory heap experiment needs a clean control using the same
+binary and startup path. This build option sets the opt-out in Wine's module
+environment before __wine_main, so the existing anonymous mmap backing is
+used without changing the selected CPU backend or game profile.
+
+---
+ native/wine64_main.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -92,4 +92,8 @@
+ #define PW_WINE64_WAIT_WATCHDOG 0
+ #endif
++#ifndef PW_WINE64_HEAP_FLEXIBLE
++/* A/B control: keep Wine's Unix heap on its existing anonymous mmap backing. */
++#define PW_WINE64_HEAP_FLEXIBLE 0
++#endif
+ #ifndef PW_WINE64_SCRIPT
+ /* 1 drives the launcher unattended for validation: it opens
+@@ -1144,4 +1148,8 @@ int main(int argc, char **argv)
+         if (PW_WINE64_WAIT_WATCHDOG)
+             extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_PS5_WAIT_WATCHDOG", "1" };
++#if PW_WINE64_HEAP_FLEXIBLE
++        extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_PS5_HEAP_FLEXIBLE", "1" };
++        PS5LOG_LOG("PW_WINE64 heap_direct=0 (anonymous mmap control)");
++#endif
+ #if PW_WINE64_SERVER_DIRECT_OFF
+         extra[config.extra_env_count++] = (PwWineStartEnv){ "WINE_PS5_SERVER_DIRECT", "0" };
+         PS5LOG_LOG("PW_WINE64 server_direct=0 (regular server thread)");
+-- 
+2.43.0

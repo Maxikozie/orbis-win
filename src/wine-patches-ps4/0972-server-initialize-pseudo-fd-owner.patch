@@ -1,0 +1,23 @@
+From: Codex <codex@local>
+Subject: server: initialize the owner of pseudo fds
+
+alloc_pseudo_fd() allocates fd objects from poisoned memory but did not
+initialize fd_owner. When the fd was destroyed, fd_destroy() could interpret
+the 0x55 poison pattern as a borrowed owner and pass it to release_object().
+Initialize the field just like alloc_fd_object() does.
+
+---
+diff --git a/server/fd.c b/server/fd.c
+index 0000000000..0000000000 100644
+--- a/server/fd.c
++++ b/server/fd.c
+@@ -1842,6 +1842,7 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *user, unsigned int options )
+     fd->nt_name    = NULL;
+     fd->nt_namelen = 0;
+     fd->unix_fd    = -1;
++    fd->fd_owner   = NULL;
+     fd->cacheable  = 0;
+     fd->fs_locks   = 0;
+     fd->poll_index = -1;
+-- 
+2.43.0
