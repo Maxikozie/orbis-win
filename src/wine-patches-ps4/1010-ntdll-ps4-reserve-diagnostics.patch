@@ -1,0 +1,166 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH] ntdll/virtual: report why a PS4 reservation was refused
+
+anon_mmap_tryfixed() sets errno = EEXIST whatever sceKernelReserveVirtualRange
+answers, so every refusal reached the caller as a collision. A whole day was
+spent hunting a squatter at 0x400000 on the strength of an errno we wrote
+ourselves, while find_view_range() correctly reported the range free -- it
+tracks Wine's views, which never include the host executable.
+
+Log what the kernel was actually asked and what it answered, and query the
+range so the owner is named. That single line identified the cause at once:
+
+  PW_RESERVE refused rc=0x8002000c base=400000 want=0x130000 host=0x130000
+    prot=0x3; query rc=0 start=400000 end=49c000 qprot=0x5 qflags=0x11
+    name=executable hole=0
+
+rc 0x8002000c is errno 12, ENOMEM; name=executable is the title's own eboot.
+Fixed properly in prospero-win patch 0201, which restores the eboot release.
+
+Also kept, as defence in depth, both bounded and both no-ops once 0201 lands:
+
+  - ROUND_SIZE on the size passed to the reservation. map_fixed_area() already
+    rounds, so this only matters for the call sites that do not (virtual.c
+    ~1090, and the DOS-memory ones), and anon_mmap_fixed() asserts the same
+    alignment. An earlier package shipped this alone as a fix; it is not one.
+  - A query-then-MAP_FIXED fallback when the reservation is refused, used only
+    when the query proves the whole request is a hole, and never for PROT_NONE
+    so that reserve_area()'s blocks of up to 1.7 GiB cannot consume the
+    title's ~440 MiB flexible pool.
+
+Method note: three theories were inferred from logged values and all three were
+wrong. The one that worked was printing the failing call's own arguments and
+return code. Instrument the call before theorising about it.
+
+---
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -974,6 +974,10 @@
+ static void *anon_mmap_tryfixed( void *start, size_t size, int prot, int flags )
+ {
+     void *ptr;
++#ifdef __PROSPERO__
++    size_t host_size;
++    int reserve_rc;
++#endif
+ 
+ #ifdef MAP_FIXED_NOREPLACE
+     ptr = mmap( start, size, prot, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANON | flags, -1, 0 );
+@@ -983,18 +987,110 @@
+     /* The kernel ignores MAP_EXCL, so claim the range with a reservation
+      * that refuses to overwrite, then map over it if needed. */
+     ptr = start;
+-    if (sceKernelReserveVirtualRange( &ptr, size, PS5_MAP_FIXED | PS5_MAP_NO_OVERWRITE, host_page_size ))
++    /* The reservation is refused outright unless the size is a whole number
++     * of host pages, and the PS4's are 16 KiB while a PE section is only
++     * 4 KiB-aligned -- so an image whose size is not a 16 KiB multiple (e.g.
++     * FalloutNV.exe, 0x1009000) never reserves at its preferred base. The
++     * refusal is then reported to the caller as EEXIST, which reads as a
++     * collision rather than a bad argument, and the range is never handed to
++     * __wine_ps5_dmem_region(), so everything mapped there falls back to the
++     * title's small flexible pool. Round up, as every other host-page path in
++     * this file does; anon_mmap_fixed() asserts the same alignment. */
++    host_size = ROUND_SIZE( start, size, host_page_mask );
++    reserve_rc = sceKernelReserveVirtualRange( &ptr, host_size, PS5_MAP_FIXED | PS5_MAP_NO_OVERWRITE, host_page_size );
++    if (reserve_rc)
+     {
+-        errno = EEXIST;
+-        return MAP_FAILED;
++        /* Measured on FW 12.02 (package 1043): this call returns 0x8002000c
++         * (ENOMEM) for EVERY fixed reservation, down to a 64 KiB PROT_NONE
++         * range -- 54 of 54 in one Fallout launch, none granted. It is the
++         * call, not a shortage: plain mmap succeeds at the same addresses,
++         * which is how FalloutNV.exe loads at 0x530000 after this refuses
++         * 0x400000. Giving up here leaves reserved_areas empty, so
++         * mmap_add_reserved_area() and __wine_ps5_dmem_region() never run,
++         * no range is dmem-backed, and the title exhausts its ~440 MiB
++         * flexible pool in about 3.5 minutes.
++         *
++         * So fall back to what every other port does and the generic branch
++         * of this same function already relies on: map it, then check we got
++         * the address we asked for. The PS4 kernel ignores MAP_EXCL, which is
++         * why the reservation was preferred, but verify-after-map catches the
++         * same case -- a mapping placed elsewhere is unmapped and reported as
++         * EEXIST, exactly as at the top of this function. */
++        /* Only for mappings that are about to be used. reserve_area() asks
++         * for PROT_NONE blocks up to 1.7 GiB to claim address space; if the
++         * PS4 charges flexible memory on mmap regardless of prot, satisfying
++         * those would swallow the whole ~440 MiB pool at startup -- worse
++         * than the refusal. Address-space reservation stays refused; real
++         * mappings (image loads, the case that relocates Fallout and kills
++         * Oblivion) take the fallback. Revisit the PROT_NONE case only after
++         * measuring what a large PROT_NONE mmap costs here. */
++        if (prot == PROT_NONE)
++        {
++            ERR( "PW_RESERVE refused rc=%#x base=%p want=%#zx host=%#zx align=%#zx got=%p prot=none; no fallback\n",
++                 reserve_rc, start, size, host_size, (size_t)host_page_size, ptr );
++            errno = EEXIST;
++            return MAP_FAILED;
++        }
++        {
++            /* 1044 took this fallback and still failed: that mmap passes
++             * start as a HINT, not MAP_FIXED, and the PS4 kernel ignores the
++             * hint -- it returned a different address, so verify-after-map
++             * unmapped it and reported EEXIST. The same reason FalloutNV.exe
++             * lands at 0x530000: the kernel chooses, we do not.
++             *
++             * What the refused reservation provided was "map exactly here,
++             * but only if nothing is there". Rebuild that from a call which
++             * does work on PS4: query the range, and use MAP_FIXED only when
++             * the query proves the whole request is a hole. Requiring the
++             * hole to cover the entire range keeps MAP_FIXED from clobbering
++             * a live mapping if the query is read wrongly. */
++            struct ps4_virtual_query_info
++            {
++                void *start, *end;
++                int64_t offset;
++                int32_t protection, memory_type;
++                uint8_t flags;
++                char name[32];
++            } qi;
++            extern int sceKernelVirtualQuery( const void *, int, void *, size_t );
++            int qrc, hole;
++
++            memset( &qi, 0, sizeof(qi) );
++            qrc = sceKernelVirtualQuery( start, 1, &qi, sizeof(qi) );
++            /* Nothing mapped (query fails), or a described region that is
++             * unprotected, unflagged and spans the whole request. */
++            hole = (qrc != 0) ||
++                   (qi.protection == 0 && qi.flags == 0 &&
++                    (char *)qi.end >= (char *)start + host_size);
++
++            ERR( "PW_RESERVE refused rc=%#x base=%p want=%#zx host=%#zx prot=%#x; "
++                 "query rc=%d start=%p end=%p qprot=%#x qtype=%#x qflags=%#x name=%.31s hole=%d\n",
++                 reserve_rc, start, size, host_size, prot,
++                 qrc, qi.start, qi.end, qi.protection, qi.memory_type,
++                 (unsigned)qi.flags, qi.name, hole );
++
++            if (!hole) { errno = EEXIST; return MAP_FAILED; }
++
++            ptr = mmap( start, host_size, prot,
++                        MAP_PRIVATE | MAP_ANON | MAP_FIXED | flags, -1, 0 );
++            if (ptr == MAP_FAILED) return MAP_FAILED;
++            if (ptr != start)
++            {
++                munmap( ptr, host_size );
++                errno = EEXIST;
++                return MAP_FAILED;
++            }
++            __wine_ps5_dmem_region( start, host_size );
++            return start;
++        }
+     }
+     /* Protecting a bare reservation does not back it with memory, so a
+      * later commit would fault on its first access: direct memory backs
+      * this range like the reserved areas (until it is unmapped). */
+-    __wine_ps5_dmem_region( start, size );
+-    if (prot != PROT_NONE && anon_mmap_fixed( start, size, prot, flags ) == MAP_FAILED)
++    __wine_ps5_dmem_region( start, host_size );
++    if (prot != PROT_NONE && anon_mmap_fixed( start, host_size, prot, flags ) == MAP_FAILED)
+     {
+-        munmap( start, size );
++        munmap( start, host_size );
+         return MAP_FAILED;
+     }
+ #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)

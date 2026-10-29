@@ -66,8 +66,9 @@ case "$TARGET" in
   mapprobe) TITLE_ID=GLDS10010; TITLE="Gladius Mapping Probe"; SRC="$ROOT/src/map-probe" ;;
   threadprobe) TITLE_ID=GLDS10009; TITLE="Gladius Thread Probe"; SRC="$ROOT/src/thread-probe" ;;
   lowbaseprobe) TITLE_ID=GLDS10042; TITLE="Gladius Low Base Probe"; SRC="$ROOT/src/lowbase-probe" ;;
+  vmprobe) TITLE_ID=GLDS10043; TITLE="Gladius VM Reserve Probe"; SRC="$ROOT/src/vmreserve-probe" ;;
   controller-map) TITLE_ID=GLDS10048; TITLE="Gladius Controller Map"; SRC="$ROOT/src/controller-map" ;;
-  *) die "usage: build.sh {hello|triangle|triangle-neo|probe|present|fault|modprobe|statprobe|dupprobe|threadprobe|lowbaseprobe|controller-map|mapprobe|vkmapprobe|gfxhang|gfxhang-base|gfxonce|gfxonce-base|gfxrepeat-base|gfxrepeat-neo|gfxrepeat-neo-solid|gfxrepeat-neo-vbo} [--pkg] [--deploy] [--neo] [--dev-mesa]" ;;
+  *) die "usage: build.sh {hello|triangle|triangle-neo|probe|present|fault|modprobe|statprobe|dupprobe|threadprobe|lowbaseprobe|vmprobe|controller-map|mapprobe|vkmapprobe|gfxhang|gfxhang-base|gfxonce|gfxonce-base|gfxrepeat-base|gfxrepeat-neo|gfxrepeat-neo-solid|gfxrepeat-neo-vbo} [--pkg] [--deploy] [--neo] [--dev-mesa]" ;;
 esac
 
 PKG=0; DEPLOY=0; NEO=0; DEVMESA=0

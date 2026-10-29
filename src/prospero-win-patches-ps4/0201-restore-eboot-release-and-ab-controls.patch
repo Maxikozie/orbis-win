@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH] wine64: restore the eboot release and the two A/B controls
+
+The 265-commit upstream sync dropped three things from wine64_main.c.
+
+1. The call to pw_relocated_wine_release_eboot(). The function stayed exported
+   in src/reloc-wine-app/app_entry.c but nothing invoked it, so the eboot
+   remained mapped at 0x400000-0x49c000 for the whole run. Measured with
+   sceKernelVirtualQuery at the failure site:
+
+     query rc=0 start=400000 end=49c000 qprot=0x5 qflags=0x11 name=executable
+
+   sceKernelReserveVirtualRange then returned 0x8002000c (ENOMEM) for every
+   fixed low reservation -- 54 of 54 in one launch -- because the range held
+   the running executable. FalloutNV.exe relocated to 0x530000 (it had loaded
+   at 0x400000 on 19 consecutive pre-sync runs) and Oblivion, which cannot
+   relocate, died at STATUS_CONFLICTING_ADDRESSES in build_module().
+
+   `relocatable eboot release status=0` appears in the klog through 16:01 and
+   then not again until this restore: exactly the post-sync window.
+
+   The original patch is src/reloc-wine-app/0001-delay-eboot-release-until-
+   game-start.patch, which sits OUTSIDE the two numbered patch directories the
+   sync census walked -- which is why it was missed. A future sync must check
+   every *.patch in the repo.
+
+2 and 3. PW_WINE64_HEAP_FLEXIBLE and PW_WINE64_SERVER_DIRECT_OFF.
+   build-relocatable-wine-ps4.sh still validates each as 0/1 and passes -D,
+   but no source read either, so both switches looked wired and did nothing.
+   Restored using setenv() rather than the original extra[] array, matching
+   the neighbouring PW_WINE64_WAIT_WATCHDOG line as it now stands upstream.
+   Each logs when active, so a package built with either says so.
+
+---
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index ecc4f3a..74ee2e8 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -75,6 +75,19 @@
+  * src/prospero-win-patches-ps4/0026-wine64-report-gnm-submit-done.patch,
+  * dropped by the 2026-10-28 upstream merge. */
+ extern int32_t sceGnmSubmitDone(void);
++#ifdef PW_RELOCATABLE_WINE
++/* Present only in the relocatable PRX build. Keep the eboot image mapped
++ * through Sony display/input setup, then release its low range immediately
++ * before Wine starts the selected Windows process.
++ *
++ * Restored 2026-10-28: the upstream sync dropped this, so the eboot stayed
++ * mapped at 0x400000-0x49c000 and sceKernelReserveVirtualRange returned
++ * ENOMEM for every fixed low reservation -- measured by vmprobe/1045 as
++ * `query ... name=executable hole=0`. FalloutNV.exe then relocated to
++ * 0x530000 (it had loaded at 0x400000 on 19 consecutive pre-sync runs) and
++ * Oblivion, which cannot relocate, died at STATUS_CONFLICTING_ADDRESSES. */
++extern int pw_relocated_wine_release_eboot(void) __attribute__((weak));
++#endif
+ #ifndef PW_FIXED_PROFILE
+ /* The id of the one profile a single-program title runs; "" for the launcher. */
+ #define PW_FIXED_PROFILE ""
+@@ -112,6 +125,19 @@ static const char *const runtime_roots[] = { "/app0", PW_SANDBOX_APP0 };
+  * thread waits on every two seconds, for stalls that logging hides. */
+ #define PW_WINE64_WAIT_WATCHDOG 0
+ #endif
++#ifndef PW_WINE64_HEAP_FLEXIBLE
++/* A/B control: keep Wine's Unix heap on its existing anonymous mmap backing
++ * instead of PS4 direct memory. Restored 2026-10-28 -- the upstream sync left
++ * build-relocatable-wine-ps4.sh validating and passing -D for this and for
++ * PW_WINE64_SERVER_DIRECT_OFF while no source read either, so both switches
++ * looked wired and did nothing. */
++#define PW_WINE64_HEAP_FLEXIBLE 0
++#endif
++#ifndef PW_WINE64_SERVER_DIRECT_OFF
++/* A/B control: route Wine server requests through the ordinary server thread
++ * rather than the direct path, leaving the CPU backend and game data alone. */
++#define PW_WINE64_SERVER_DIRECT_OFF 0
++#endif
+ #ifndef PW_WINE64_SCRIPT
+ /* 1 drives the launcher unattended for validation: it opens
+  * PW_WINE64_SCRIPT_CYCLES games, one per cycle in the library's order
+@@ -1256,6 +1282,14 @@ int main(int argc, char **argv)
+                        temp.count ? temp.folders[temp.count - 1] : "-");
+         }
+         if (PW_WINE64_WAIT_WATCHDOG) setenv("WINE_PS5_WAIT_WATCHDOG", "1", 1);
++        if (PW_WINE64_HEAP_FLEXIBLE) {
++            setenv("WINE_PS5_HEAP_FLEXIBLE", "1", 1);
++            PS5LOG_LOG("PW_WINE64 heap_direct=0 (anonymous mmap control)");
++        }
++        if (PW_WINE64_SERVER_DIRECT_OFF) {
++            setenv("WINE_PS5_SERVER_DIRECT", "0", 1);
++            PS5LOG_LOG("PW_WINE64 server_direct=0 (regular server thread)");
++        }
+         /* [application] arguments follow the executable in Wine's argv. */
+         int words = pw_wine_launch_split(game->app.arguments, argument_words,
+                                          sizeof(argument_words), wine_argv + 2,
+@@ -1382,6 +1416,15 @@ int main(int argc, char **argv)
+         status = pw_wine_start_environment(&start, &config, &ops);
+         PS5LOG_LOG("PW_WINE64 environment status=%d", status);
+     }
++#ifdef PW_RELOCATABLE_WINE
++    if (status == PW_OK) {
++        if (game && pw_relocated_wine_release_eboot) {
++            int release_status = pw_relocated_wine_release_eboot();
++            PS5LOG_LOG("PW_WINE64 relocatable eboot release status=%d", release_status);
++            if (release_status) status = PW_ERR_STATE;
++        }
++    }
++#endif
+     if (status == PW_OK) {
+         status = pw_wine_start_run(&start, &config, &ops);
+         PS5LOG_LOG("PW_WINE64 run status=%d", status);
