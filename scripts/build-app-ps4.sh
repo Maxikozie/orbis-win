@@ -87,7 +87,8 @@ CFL="-std=gnu11 -O2 -fPIC -DPW_WINE64_WAIT_WATCHDOG=$PW_WINE64_WAIT_WATCHDOG -DP
 say "compile: portable core (DBT + launcher) and the portable half of native/"
 for f in "$PW"/src/*.c "$PW"/native/wine64_main.c "$PW"/native/pw_data_mount.c \
          "$PW"/native/pw_diagnostics.c "$PW"/native/pw_wine_display.c \
-         "$PW"/native/pw_wine_library.c "$PW"/native/pw_wine_prefix.c "$PW"/native/ps5log/*.c; do
+         "$PW"/native/pw_wine_library.c "$PW"/native/pw_wine_prefix.c \
+         "$PW"/native/pw_osk_ps5.c "$PW"/native/ps5log/*.c; do
   [ -f "$f" ] || continue
   $CC $CFL -c "$f" -o "$OBJ/$(echo "${f#$PW/}" | tr '/' '_' | sed 's/\.c$/.o/')"
 done

@@ -20,8 +20,6 @@ show_fps = true
 mode = keyboard
 mouse = right_stick
 mouse_speed = 1200
-keyboard_stick = left_stick
-stick_deadzone = 25
 ; PS3 actions translated to Oblivion's PC defaults.
 cross = space
 circle = tab

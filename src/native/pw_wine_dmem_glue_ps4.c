@@ -41,6 +41,18 @@
 #include <string.h>
 #include <time.h>
 #include <sys/mman.h>
+#include <pthread.h>
+
+/* ⚠ Which thread is migrating. Needed to tell a concurrency race (migration on
+ * one thread, guest fault on another) from a failed migration whose own thread
+ * then touches the page -- the two need opposite fixes, and the traces carried
+ * no thread id. Printed into the same klog channel as the fault traces so the
+ * causal chain sits in ONE stream: klog and ps5log timestamps are skewed by
+ * ~0.4 s, which invalidated several cross-stream timing comparisons. */
+static unsigned long glue_tid(void)
+{
+    return (unsigned long)(uintptr_t)pthread_self();
+}
 
 extern int sceKernelReserveVirtualRange(void **address, size_t bytes, int flags, size_t alignment);
 extern int sceKernelAllocateMainDirectMemory(size_t bytes, size_t alignment, int type, int64_t *offset);
@@ -483,15 +495,18 @@ static int migrate_exec_range_to_flex(uintptr_t address, size_t bytes)
                   MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
     if (mapped == MAP_FAILED || mapped != (void *)address)
     {
-        int map_errno = errno;
+        int map_errno = errno, restore_rc;
         if (mapped != MAP_FAILED) (void)munmap(mapped, bytes);
-        if (!pw_wine_dmem_replace(&dmem, address, bytes,
-                                  PROT_READ | PROT_WRITE))
-            memcpy((void *)address, saved, bytes);
+        /* ⚠ restore_rc was discarded before. A hole in committed memory only
+         * persists when this restore fails, so it is the one value that says
+         * whether a failed migration left damage behind. */
+        restore_rc = pw_wine_dmem_replace(&dmem, address, bytes,
+                                         PROT_READ | PROT_WRITE);
+        if (!restore_rc) memcpy((void *)address, saved, bytes);
         munmap(saved, bytes);
         snprintf(line, sizeof(line),
-                 "wine-ps4: exec-range flex-migrate map failed addr=%p bytes=%zu errno=%d\n",
-                 mapped, bytes, map_errno);
+                 "wine-ps4: exec-range flex-migrate map failed addr=%p bytes=%zu errno=%d restore=%d tid=%lu\n",
+                 mapped, bytes, map_errno, restore_rc, glue_tid());
         sceKernelDebugOutText(0, line);
         return -1;
     }
@@ -514,8 +529,8 @@ static int migrate_exec_range_to_flex(uintptr_t address, size_t bytes)
     munmap(saved, bytes);
 
     snprintf(line, sizeof(line),
-             "wine-ps4: exec-range flex-migrate complete addr=%p bytes=%zu\n",
-             (void *)address, bytes);
+             "wine-ps4: exec-range flex-migrate complete addr=%p bytes=%zu tid=%lu\n",
+             (void *)address, bytes, glue_tid());
     sceKernelDebugOutText(0, line);
     return 0;
 }
@@ -670,9 +685,9 @@ static int protect_exec_range(unsigned int call, uintptr_t address, size_t bytes
                                              &info, sizeof(info));
             effective = query_rc ? -1 : info.protection;
             snprintf(line, sizeof(line),
-                     "wine-ps4: exec-range verify call=%u addr=%p bytes=%zu migrate=%d protect=%d query=%d effective=%#x\n",
+                     "wine-ps4: exec-range verify call=%u addr=%p bytes=%zu migrate=%d protect=%d query=%d effective=%#x tid=%lu\n",
                      call, (void *)at, span, migrate_rc, retry_rc,
-                     query_rc, effective);
+                     query_rc, effective, glue_tid());
             sceKernelDebugOutText(0, line);
             if (migrate_rc || retry_rc || query_rc || !(effective & PROT_EXEC))
                 return -1;

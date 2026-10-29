@@ -25,7 +25,6 @@ circle = mouse_right
 r1 = mouse_left
 
 [runtime]
-native_profile = true
 
 [debug]
 winedebug = err+ntdll,warn+vulkan
