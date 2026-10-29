@@ -1,0 +1,365 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH] profile/input: restore keyboard_stick, stick_deadzone and the
+ stick direction keys
+
+The upstream sync dropped the left-stick-to-keyboard feature entirely. Unlike
+the eboot release, NO patch file captured it -- it existed only in the
+gitignored prospero-win tree, so the merge overwrote it without a trace.
+Recovered from prospero-win's own history at 8471db8 (the pre-sync PS4 work).
+
+Symptom: Oblivion's buttons worked and its left stick did nothing. The profile
+still parsed, because the interim fix for the diverged parsers had stripped the
+two keys from the profile data rather than restoring the code.
+
+Restored in four places:
+  - src/pw_game_profile.h: keyboard_stick, stick_deadzone, stick_keys[4].
+  - src/pw_game_profile.c: the keyboard_stick/stick_deadzone/stick_* keys,
+    WASD defaults, deadzone 25, and the overlay merge.
+  - native/pw_wine_display.{c,h}: pw_wine_keyboard_stick_step(), with the
+    5-count hysteresis at the dead zone edge and release-before-press so a
+    direction reversal cannot briefly hold both keys.
+  - native/wine64_main.c: the per-frame step, the events array grown by 4, and
+    a release path so held directions do not stick if the pad stops reporting.
+
+WATCH THE SET MASK. Upstream took bit 4 for SET_PLAYER2, which is what
+SET_KEYBOARD_STICK used before the sync; these are now bits 5 and 6. Replaying
+the pre-sync patch verbatim would silently corrupt player2 handling.
+
+Verified by parsing the real profile: keyboard_stick=left, deadzone=25,
+stick W/S/A/D, and the D-pad to VK_UP/VK_DOWN/VK_LEFT/VK_RIGHT.
+
+---
+diff --git a/native/pw_wine_display.c b/native/pw_wine_display.c
+index b9aaf81..e6a9609 100644
+--- a/native/pw_wine_display.c
++++ b/native/pw_wine_display.c
+@@ -95,6 +95,53 @@ size_t pw_wine_game_inputs(const PwGameInput *input, uint32_t pressed, uint32_t
+     return add_edges(input, pressed, 1, out, used, max);
+ }
+ 
++enum { KEY_STICK_UP = 1u << 0, KEY_STICK_DOWN = 1u << 1,
++       KEY_STICK_LEFT = 1u << 2, KEY_STICK_RIGHT = 1u << 3 };
++
++static int stick_direction(uint8_t value, int negative, int was_held, unsigned deadzone)
++{
++    /* Five raw stick counts of hysteresis keep a noisy axis from tapping the
++     * key repeatedly at the edge of its dead zone. */
++    int threshold = (int)(127u * deadzone / 100u);
++    int delta = (int)value - 128;
++    if (negative) return delta < -(threshold - (was_held ? 5 : 0));
++    return delta > threshold - (was_held ? 5 : 0);
++}
++
++size_t pw_wine_keyboard_stick_step(const PwGameInput *input, uint8_t stick_x, uint8_t stick_y,
++                                  int connected, PwWineKeyboardStick *state,
++                                  PwWineInput *out, size_t max)
++{
++    static const uint8_t bits[4] = { KEY_STICK_UP, KEY_STICK_DOWN, KEY_STICK_LEFT, KEY_STICK_RIGHT };
++    uint8_t wanted = 0, previous;
++    size_t used = 0;
++
++    if (!input || !state || !out) return 0;
++    previous = state->held;
++    if (connected && input->keyboard_stick != PW_GAME_STICK_NONE) {
++        if (stick_direction(stick_y, 1, !!(previous & KEY_STICK_UP), input->stick_deadzone))
++            wanted |= KEY_STICK_UP;
++        if (stick_direction(stick_y, 0, !!(previous & KEY_STICK_DOWN), input->stick_deadzone))
++            wanted |= KEY_STICK_DOWN;
++        if (stick_direction(stick_x, 1, !!(previous & KEY_STICK_LEFT), input->stick_deadzone))
++            wanted |= KEY_STICK_LEFT;
++        if (stick_direction(stick_x, 0, !!(previous & KEY_STICK_RIGHT), input->stick_deadzone))
++            wanted |= KEY_STICK_RIGHT;
++    }
++    /* Release first so a direct direction reversal cannot momentarily hold
++     * both keys. The caller reserves room for all four transitions. */
++    for (size_t i = 0; i < 4 && used < max; i++) {
++        if ((previous & bits[i]) && !(wanted & bits[i]))
++            out[used++] = (PwWineInput){ PW_WINE_INPUT_KEY, input->stick_keys[i], 0, 0, 0 };
++    }
++    for (size_t i = 0; i < 4 && used < max; i++) {
++        if (!(previous & bits[i]) && (wanted & bits[i]))
++            out[used++] = (PwWineInput){ PW_WINE_INPUT_KEY, input->stick_keys[i], 0, 0, 1 };
++    }
++    state->held = wanted;
++    return used;
++}
++
+ static const struct { uint32_t dualsense; uint16_t xinput; } pad_buttons[] = {
+     { 0x4000u, 0x1000u }, { 0x2000u, 0x2000u }, { 0x8000u, 0x4000u }, { 0x1000u, 0x8000u },
+     { 0x400u, 0x0100u }, { 0x800u, 0x0200u }, { 0x2u, 0x0040u }, { 0x4u, 0x0080u },
+diff --git a/native/pw_wine_display.h b/native/pw_wine_display.h
+index c94a3e5..95f1630 100644
+--- a/native/pw_wine_display.h
++++ b/native/pw_wine_display.h
+@@ -52,6 +52,18 @@ int pw_wine_frame_box_take(PwWineFrameBox *box, uint64_t *seen, uint8_t *out,
+ size_t pw_wine_game_inputs(const PwGameInput *input, uint32_t pressed, uint32_t released,
+                            PwWineInput *out, size_t max);
+ 
++/* Digital key emulation for one analog stick. Direction bits are retained
++ * across frames so key-down is sent only on a threshold crossing, and every
++ * held direction is released when the controller disconnects.
++ *
++ * Restored 2026-10-28: the upstream sync removed this along with the
++ * keyboard_stick/stick_deadzone profile keys, which left Oblivion's left
++ * stick doing nothing while its buttons still worked. */
++typedef struct PwWineKeyboardStick { uint8_t held; } PwWineKeyboardStick;
++size_t pw_wine_keyboard_stick_step(const PwGameInput *input, uint8_t stick_x, uint8_t stick_y,
++                                  int connected, PwWineKeyboardStick *state,
++                                  PwWineInput *out, size_t max);
++
+ /* The DualSense as an XInput gamepad: its held buttons (Cross A, Circle B,
+  * Square X, Triangle Y, L1/R1 shoulders, L3/R3 thumbs, Options Start,
+  * Create Back, a touchpad click Back on its left half and Guide on its
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index ecc4f3a..a92eebf 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -75,6 +75,19 @@
+  * src/prospero-win-patches-ps4/0026-wine64-report-gnm-submit-done.patch,
+  * dropped by the 2026-10-28 upstream merge. */
+ extern int32_t sceGnmSubmitDone(void);
++#ifdef PW_RELOCATABLE_WINE
++/* Present only in the relocatable PRX build. Keep the eboot image mapped
++ * through Sony display/input setup, then release its low range immediately
++ * before Wine starts the selected Windows process.
++ *
++ * Restored 2026-10-28: the upstream sync dropped this, so the eboot stayed
++ * mapped at 0x400000-0x49c000 and sceKernelReserveVirtualRange returned
++ * ENOMEM for every fixed low reservation -- measured by vmprobe/1045 as
++ * `query ... name=executable hole=0`. FalloutNV.exe then relocated to
++ * 0x530000 (it had loaded at 0x400000 on 19 consecutive pre-sync runs) and
++ * Oblivion, which cannot relocate, died at STATUS_CONFLICTING_ADDRESSES. */
++extern int pw_relocated_wine_release_eboot(void) __attribute__((weak));
++#endif
+ #ifndef PW_FIXED_PROFILE
+ /* The id of the one profile a single-program title runs; "" for the launcher. */
+ #define PW_FIXED_PROFILE ""
+@@ -112,6 +125,19 @@ static const char *const runtime_roots[] = { "/app0", PW_SANDBOX_APP0 };
+  * thread waits on every two seconds, for stalls that logging hides. */
+ #define PW_WINE64_WAIT_WATCHDOG 0
+ #endif
++#ifndef PW_WINE64_HEAP_FLEXIBLE
++/* A/B control: keep Wine's Unix heap on its existing anonymous mmap backing
++ * instead of PS4 direct memory. Restored 2026-10-28 -- the upstream sync left
++ * build-relocatable-wine-ps4.sh validating and passing -D for this and for
++ * PW_WINE64_SERVER_DIRECT_OFF while no source read either, so both switches
++ * looked wired and did nothing. */
++#define PW_WINE64_HEAP_FLEXIBLE 0
++#endif
++#ifndef PW_WINE64_SERVER_DIRECT_OFF
++/* A/B control: route Wine server requests through the ordinary server thread
++ * rather than the direct path, leaving the CPU backend and game data alone. */
++#define PW_WINE64_SERVER_DIRECT_OFF 0
++#endif
+ #ifndef PW_WINE64_SCRIPT
+ /* 1 drives the launcher unattended for validation: it opens
+  * PW_WINE64_SCRIPT_CYCLES games, one per cycle in the library's order
+@@ -1049,6 +1075,7 @@ int main(int argc, char **argv)
+     const PwGameProfile *game = NULL;
+     int scaling = PW_PRESENT_SCALE_FIT;
+     PwWinePointer pointer = { 0, 0 };
++    PwWineKeyboardStick keyboard_stick_state = { 0 };
+     int (*post_input)(const PwWineInput *) = NULL;
+     void (*set_pad)(const PwWinePad *) = NULL;
+     int (*rumble)(uint32_t *, uint32_t *) = NULL;
+@@ -1256,6 +1283,14 @@ int main(int argc, char **argv)
+                        temp.count ? temp.folders[temp.count - 1] : "-");
+         }
+         if (PW_WINE64_WAIT_WATCHDOG) setenv("WINE_PS5_WAIT_WATCHDOG", "1", 1);
++        if (PW_WINE64_HEAP_FLEXIBLE) {
++            setenv("WINE_PS5_HEAP_FLEXIBLE", "1", 1);
++            PS5LOG_LOG("PW_WINE64 heap_direct=0 (anonymous mmap control)");
++        }
++        if (PW_WINE64_SERVER_DIRECT_OFF) {
++            setenv("WINE_PS5_SERVER_DIRECT", "0", 1);
++            PS5LOG_LOG("PW_WINE64 server_direct=0 (regular server thread)");
++        }
+         /* [application] arguments follow the executable in Wine's argv. */
+         int words = pw_wine_launch_split(game->app.arguments, argument_words,
+                                          sizeof(argument_words), wine_argv + 2,
+@@ -1382,6 +1417,15 @@ int main(int argc, char **argv)
+         status = pw_wine_start_environment(&start, &config, &ops);
+         PS5LOG_LOG("PW_WINE64 environment status=%d", status);
+     }
++#ifdef PW_RELOCATABLE_WINE
++    if (status == PW_OK) {
++        if (game && pw_relocated_wine_release_eboot) {
++            int release_status = pw_relocated_wine_release_eboot();
++            PS5LOG_LOG("PW_WINE64 relocatable eboot release status=%d", release_status);
++            if (release_status) status = PW_ERR_STATE;
++        }
++    }
++#endif
+     if (status == PW_OK) {
+         status = pw_wine_start_run(&start, &config, &ops);
+         PS5LOG_LOG("PW_WINE64 run status=%d", status);
+@@ -1397,7 +1441,8 @@ int main(int argc, char **argv)
+         uint64_t now = now_ns();
+         pw_diagnostics_tick(now);
+         PwPresentView view;
+-        PwWineInput events[2 * PW_GAME_BUTTON_COUNT + 1];
++        /* +4 stick transitions (keyboard_stick) and +1 pointer move. */
++        PwWineInput events[2 * PW_GAME_BUTTON_COUNT + 5];
+         int presented = 0;
+ 
+         /* The USB keyboard and mouse; one plugged in later is found by a
+@@ -1539,7 +1584,19 @@ int main(int argc, char **argv)
+         if (pad_read) {
+             size_t count = pw_wine_game_inputs(&game_input, seen->core.pressed_edges,
+                                                seen->core.released_edges, events,
+-                                               sizeof(events) / sizeof(events[0]) - 1);
++                                               sizeof(events) / sizeof(events[0]) - 5);
++            /* [input] keyboard_stick: one stick drives the four direction
++             * keys (WASD by default). Oblivion's profile sets left_stick. */
++            const PwPadPs5Stick *key_stick = NULL;
++            if (game_input.keyboard_stick != PW_GAME_STICK_NONE)
++                key_stick = game_input.keyboard_stick == PW_GAME_STICK_LEFT ?
++                            &seen->left_stick : &seen->right_stick;
++            count += pw_wine_keyboard_stick_step(&game_input,
++                                                 key_stick ? key_stick->x : 0x80,
++                                                 key_stick ? key_stick->y : 0x80,
++                                                 key_stick != NULL, &keyboard_stick_state,
++                                                 &events[count],
++                                                 sizeof(events) / sizeof(events[0]) - count - 1);
+             if (game_input.mouse != PW_GAME_STICK_NONE) {
+                 const PwPadPs5Stick *stick = game_input.mouse == PW_GAME_STICK_LEFT ?
+                                              &seen->left_stick : &seen->right_stick;
+@@ -1561,6 +1618,16 @@ int main(int argc, char **argv)
+                                (unsigned)left, (unsigned)right, pw_result_name(vibrate),
+                                pad.vibration_rc, pad.trigger_rc);
+             }
++        } else if (keyboard_stick_state.held && post_input) {
++            /* The pad stopped reporting with directions held: release them
++             * so the game is not left walking into a wall. */
++            size_t count = pw_wine_keyboard_stick_step(&game_input, 0x80, 0x80, 0,
++                                                       &keyboard_stick_state, events,
++                                                       sizeof(events) / sizeof(events[0]));
++            for (size_t j = 0; j < count; j++) {
++                if (post_input(&events[j]) == 0) posted++;
++                else refused++;
++            }
+         }
+         /* The console's own keyboard: the two-finger click or the menu's
+          * entry asks the system for its dialog, which it draws over the
+diff --git a/src/pw_game_profile.c b/src/pw_game_profile.c
+index 7769136..d3b5101 100644
+--- a/src/pw_game_profile.c
++++ b/src/pw_game_profile.c
+@@ -3,7 +3,11 @@
+ #include <string.h>
+ 
+ enum { SET_MODE = 1u << 0, SET_MOUSE = 1u << 1, SET_SPEED = 1u << 2, SET_PRESET = 1u << 3,
+-       SET_PLAYER2 = 1u << 4 };
++       SET_PLAYER2 = 1u << 4, SET_KEYBOARD_STICK = 1u << 5, SET_STICK_DEADZONE = 1u << 6 };
++/* Restored 2026-10-28: the upstream sync dropped keyboard_stick/stick_deadzone
++ * and took bit 4 for SET_PLAYER2, so these two moved to bits 5 and 6. Without
++ * them Oblivion's profile parsed but the left stick did nothing. */
++enum { STICK_UP = 1u << 0, STICK_DOWN = 1u << 1, STICK_LEFT = 1u << 2, STICK_RIGHT = 1u << 3 };
+ 
+ /* DualSense buttons in PW_GAME_BUTTON order, with their scePadRead bits. */
+ static const struct { const char *name; uint32_t mask; } buttons[PW_GAME_BUTTON_COUNT] = {
+@@ -112,6 +116,12 @@ static int preset_name(char *out, size_t capacity, const uint8_t *v, size_t n)
+     return PW_OK;
+ }
+ 
++/* The four stick directions as profile keys; defaults are WASD. */
++static const struct { const char *name; unsigned index, bit; } stick_key_names[] = {
++    { "stick_up", 0, STICK_UP }, { "stick_down", 1, STICK_DOWN },
++    { "stick_left", 2, STICK_LEFT }, { "stick_right", 3, STICK_RIGHT },
++};
++
+ static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length,
+                        const uint8_t *v, size_t n, int allow_preset)
+ {
+@@ -144,6 +154,35 @@ static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length
+         input->set |= SET_MOUSE;
+         return PW_OK;
+     }
++    if (is(key, key_length, "keyboard_stick")) {
++        if (input->set & SET_KEYBOARD_STICK) return PW_ERR_MALFORMED;
++        if (is(v, n, "none")) input->keyboard_stick = PW_GAME_STICK_NONE;
++        else if (is(v, n, "left_stick")) input->keyboard_stick = PW_GAME_STICK_LEFT;
++        else if (is(v, n, "right_stick")) input->keyboard_stick = PW_GAME_STICK_RIGHT;
++        else return PW_ERR_UNSUPPORTED;
++        input->set |= SET_KEYBOARD_STICK;
++        return PW_OK;
++    }
++    if (is(key, key_length, "stick_deadzone")) {
++        uint32_t deadzone;
++        if ((input->set & SET_STICK_DEADZONE) || number(v, n, &deadzone) != PW_OK ||
++            deadzone < 5 || deadzone > 70)
++            return PW_ERR_MALFORMED;
++        input->stick_deadzone = (uint8_t)deadzone;
++        input->set |= SET_STICK_DEADZONE;
++        return PW_OK;
++    }
++    for (size_t i = 0; i < sizeof(stick_key_names) / sizeof(stick_key_names[0]); i++) {
++        PwGameBinding parsed = { 0, 0, 0 };
++        int status;
++        if (!is(key, key_length, stick_key_names[i].name)) continue;
++        if (input->stick_keys_set & stick_key_names[i].bit) return PW_ERR_MALFORMED;
++        if ((status = binding(v, n, &parsed)) != PW_OK) return status;
++        if (parsed.kind != PW_GAME_BIND_KEY) return PW_ERR_UNSUPPORTED;
++        input->stick_keys[stick_key_names[i].index] = parsed.code;
++        input->stick_keys_set |= stick_key_names[i].bit;
++        return PW_OK;
++    }
+     if (is(key, key_length, "mouse_speed")) {
+         uint32_t speed;
+         if ((input->set & SET_SPEED) || number(v, n, &speed) != PW_OK || !speed ||
+@@ -508,6 +547,11 @@ void pw_game_input_init(PwGameInput *input)
+     if (!input) return;
+     memset(input, 0, sizeof(*input));
+     input->mouse_speed = PW_GAME_MOUSE_SPEED_DEFAULT;
++    input->stick_deadzone = 25;
++    input->stick_keys[0] = 'W';
++    input->stick_keys[1] = 'S';
++    input->stick_keys[2] = 'A';
++    input->stick_keys[3] = 'D';
+     for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++) input->bindings[i].mask = buttons[i].mask;
+ }
+ 
+@@ -561,7 +605,12 @@ void pw_game_input_overlay(PwGameInput *base, const PwGameInput *overrides)
+     if (overrides->set & SET_MODE) base->mode = overrides->mode;
+     if (overrides->set & SET_MOUSE) base->mouse = overrides->mouse;
+     if (overrides->set & SET_SPEED) base->mouse_speed = overrides->mouse_speed;
+-    base->set |= overrides->set & (SET_MODE | SET_MOUSE | SET_SPEED);
++    if (overrides->set & SET_KEYBOARD_STICK) base->keyboard_stick = overrides->keyboard_stick;
++    if (overrides->set & SET_STICK_DEADZONE) base->stick_deadzone = overrides->stick_deadzone;
++    for (size_t i = 0; i < 4; i++)
++        if (overrides->stick_keys_set & (1u << i)) base->stick_keys[i] = overrides->stick_keys[i];
++    base->stick_keys_set |= overrides->stick_keys_set;
++    base->set |= overrides->set & (SET_MODE | SET_MOUSE | SET_SPEED | SET_KEYBOARD_STICK | SET_STICK_DEADZONE);
+     for (size_t i = 0; i < PW_GAME_BUTTON_COUNT; i++)
+         if (overrides->bindings[i].kind != PW_GAME_BIND_UNSET) base->bindings[i] = overrides->bindings[i];
+ }
+diff --git a/src/pw_game_profile.h b/src/pw_game_profile.h
+index 19eaa22..b985e52 100644
+--- a/src/pw_game_profile.h
++++ b/src/pw_game_profile.h
+@@ -32,6 +32,13 @@
+  *                          ; when nothing is bound, keyboard otherwise
+  *   mouse = right_stick    ; a stick moves the pointer: left_stick, right_stick, none
+  *   mouse_speed = 1200     ; pointer pixels per second at full tilt
++ *   keyboard_stick = right_stick ; turn one stick into key presses: left_stick,
++ *                                ; right_stick or none (default none)
++ *   stick_deadzone = 25    ; activation threshold, percent (5..70)
++ *   stick_up = w           ; keys for the four stick directions; defaults WASD
++ *   stick_down = s
++ *   stick_left = a
++ *   stick_right = d
+  *   cross = space          ; <button> = <key> | mouse_left | mouse_right |
+  *   r2 = mouse_left        ;            mouse_middle | vk:0xNN | none
+  *   player2 = pinball-p2   ; a keyboard preset for a second DualSense, the pad
+@@ -105,6 +112,10 @@ typedef struct PwGameInput {
+     PwGameInputMode mode;
+     PwGameStick mouse;
+     uint32_t mouse_speed;
++    PwGameStick keyboard_stick;      /* digital key presses from this stick */
++    uint8_t stick_deadzone;          /* percent, 5..70 */
++    uint8_t stick_keys_set;          /* directions explicitly set by this profile/preset */
++    uint16_t stick_keys[4];          /* up, down, left, right; defaults to W, S, A, D */
+     PwGameBinding bindings[PW_GAME_BUTTON_COUNT];   /* in PW_GAME_BUTTON order */
+     char preset[PW_APP_ID_CAPACITY];
+     char player2[PW_APP_ID_CAPACITY];   /* the second pad's preset, profile only */
