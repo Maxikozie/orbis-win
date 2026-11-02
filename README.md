@@ -65,5 +65,11 @@ profiles and the fixes learned while bringing the four games above to
 gameplay. The build guide pins the matching upstream source and SDK bundle so
 another PS4 developer can reproduce the same starting point before rebasing.
 
+## License
+
+Project-authored code is licensed under [LGPL-2.1-or-later](LICENSE), in line
+with `prospero-win`. See [LICENSING.md](LICENSING.md) for file-level exceptions
+and third-party boundaries.
+
 All game data, console firmware modules, SDK payloads and generated packages
 remain external and are not included in this repository.
