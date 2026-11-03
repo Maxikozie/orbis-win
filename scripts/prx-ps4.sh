@@ -75,7 +75,7 @@ gen "$prx/obj/ntdll_desc.c" \
     pw_wine_set_pad pw_wine_rumble pw_wine_pad pw_wine_set_rumble \
     pw_wine_set_audio_sink pw_wine_audio_available pw_wine_audio_output \
     __wine_virtual_stats __wine_virtual_fault_top __wine_ps5_set_output_sink \
-    __wine_ps5_memory_stats pw_cwd_set \
+    __wine_ps5_memory_stats __wine_ps5_wait_for_exec_migration pw_cwd_set \
     __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook \
     pw_wine_set_display_release pw_wine_release_display pw_ps4_setenv pw_wine_dl_addr \
     --optional-from "$build/dlls/ntdll/ntdll.so" --nm llvm-nm \

@@ -20,6 +20,7 @@ PW_WINE64_SERVER_DIRECT_OFF="${PW_WINE64_SERVER_DIRECT_OFF:-0}"
 PW_WINE64_HEAP_FLEXIBLE="${PW_WINE64_HEAP_FLEXIBLE:-0}"
 PS4_KERNELBASE32_DLL="${PS4_KERNELBASE32_DLL:-}"
 PS4_IPHLPAPI32_DLL="${PS4_IPHLPAPI32_DLL:-}"
+PW_SPLIT_RUNTIME="${PW_SPLIT_RUNTIME:-0}"
 NEO=0
 for a in "$@"; do
   case "$a" in --neo) NEO=1 ;; esac
@@ -35,6 +36,10 @@ esac
 case "$PW_WINE64_HEAP_FLEXIBLE" in
   0|1) ;;
   *) echo "PW_WINE64_HEAP_FLEXIBLE must be 0 or 1" >&2; exit 2 ;;
+esac
+case "$PW_SPLIT_RUNTIME" in
+  0|1) ;;
+  *) echo "PW_SPLIT_RUNTIME must be 0 or 1" >&2; exit 2 ;;
 esac
 export OO_PS4_TOOLCHAIN="$OO"
 
@@ -109,11 +114,29 @@ python3 "$ROOT/scripts/gen-libkernel-symbol-list.py" \
 echo "== package with a distinct title ID"
 STAGE="$BASE_OUT/pkg-stage"
 EXTRA=(--extra "$PRX_BUILD/relocated_wine_app.prx:sce_module/relocated_wine_app.prx")
+if (( PW_SPLIT_RUNTIME )); then
+  [[ -s "$STAGE/win/wine/lib/wine/x86_64-unix/ntdll.prx" ]] || {
+    echo "split runtime source stage is missing ntdll.prx: $STAGE" >&2; exit 1;
+  }
+  [[ -f "$STAGE/win/wine/lib/wine/x86_64-windows/wow64native.dll" ]] || {
+    echo "split runtime source stage is missing wow64native.dll: $STAGE" >&2; exit 1;
+  }
+  echo "== split runtime: package app and profiles; leave Wine modules/data in base stage for /data upload"
+fi
 while IFS= read -r -d '' file; do
   rel="${file#"$STAGE"/}"
   case "$rel" in
     eboot.bin|pkg.gp4|sce_sys/param.sfo|pkg-build.log|pkg-build-neo.log|build.log|*.pkg) continue ;;
   esac
+  if (( PW_SPLIT_RUNTIME )); then
+    case "$rel" in win/wine/*) continue ;; esac
+    case "$rel" in
+      sce_module/*.prx)
+        module="${rel##*/}"
+        case "$module" in libc.prx|libSceFios2.prx) ;; *) continue ;; esac
+        ;;
+    esac
+  fi
   EXTRA+=(--extra "$file:$rel")
 done < <(find "$STAGE" -type f -print0)
 "$BUNDLE/orbis-compat/scripts/ps4/make-pkg.sh" \
@@ -129,5 +152,13 @@ echo "== verify built image types and package contents"
 llvm-readelf -h "$PRX_BUILD/app.shared.elf" | grep -F 'Type:                              DYN'
 llvm-readelf -h "$BUILD/stub.elf" | grep -F 'Type:                              DYN'
 test -s "$OUT/pkg-stage/sce_module/relocated_wine_app.prx"
+if (( PW_SPLIT_RUNTIME )); then
+  if find "$OUT/pkg-stage/win/wine" -type f -print -quit 2>/dev/null | grep -q .; then
+    echo "split package unexpectedly contains Wine runtime files" >&2; exit 1;
+  fi
+  for module in libc.prx libSceFios2.prx relocated_wine_app.prx; do
+    test -s "$OUT/pkg-stage/sce_module/$module"
+  done
+fi
 echo "pkg: $PKG_FILE ($(du -h "$PKG_FILE" | cut -f1))"
 sha256sum "$PKG_FILE"
