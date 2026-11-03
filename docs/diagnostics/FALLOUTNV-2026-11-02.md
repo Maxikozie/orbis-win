@@ -105,13 +105,30 @@ EBOOT range, PRX survival, and a 600-second run. The commit also advances the
 `prospero-win` submodule reference. This is useful shared progress, although
 i1 itself is a low-base/PRX lifetime probe rather than an FNV gameplay test.
 
-The current `ps4-wine` tree also contains
-[`0003-orbis-placed-map-cpu-alias.patch`](https://github.com/Maxikozie/ps4-wine/blob/d6e290c2dcc1ca08bd654219a3a8ab58f30a3bd/patches/mesa-ps4/0003-orbis-placed-map-cpu-alias.patch).
-It adds PS4 RADV support for `VK_EXT_map_memory_placed`, mapping AMD BO pages
-as CPU aliases at requested addresses below 4 GiB for 32-bit Wine. This is
-particularly relevant to compare with our FNV history of failed D3D9 Vulkan
-allocations, 32-bit mappings, and missing textures. It has not been validated
-as a fix for the 1086 null string read, and it is not part of package 1086.
+The useful FNV-adjacent work is in Max's earlier `g1m` commits, not the new
+i1 low-base release itself. Commit
+[`7871ec3`](https://github.com/Maxikozie/ps4-wine/commit/7871ec3) records
+`g1m`, `g1`, and `e` passing after Mesa patch 0003 made RADV advertise
+`VK_EXT_map_memory_placed` on PS4. The documented test used a 32-bit Vulkan
+probe (`vk32.exe`), then a 32-bit DXVK D3D9 triangle and Bloodlines. The patch
+[0003](https://github.com/Maxikozie/ps4-wine/blob/d6e290c2dcc1ca08bd654219a3a8ab58f30a3bd/patches/mesa-ps4/0003-orbis-placed-map-cpu-alias.patch)
+maps AMD BO pages as CPU aliases at requested low addresses. This is direct
+evidence for the 32-bit Vulkan/DXVK mapping mechanism.
+
+Our repo already has the corresponding PS4 RADV implementation in
+`src/mesa-patches-ps4/0002-orbis-placed-cpu-alias.patch`. Its hardware tests
+are recorded in `docs/PS4-MESA-CROSS-TEST-RESULTS.md`: low aliases, reservation
+restore/remap, and GPU copies across GTT, visible VRAM, and cached GTT passed
+with zero mismatches. These are converging implementations of the same
+capability, though their alias protections/lifecycle should be compared before
+porting code between them.
+
+This work could help explain the earlier 32-bit `vkMapMemory` refusal and
+missing D3D9 resources. It does not directly explain the 1086 null string read.
+The 1081 FNV run's large image allocation failure also needs separate
+end-to-end evidence before attributing it to placed mapping. Check whether the
+exact FNV package/runtime reports the placed-map capability and records alias
+map/unmap failures or live bytes during the failure.
 
 Relevant local implementation history:
 
@@ -136,10 +153,10 @@ Relevant local implementation history:
 2. Can the recent-migration retries at `0x15258e30` and `0x16261728` affect
    the values subsequently read by the object/comparison path? What evidence
    would distinguish a retry/mapping defect from normal lazy-page faults?
-3. Does RADV's placed CPU-alias implementation in `ps4-wine` overlap or
-   complement our Wine-side mapping/retry behavior? Which alias/unmap counters
-   and requested guest addresses should be captured during an FNV run to test
-   this safely?
+3. Since both repositories have a tested placed CPU-alias path, what differs
+   between their RADV lifecycle/protection handling, and does the exact FNV
+   runtime exercise it? Which capability, alias/unmap counters, and requested
+   guest addresses would show whether it participates in the FNV failure?
 4. For the 1081 D3D9 allocation failure, can the per-memory-type `VkResult`,
    BO/VA map result, and failed-image lifetime be traced end-to-end to see
    whether an unavailable texture is later treated as a valid game object?
