@@ -103,20 +103,38 @@ for object in "$APP_OBJ"/*.o; do
   APP_OBJECTS+=("$object")
 done
 APP_OBJECTS+=("$PRX_BUILD/native_wine64_main_reloc.o")
-"$CC" -shared -Wl,-Bsymbolic -Wl,-soname,relocated_wine_app.prx \
-  -Wl,--warn-unresolved-symbols -o "$PRX_BUILD/app.shared.elf" \
-  "${APP_OBJECTS[@]}" "$PRX_BUILD/app_entry.o" "$PRX_BUILD/descriptor.o" \
-  -lSceNet -lSceNetCtl -lSceAudioOut -lSceSystemService -lSceSysmodule -lSceGnmDriver \
-  -lSceVideoOut -lScePad -lSceUserService
-"$ROOT/scripts/create-fself-repro.sh" "$OO/bin/linux/create-fself" -in "$PRX_BUILD/app.shared.elf" \
-  -out "$PRX_BUILD/app.oelf" -lib "$PRX_BUILD/relocated_wine_app.prx" \
-  -libname relocated_wine_app.prx -ptype fake \
-  -library-path "$PRX_BUILD:$ROOT/build/ps4-wine-sdk:$OO/lib" \
-  >"$PRX_BUILD/create-fself.log" 2>&1 || {
-    cat "$PRX_BUILD/create-fself.log" >&2
-    echo "could not convert Wine app into a PRX" >&2
+# ⚠ create-fself can leave the end of .bss unmapped (scripts/bss-tail-pad.py),
+# and rtld then refuses the module: "reloc_non_plt ... ref=relocated_wine_app.prx",
+# a black screen before the log starts (01.55, 2026-11-09). Check every link
+# and, when needed, relink once with .bss padded; an unaffected module is
+# linked once and stays byte-identical.
+APP_BSS_PAD=()
+while :; do
+  "$CC" -shared -Wl,-Bsymbolic -Wl,-soname,relocated_wine_app.prx \
+    -Wl,--warn-unresolved-symbols -o "$PRX_BUILD/app.shared.elf" \
+    "${APP_OBJECTS[@]}" "$PRX_BUILD/app_entry.o" "$PRX_BUILD/descriptor.o" "${APP_BSS_PAD[@]}" \
+    -lSceNet -lSceNetCtl -lSceAudioOut -lSceSystemService -lSceSysmodule -lSceGnmDriver \
+    -lSceVideoOut -lScePad -lSceUserService
+  "$ROOT/scripts/create-fself-repro.sh" "$OO/bin/linux/create-fself" -in "$PRX_BUILD/app.shared.elf" \
+    -out "$PRX_BUILD/app.oelf" -lib "$PRX_BUILD/relocated_wine_app.prx" \
+    -libname relocated_wine_app.prx -ptype fake \
+    -library-path "$PRX_BUILD:$ROOT/build/ps4-wine-sdk:$OO/lib" \
+    >"$PRX_BUILD/create-fself.log" 2>&1 || {
+      cat "$PRX_BUILD/create-fself.log" >&2
+      echo "could not convert Wine app into a PRX" >&2
+      exit 1
+    }
+  pad=$(python3 "$ROOT/scripts/bss-tail-pad.py" "$PRX_BUILD/app.shared.elf" "$PRX_BUILD/app.oelf")
+  [ "$pad" = 0 ] && break
+  if (( ${#APP_BSS_PAD[@]} )); then
+    echo "relocated_wine_app: end of .bss still unmapped after the .bss pad" >&2
     exit 1
-  }
+  fi
+  printf '__attribute__((used, aligned(16))) char pw_app_bss_pad[%s];\n' "$pad" > "$PRX_BUILD/app_bss_pad.c"
+  "$CC" -std=gnu11 -O2 -fPIC -fno-common -c "$PRX_BUILD/app_bss_pad.c" -o "$PRX_BUILD/app_bss_pad.o"
+  echo "  ! relocated_wine_app: create-fself would leave the end of .bss unmapped; relinking with a $pad-byte .bss pad"
+  APP_BSS_PAD=("$PRX_BUILD/app_bss_pad.o")
+done
 
 echo "== build the low-address handoff eboot"
 mkdir -p "$BUILD"
@@ -176,7 +194,12 @@ while IFS= read -r -d '' file; do
   fi
   EXTRA+=(--extra "$file:$rel")
 done < <(find "$STAGE" -type f -print0)
-# The home-screen icon: upstream prospero-win's mark (assets/prospero-win-logo.svg),
+# Controller presets for the launcher's game card; it copies any missing one to
+# <data>/input/, where profiles name them ([input] preset = <name>).
+for preset in "$ROOT"/src/profiles/input/*.input; do
+  EXTRA+=(--extra "$preset:input/${preset##*/}")
+done
+# The home-screen icon: orbis-win's OW mark (assets/orbis-win-mark.svg),
 # rendered to 512x512 by scripts/render-logo-icon.py. Without it the title shows
 # a blank tile on the PS4 home screen (2026-11-06).
 ICON=${PS4_ICON:-$ROOT/assets/icon0.png}
@@ -194,6 +217,9 @@ echo "== verify built image types and package contents"
 llvm-readelf -h "$PRX_BUILD/app.shared.elf" | grep -F 'Type:                              DYN'
 llvm-readelf -h "$BUILD/stub.elf" | grep -F 'Type:                              DYN'
 test -s "$OUT/pkg-stage/sce_module/relocated_wine_app.prx"
+for preset in "$ROOT"/src/profiles/input/*.input; do
+  cmp -s "$preset" "$OUT/pkg-stage/input/${preset##*/}" || { echo "package is missing preset ${preset##*/}" >&2; exit 1; }
+done
 cmp -s "$PRX_BUILD/relocated_wine_app.prx" "$OUT/pkg-stage/sce_module/relocated_wine_app.prx" || {
   echo "package staged a stale relocated_wine_app.prx" >&2; exit 1;
 }
