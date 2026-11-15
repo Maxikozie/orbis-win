@@ -109,48 +109,34 @@ jobs:
             DEV_CONNECT_TIMEOUT_MS=500 DEV_SEND_TIMEOUT_MS=200 DEV_TAG=orbis-win-ci \
             > build/devconf/dev.conf
 
-      # ABI-v4, built the way GLDS10043 01.06 was validated on hardware
-      # (2026-11-05). build-abi4-package.sh fails the job if any parity gate
-      # (relocation stub, Vulkan surface, display, PS4 RADV, PRX exports,
-      # kernelbase diagnostics, signal-mask values) or pkg_validate fails.
-      # Do not set PW_SHARED_LIBC here: the validated stub and app link libc
-      # statically. See docs/UPSTREAM-SYNC-PLAYBOOK.md.
-      - name: Build and gate the ABI-v4 relocatable package
+      # Keep the published v0.0.6 package as the byte-for-byte runtime baseline
+      # and replace only the two MMDevAPI PE modules for this audio candidate.
+      - name: Repackage the tested runtime with patched MMDevAPI
         env:
           TITLE_ID: ${{ inputs.title_id || 'GLDS10043' }}
-          TITLE: ${{ inputs.title || 'Orbis Wine ABI-v4' }}
-          PW_SPLIT_RUNTIME: "0"
-          PW_MODULE_STUBS_DIR: ${{ github.workspace }}/build/openorbis-module-stubs
+          TITLE: ${{ inputs.title || 'Orbis-Win v0.0.7 candidate' }}
+          PKG_VERSION: ${{ env.PKG_VERSION }}
           PS4_PKGTOOL_OPENSSL_LIB: /orbis-cache/deps/openssl11/lib
-          PS4_MMDEVAPI32_DLL: ${{ github.workspace }}/src/runtime-pe/mmdevapi-490f6d5/mmdevapi-i386.dll
-          PS4_MMDEVAPI64_DLL: ${{ github.workspace }}/src/runtime-pe/mmdevapi-490f6d5/mmdevapi-x86_64.dll
           OUT: ${{ runner.temp }}/orbis-win-abi4
         run: |
           set -euo pipefail
-          scripts/sync-toolchain.sh
-          scripts/build-openorbis-module-stubs.sh
-          scripts/ci/build-abi4-package.sh
+          scripts/ci/build-mmdevapi-candidate.sh
 
       - name: Collect package, gate reports and provenance
         env:
-          PW_MODULE_STUBS_DIR: ${{ github.workspace }}/build/openorbis-module-stubs
           OUT: ${{ runner.temp }}/orbis-win-abi4
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/orbis-win-artifacts"
-          app_pkg=$(find "$OUT/app" -maxdepth 1 -type f -name '*.pkg' -print -quit)
+          app_pkg=$(find "$OUT/package" -maxdepth 1 -type f -name '*.pkg' -print -quit)
           test -s "$app_pkg"
-          cp "$app_pkg" "$OUT/parity.txt" "$OUT/pkg_validate.txt" "$RUNNER_TEMP/orbis-win-artifacts/"
+          cp "$app_pkg" "$OUT/parity.txt" "$OUT/pkg_validate.txt" "$OUT/BUILD-MANIFEST.txt" \
+            "$RUNNER_TEMP/orbis-win-artifacts/"
           {
-            cat "$OUT/BUILD-MANIFEST.txt"
             echo "root_ref=${GITHUB_REF}"
             echo "run_id=${GITHUB_RUN_ID}"
-            echo "module_stub_source=OpenOrbis-PS4-Toolchain@0a1aaf9dd4a92695538bdeb09fb056d06dd11725 (GPL-3.0)"
-            echo "libc_stub_sha256=$(sha256sum "$PW_MODULE_STUBS_DIR/libc.prx" | cut -d' ' -f1)"
-            echo "fios2_stub_sha256=$(sha256sum "$PW_MODULE_STUBS_DIR/libSceFios2.prx" | cut -d' ' -f1)"
-            echo "mesa_dirty_diff_sha256=$(git -C mesa-build/mesa-ps4 diff --binary | sha256sum | cut -d' ' -f1)"
-            echo "cache_manifest:"; sed 's/^/  /' /orbis-cache/deps/manifest.txt
-          } > "$RUNNER_TEMP/orbis-win-artifacts/BUILD-MANIFEST.txt"
+            echo "workflow_run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } >> "$RUNNER_TEMP/orbis-win-artifacts/BUILD-MANIFEST.txt"
           cat "$RUNNER_TEMP/orbis-win-artifacts/BUILD-MANIFEST.txt"
 
       - uses: actions/upload-artifact@v4
