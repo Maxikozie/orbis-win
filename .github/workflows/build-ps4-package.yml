@@ -17,7 +17,12 @@ on:
         required: true
   push:
     tags:
-      - "v*"
+      # Package-version tags have two numeric components (v1.08). The
+      # source-release tag v0.0.7 must not launch a package build as 00.07.
+      - "v[0-9].[0-9]"
+      - "v[0-9].[0-9][0-9]"
+      - "v[0-9][0-9].[0-9]"
+      - "v[0-9][0-9].[0-9][0-9]"
 
 permissions:
   contents: read
