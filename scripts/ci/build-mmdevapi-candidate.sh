@@ -11,6 +11,7 @@ TITLE=${TITLE:-Orbis-Win v0.0.7 candidate}
 PKG_VERSION=${PKG_VERSION:-02.16}
 PKGTOOL=$ROOT/sdk/orbis-sdk-v1/sdk/bin/linux/PkgTool.Core
 BASE_URL=https://github.com/plastikman/orbis-win/releases/download/v0.0.6/IV0000-GLDS10043_00-GLDS100430000000.pkg
+BASE_MANIFEST_URL=https://github.com/plastikman/orbis-win/releases/download/v0.0.6/BUILD-MANIFEST.txt
 BASE_SHA256=2a3507e34e945ebd0c57d4454118da8fbe70a8bfa9aaf6d38390101b28d6fd5b
 MMDEVAPI32=$ROOT/src/runtime-pe/mmdevapi-490f6d5/mmdevapi-i386.dll
 MMDEVAPI64=$ROOT/src/runtime-pe/mmdevapi-490f6d5/mmdevapi-x86_64.dll
@@ -28,10 +29,14 @@ MMDEVAPI64=$ROOT/src/runtime-pe/mmdevapi-490f6d5/mmdevapi-x86_64.dll
 
 mkdir -p "$OUT"
 BASE_PKG=$OUT/v0.0.6.pkg
+BASE_MANIFEST=$OUT/v0.0.6-BUILD-MANIFEST.txt
 curl -fL --retry 3 "$BASE_URL" -o "$BASE_PKG"
 [[ $(sha256sum "$BASE_PKG" | cut -d' ' -f1) == "$BASE_SHA256" ]] || {
   echo "downloaded v0.0.6 package hash does not match the released baseline" >&2; exit 1;
 }
+curl -fL --retry 3 "$BASE_MANIFEST_URL" -o "$BASE_MANIFEST"
+BASE_RUNTIME_MARKER=$(sed -n 's/^runtime_build_marker=//p' "$BASE_MANIFEST" | head -1)
+[[ -n $BASE_RUNTIME_MARKER ]] || { echo "v0.0.6 manifest lacks a runtime marker" >&2; exit 1; }
 
 export LD_LIBRARY_PATH="$OPENSSL_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
@@ -67,7 +72,7 @@ fi
   echo "console_version=$PKG_VERSION"
   echo "package=$(basename "$PKG")"
   echo "package_sha256=$(sha256sum "$PKG" | cut -d' ' -f1)"
-  echo "runtime_build_marker=$(strings "$STAGE/sce_module/relocated_wine_app.prx" | sed -n 's/^PW_WINE64 build_marker=//p' | head -1)"
+  echo "runtime_build_marker=$BASE_RUNTIME_MARKER"
   echo "mmdevapi32_sha256=$(sha256sum "$MMDEVAPI32" | cut -d' ' -f1)"
   echo "mmdevapi64_sha256=$(sha256sum "$MMDEVAPI64" | cut -d' ' -f1)"
   echo "wine_patch=src/wine-patches-ps4/1036-mmdevapi-keep-persisted-audio-names.patch"
