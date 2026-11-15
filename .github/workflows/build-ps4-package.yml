@@ -122,6 +122,8 @@ jobs:
           PW_SPLIT_RUNTIME: "0"
           PW_MODULE_STUBS_DIR: ${{ github.workspace }}/build/openorbis-module-stubs
           PS4_PKGTOOL_OPENSSL_LIB: /orbis-cache/deps/openssl11/lib
+          PS4_MMDEVAPI32_DLL: ${{ github.workspace }}/src/runtime-pe/mmdevapi-490f6d5/mmdevapi-i386.dll
+          PS4_MMDEVAPI64_DLL: ${{ github.workspace }}/src/runtime-pe/mmdevapi-490f6d5/mmdevapi-x86_64.dll
           OUT: ${{ runner.temp }}/orbis-win-abi4
         run: |
           set -euo pipefail

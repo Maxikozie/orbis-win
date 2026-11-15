@@ -58,6 +58,8 @@ if (( PKG && !LOW_BASE && !RELOC_STAGE )); then
     PS4_KERNELBASE32_DLL="${PS4_KERNELBASE32_DLL:-}" \
     PS4_IPHLPAPI32_DLL="${PS4_IPHLPAPI32_DLL:-}" \
     PS4_NTDLL32_DLL="${PS4_NTDLL32_DLL:-}" \
+    PS4_MMDEVAPI32_DLL="${PS4_MMDEVAPI32_DLL:-}" \
+    PS4_MMDEVAPI64_DLL="${PS4_MMDEVAPI64_DLL:-}" \
     "$ROOT/scripts/build-relocatable-wine-ps4.sh" "${args[@]}"
 fi
 
@@ -287,6 +289,16 @@ if (( PKG )); then
     echo "   X PS4_IPHLPAPI32_DLL does not exist: $PS4_IPHLPAPI32_DLL" >&2
     exit 1
   fi
+  PS4_MMDEVAPI32_DLL="${PS4_MMDEVAPI32_DLL:-}"
+  if [[ -n "$PS4_MMDEVAPI32_DLL" && ! -f "$PS4_MMDEVAPI32_DLL" ]]; then
+    echo "   X PS4_MMDEVAPI32_DLL does not exist: $PS4_MMDEVAPI32_DLL" >&2
+    exit 1
+  fi
+  PS4_MMDEVAPI64_DLL="${PS4_MMDEVAPI64_DLL:-}"
+  if [[ -n "$PS4_MMDEVAPI64_DLL" && ! -f "$PS4_MMDEVAPI64_DLL" ]]; then
+    echo "   X PS4_MMDEVAPI64_DLL does not exist: $PS4_MMDEVAPI64_DLL" >&2
+    exit 1
+  fi
   # Native WoW64 PE and Unix companion ABIs must match. Keep ABI v3 as the
   # existing default; an explicit ABI v4 comparison may select the synced
   # companion built from the same source tree as its PS4 PRX.
@@ -364,6 +376,14 @@ if (( PKG )); then
       if [[ -n "$PS4_IPHLPAPI32_DLL" && $arch == i386-windows && ${f##*/} == iphlpapi.dll ]]; then
         f=$PS4_IPHLPAPI32_DLL
         dest_basename=iphlpapi.dll
+      fi
+      if [[ -n "$PS4_MMDEVAPI32_DLL" && $arch == i386-windows && ${f##*/} == mmdevapi.dll ]]; then
+        f=$PS4_MMDEVAPI32_DLL
+        dest_basename=mmdevapi.dll
+      fi
+      if [[ -n "$PS4_MMDEVAPI64_DLL" && $arch == x86_64-windows && ${f##*/} == mmdevapi.dll ]]; then
+        f=$PS4_MMDEVAPI64_DLL
+        dest_basename=mmdevapi.dll
       fi
       if [[ $arch == x86_64-windows && ${f##*/} == wow64native.dll ]]; then
         # Package only the explicitly selected ABI-matched PS4 override below.

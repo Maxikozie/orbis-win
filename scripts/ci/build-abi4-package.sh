@@ -39,6 +39,22 @@ SDKBIN=$ROOT/sdk/orbis-sdk-v1/sdk/bin/linux
 WOW64NATIVE_DLL=$ABI4/native/x86_64-windows/wow64native.dll
 WOW64NATIVE_ABI4_SHA256=e531a51bb19ae4f92e65556f0f6d4f89e930b9c7490d8a02988feb1d5ee9c044
 WOW64NATIVE_ABI4_PRX_SHA256=20eee436ae5856f06d39b9f9fa57720806612f15e1ebea4ab15b4638da5b729d
+MMDEVAPI32_DLL=${PS4_MMDEVAPI32_DLL:-}
+MMDEVAPI64_DLL=${PS4_MMDEVAPI64_DLL:-}
+MMDEVAPI32_SHA256=ba4fa55c0b70c803492368b63cd4248c329d4ca1789701e5c00e4fad0f86c88d
+MMDEVAPI64_SHA256=765bda2ffbe01dc191b72aac3a8b61137ef6a6d7018df84e6d296d1aa5709b80
+if [[ -n $MMDEVAPI32_DLL && ! -f $MMDEVAPI32_DLL ]]; then
+  echo "missing PS4 MMDevAPI 32-bit override: $MMDEVAPI32_DLL" >&2; exit 1
+fi
+if [[ -n $MMDEVAPI64_DLL && ! -f $MMDEVAPI64_DLL ]]; then
+  echo "missing PS4 MMDevAPI 64-bit override: $MMDEVAPI64_DLL" >&2; exit 1
+fi
+if [[ -n $MMDEVAPI32_DLL && $(sha256sum "$MMDEVAPI32_DLL" | cut -d' ' -f1) != "$MMDEVAPI32_SHA256" ]]; then
+  echo "PS4 MMDevAPI 32-bit override hash does not match the reviewed payload" >&2; exit 1
+fi
+if [[ -n $MMDEVAPI64_DLL && $(sha256sum "$MMDEVAPI64_DLL" | cut -d' ' -f1) != "$MMDEVAPI64_SHA256" ]]; then
+  echo "PS4 MMDevAPI 64-bit override hash does not match the reviewed payload" >&2; exit 1
+fi
 
 # mesa-zink/ holds the artifacts of prospero-win tools/build_mesa_zink.sh (pinned
 # Mesa + llvm-mingw): the WGL/Zink OpenGL provider for graphics = opengl games.
@@ -76,6 +92,7 @@ env -u PW_SHARED_LIBC \
   WOW64NATIVE_ABI4_SHA256=$WOW64NATIVE_ABI4_SHA256 \
   WOW64NATIVE_ABI4_PRX_SHA256=$WOW64NATIVE_ABI4_PRX_SHA256 \
   PS4_KERNELBASE32_DLL="$OUT/pe/kernelbase.dll" \
+  PS4_MMDEVAPI32_DLL="$MMDEVAPI32_DLL" PS4_MMDEVAPI64_DLL="$MMDEVAPI64_DLL" \
   PW_MESA_ZINK_DIR="$ABI4/mesa-zink" \
   PKG_OUT="$OUT/app" PKG_BASE_OUT="$OUT/base" \
   PW_BUILD_ROOT="$OUT/build" PW_APP_OBJ="$OUT/app-obj" \
@@ -83,6 +100,15 @@ env -u PW_SHARED_LIBC \
 STAGE=$OUT/app/pkg-stage
 PKG=$(find "$OUT/app" -maxdepth 1 -type f -name '*.pkg' -print -quit)
 rm -rf "$OUT/base"     # intermediate non-relocatable package; never install it
+for pair in \
+  "$MMDEVAPI32_DLL:$STAGE/win/wine/lib/wine/i386-windows/mmdevapi.dll" \
+  "$MMDEVAPI64_DLL:$STAGE/win/wine/lib/wine/x86_64-windows/mmdevapi.dll"; do
+  source=${pair%%:*}; target=${pair#*:}
+  [[ -z $source ]] && continue
+  [[ -f $target ]] && cmp -s "$source" "$target" || {
+    echo "staged MMDevAPI override does not match: $target" >&2; exit 1;
+  }
+done
 
 log "parity gates against the known-good baseline"
 python3 -I "$ROOT/scripts/check-ps4-package-parity.py" "$BASELINE" "$STAGE" \
@@ -104,6 +130,8 @@ log "provenance"
   echo "root_commit=$(git -C "$ROOT" rev-parse HEAD)"
   echo "prospero_win_abi4_commit=$(git -C "$PW" rev-parse HEAD)"
   echo "prospero_win_abi4_diff_sha256=$(git -C "$PW" diff --binary | sha256sum | cut -d' ' -f1)"
+  [[ -z $MMDEVAPI32_DLL ]] || echo "mmdevapi32_sha256=$(sha256sum "$MMDEVAPI32_DLL" | cut -d' ' -f1)"
+  [[ -z $MMDEVAPI64_DLL ]] || echo "mmdevapi64_sha256=$(sha256sum "$MMDEVAPI64_DLL" | cut -d' ' -f1)"
   echo "mesa_commit=$(git -C "$ROOT/mesa-build/mesa-ps4" rev-parse HEAD)"
   # No dev.conf, no app log (see build-app-ps4.sh). Record which way it went.
   if [[ -f $STAGE/dev.conf ]]; then
