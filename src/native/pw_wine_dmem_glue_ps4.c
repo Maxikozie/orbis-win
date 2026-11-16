@@ -2178,9 +2178,27 @@ void __wine_ps5_dmem_region(void *base, size_t size)
                 if (!pthread_attr_init(&attr)) {
                     (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
                     beating = !pthread_create(&beat, &attr, exec_heartbeat, NULL);
-                    /* Sampling sends asynchronous signals to guest threads. */
+                    /* Sampling sends asynchronous signals to guest threads.
+                     *
+                     * ⚠ Matched on the first character, not strcmp(…, "1"). On 2026-11-13
+                     * the LAST [debug] env entry reached the guest with a trailing junk
+                     * character: DXVK logged
+                     *   Found config env: dxvk.enableGraphicsPipelineLibrary=Falsel
+                     * so DXVK could not parse the boolean, fell back to the default, and
+                     * the workaround silently did nothing. An exact compare here would
+                     * fail the same way on "1l" and the sampler would never arm, which
+                     * looks identical to the console not delivering the signal. The raw
+                     * bytes are logged so the corruption is measurable rather than
+                     * inferred -- it is still a bug, it is just no longer in the way. */
                     const char *sample = getenv("PW_PS4_GUEST_SAMPLER");
-                    if (beating && sample && !strcmp(sample, "1"))
+                    if (beating && sample) {
+                        char raw[96];
+                        snprintf(raw, sizeof(raw),
+                                 "wine-ps4: guest-sampler env=\"%.48s\" len=%u\n",
+                                 sample, (unsigned)strlen(sample));
+                        sceKernelDebugOutText(0, raw);
+                    }
+                    if (beating && sample && sample[0] == '1')
                         (void)guest_sampler_start();
                     pthread_attr_destroy(&attr);
                 }
