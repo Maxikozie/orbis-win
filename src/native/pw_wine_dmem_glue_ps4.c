@@ -1982,6 +1982,42 @@ static void watch_oblivion_rx_pages(unsigned int sample)
 static volatile unsigned int guest_samples;
 static volatile unsigned int guest_sample_logged;
 
+/* Which addresses on the stack are worth printing. The original window took only the PRX
+ * text range, which is right for a 32-bit title whose callers are all in this port -- but
+ * Hollow Knight wedges with its last traced calls inside DXVK, and every guest PE (the exe
+ * at 0x140000000, Wine's builtins and DXVK up at 0x6ffff.......) was filtered out, so the
+ * one caller that would name the wedge could never appear. Take the guest ranges too. */
+static int guest_code_pointer(uint64_t w)
+{
+    return (w >= 0x800000000ull   && w < 0x900000000ull)      /* this port's PRX text */
+        || (w >= 0x140000000ull   && w < 0x200000000ull)      /* the guest executable */
+        || (w >= 0x6ffff0000000ull && w < 0x700000000000ull); /* Wine builtins, DXVK */
+}
+
+/* Stacks for the first samples OF EACH THREAD, not the first samples overall. SIGALRM from
+ * ITIMER_REAL is process-directed, so the kernel picks whichever thread answers: the global
+ * first three can all be idle workers, and the wedged thread -- the only one worth a stack --
+ * would never print one. Bounded: 16 threads, 2 stacks each. */
+static int guest_stack_want(unsigned long tid)
+{
+    static volatile unsigned long seen_tid[16];
+    static volatile unsigned int  seen_hits[16];
+    unsigned int i;
+
+    for (i = 0; i < 16; i++)
+        if (__atomic_load_n(&seen_tid[i], __ATOMIC_ACQUIRE) == tid)
+            return __atomic_add_fetch(&seen_hits[i], 1, __ATOMIC_ACQ_REL) <= 2;
+    for (i = 0; i < 16; i++) {
+        unsigned long expected = 0;
+        if (__atomic_compare_exchange_n(&seen_tid[i], &expected, tid, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&seen_hits[i], 1, __ATOMIC_ACQ_REL);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void guest_sample_handler(int sig, siginfo_t *info, void *uc)
 {
     const struct pw_fbsd_mcontext *mc;
@@ -2013,15 +2049,14 @@ static void guest_sample_handler(int sig, siginfo_t *info, void *uc)
      * can symbolize. Walk a bounded window of the stack and print the words -- one caller is
      * enough to say WHICH wait the thread is parked in. Only for the first few samples: a wedged
      * thread repeats the same stack forever and flooding klog buys nothing. */
-    if (n <= 3) {
+    if (guest_stack_want(glue_tid())) {
         const uint64_t *sp = (const uint64_t *)(uintptr_t)mc->mc_rsp;
         char words[200];
         int used = 0, i;
 
-        for (i = 0; i < 12 && used < (int)sizeof(words) - 24; i++) {
-            /* Only plausible code pointers: the PRX text range starts at 0x800000000 here. */
+        for (i = 0; i < 32 && used < (int)sizeof(words) - 24; i++) {
             uint64_t w = sp[i];
-            if (w < 0x800000000ull || w > 0x900000000ull) continue;
+            if (!guest_code_pointer(w)) continue;
             used += snprintf(words + used, sizeof(words) - used, " %llx", (unsigned long long)w);
         }
         snprintf(line, sizeof(line), "wine-ps4: guest-stack %u tid=%lu callers:%s\n",
