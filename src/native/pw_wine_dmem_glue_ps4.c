@@ -2011,7 +2011,7 @@ static int guest_stack_want(unsigned long tid)
         unsigned long expected = 0;
         if (__atomic_compare_exchange_n(&seen_tid[i], &expected, tid, 0,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            __atomic_store_n(&seen_hits[i], 1, __ATOMIC_ACQ_REL);
+            __atomic_store_n(&seen_hits[i], 1, __ATOMIC_RELEASE);
             return 1;
         }
     }
