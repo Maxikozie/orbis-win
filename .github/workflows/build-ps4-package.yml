@@ -176,7 +176,7 @@ jobs:
         if: ${{ inputs.build_mode == 'audio-candidate' }}
         env:
           TITLE_ID: ${{ inputs.title_id || 'GLDS10043' }}
-          TITLE: ${{ inputs.title || 'Orbis-Win v0.0.7 candidate' }}
+          TITLE: ${{ inputs.title || 'Orbis-Win v0.0.7' }}
           PKG_VERSION: ${{ inputs.version }}
           PS4_PKGTOOL_OPENSSL_LIB: /orbis-cache/deps/openssl11/lib
           OUT: ${{ runner.temp }}/orbis-win-abi4

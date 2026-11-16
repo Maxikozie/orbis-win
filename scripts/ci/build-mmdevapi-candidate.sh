@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 OUT=${OUT:?set OUT to a scratch output directory}
 OPENSSL_LIB=${PS4_PKGTOOL_OPENSSL_LIB:-/orbis-cache/deps/openssl11/lib}
 TITLE_ID=${TITLE_ID:-GLDS10043}
-TITLE=${TITLE:-Orbis-Win v0.0.7 candidate}
+TITLE=${TITLE:-Orbis-Win v0.0.7}
 PKG_VERSION=${PKG_VERSION:-02.16}
 PKGTOOL=$ROOT/sdk/orbis-sdk-v1/sdk/bin/linux/PkgTool.Core
 BASE_URL=https://github.com/plastikman/orbis-win/releases/download/v0.0.6/IV0000-GLDS10043_00-GLDS100430000000.pkg
@@ -53,6 +53,7 @@ BASE_STAGE=$(find "$EXTRACT" -type f -name eboot.bin -print -quit | xargs -r dir
 python3 "$ROOT/scripts/repackage-orbis-ab.py" \
   --base-stage "$BASE_STAGE" --out-dir "$OUT/package" \
   --title-id "$TITLE_ID" --title "$TITLE" --version "$PKG_VERSION" \
+  --icon "$ROOT/assets/icon0.png" \
   --replace "win/wine/lib/wine/i386-windows/mmdevapi.dll=$MMDEVAPI32" \
   --replace "win/wine/lib/wine/x86_64-windows/mmdevapi.dll=$MMDEVAPI64"
 STAGE=$OUT/package/pkg-stage
@@ -73,6 +74,8 @@ fi
   echo "package=$(basename "$PKG")"
   echo "package_sha256=$(sha256sum "$PKG" | cut -d' ' -f1)"
   echo "runtime_build_marker=$BASE_RUNTIME_MARKER"
+  echo "runtime_source_commit=$(sed -n 's/^runtime_source_commit=//p' "$BASE_MANIFEST" | head -1)"
+  echo "icon_sha256=$(sha256sum "$ROOT/assets/icon0.png" | cut -d' ' -f1)"
   echo "mmdevapi32_sha256=$(sha256sum "$MMDEVAPI32" | cut -d' ' -f1)"
   echo "mmdevapi64_sha256=$(sha256sum "$MMDEVAPI64" | cut -d' ' -f1)"
   echo "wine_patch=src/wine-patches-ps4/1036-mmdevapi-keep-persisted-audio-names.patch"
