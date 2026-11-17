@@ -70,7 +70,12 @@ HOST_WINE=${PW_HOST_WINE:-$PW/.deps/wine-host}
 export PW_HOST_WINE=$HOST_WINE
 for p in "$HOST_WINE/build" "$HOST_WINE/install/usr/lib/wine" \
          "$PW/.deps/wine-ps5/build" "$WOW64NATIVE_DLL" "$BASELINE/eboot.bin" \
-         "$MESA_ZINK/i386-windows/opengl32.dll" "$MESA_ZINK/x86_64-windows/opengl32.dll"; do
+         "$MESA_ZINK/i386-windows/opengl32.dll" "$MESA_ZINK/x86_64-windows/opengl32.dll" \
+         "$PW/.deps/wine-runtime/nls/locale.nls" "$PW/.deps/wine-runtime/nls/l_intl.nls" \
+         "$HOST_WINE/install/usr/lib/wine/x86_64-windows/wowprospero.dll"; do
+  # wine-runtime/nls: prospero-win tools/build_wine_runtime.sh. wowprospero.dll:
+  # tools/build_wowprospero.sh, stripped into the host install. build-app-ps4.sh
+  # stages both and refuses the package without them, after every PRX is linked.
   [[ -e $p ]] || { echo "missing ABI-v4 build input: $p" >&2; exit 1; }
 done
 mkdir -p "$OUT"
