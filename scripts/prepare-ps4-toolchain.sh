@@ -45,7 +45,24 @@ llvm-ar rcs "$OUT/libps4stubs.a" "$OBJ/stubs.o" "$OBJ/pw_wine_dmem_glue_ps4.o"
 # Wine uses 16-bit WCHAR on this target. The paired bundle's compatibility
 # archive contains the SDK-compatible routines; preserve that exact archive.
 cp "$BUNDLE/orbis-compat/build/liborbis-compat.a" "$OUT/liborbis-compat-16bit-wchar.a"
+# ⚠ The section must be writable. The bundle's orbis-compat CRT (MIT, since
+# orbis-compat 7bed896) declares the parameter block const, so its section is
+# flagged A only. With src/freebsd-compat/prx_module_param.ld (ALIGN(0x4000),
+# INSERT BEFORE .data) lld then gives it a read-only page of its own between
+# RELRO and .data, create-fself starts the RW segment at it, and prx-ps4.sh's
+# bss-pad check finds no oelf segment for the ELF's last RW one: "ntdll: end of
+# .bss still unmapped after the .bss pad" (measured 2026-11-17). OpenOrbis's
+# sdk/lib/crtlib.o has the same 0x18 bytes flagged WA, and so does every PRX of
+# release v0.0.7 (the parameter block opens the RW segment). Keep the paired
+# bundle's bytes and give them OpenOrbis's flags.
 llvm-objcopy --only-section=.data.sce_module_param \
+  --set-section-flags .data.sce_module_param=alloc,load,contents,data \
   "$BUNDLE/orbis-compat/build/crt/crtlib.o" "$OUT/module_param.o"
 [[ -s "$OUT/module_param.o" ]] || { echo "failed to extract module parameter section" >&2; exit 1; }
+# Read the headers once and search the text: `llvm-readelf | grep -q` under
+# pipefail fails when grep exits on its first match while readelf is still writing.
+mp_sections=$(llvm-readelf -S "$OUT/module_param.o") || {
+  echo "llvm-readelf failed on $OUT/module_param.o" >&2; exit 1; }
+grep -Eq '\.data\.sce_module_param +PROGBITS +[0-9a-f]+ [0-9a-f]+ [0-9a-f]+ [0-9a-f]+ +WA ' <<<"$mp_sections" ||
+  { echo "module_param.o: .data.sce_module_param is not WA" >&2; exit 1; }
 echo "PS4 toolchain support ready: $OUT"
