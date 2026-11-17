@@ -312,3 +312,37 @@ megabytes of log, and it copied every submitted stream to keep one to dump.
 `ORBIS_DUMP_HUNG=1` turns it back on; the orbis-win shim sets that from
 `DEV_GPU_HANG_REPORT=1` in `/data/prospero-win/dev.conf`. Off, the first stall
 of a session still leaves one line in `radv.log`.
+
+0045 makes 0036's per-submit trace opt-in (2026-11-17). `radv_queue_submit`
+wrote "queue submit enter" and "queue submit return" to radv.log on every
+submit: two fprintf+fflush to /data per submit, about six submits a frame, 99%
+of radv.log's lines, and the "enter" write sits inside `vkQueueSubmit2`. In
+Psychonauts one of those fflushes took 102 ms while the game streamed from the
+same HDD, a visible hitch. They now go out only with `ORBIS_TRACE_SUBMIT=1` in
+`radv.env`. The default is off, and one line at queue init says which
+(`ORBIS_TRACE_SUBMIT=0 - per-submit trace off`). A failed submit still logs its
+"return" line. A Psychonauts run's radv.log fell from about 214,000 lines to
+3,400.
+
+0046 writes radv.log from a thread of its own (2026-11-17). Every Mesa log line
+was an fprintf+fflush to radv.log on the thread that logged it: with 0045 on,
+Psychonauts' only hitch in two minutes indoors was one 155 ms frame, 121 ms of
+it one radv.log line written inside `vkQueuePresentKHR`. `logger_file` in
+`src/util/log.c` now copies each formatted line into a 64 KiB ring, and one
+writer thread (64 KiB stack, `scePthreadCreate` with an explicit attr, so
+neither orbis-compat's 16 MiB floor nor the libvulkan wrap raises it) writes
+the ring to the same FILE, so the file's bytes are unchanged. ERROR lines are
+still written on the logging thread, after it drains the ring under the same
+I/O lock, so the order holds and an error is on disk before a crash. A full
+ring drops lines and says how many in one warning line. A write of 50 ms or
+more on the writer is reported (at most once a second); runs since logged
+145-213 ms writes there, none on the present path. A crash that logs no ERROR
+line first can lose up to 64 KiB of the newest INFO and WARN lines.
+`ORBIS_LOG_ASYNC=0` in `radv.env` turns it off; `ORBIS_LOG_ASYNC=N` (16..4096)
+sets the ring in KiB. The hung-submit report (`ORBIS_DUMP_HUNG`, 0044) turns
+it off for the whole run, since its dumps are megabytes of INFO lines written
+just before the process dies.
+The first swapchain logs `wsi/orbis: async log on (ring 64 KiB)`, and swapchain
+teardown and `atexit` wait up to 250/500 ms for the ring to empty.
+`mesa_log_get_file()` users (shader dumps under debug options) still write the
+FILE directly. The host build of the orbis arm uses `pthread_create`.
