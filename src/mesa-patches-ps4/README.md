@@ -312,3 +312,40 @@ megabytes of log, and it copied every submitted stream to keep one to dump.
 `ORBIS_DUMP_HUNG=1` turns it back on; the orbis-win shim sets that from
 `DEV_GPU_HANG_REPORT=1` in `/data/prospero-win/dev.conf`. Off, the first stall
 of a session still leaves one line in `radv.log`.
+
+0045 lets the display keep a 30 fps cadence (2026-11-17). With a 30 fps cap
+(`d3d9.maxFrameRate = 30` or `d3d9.presentInterval = 2`) Psychonauts showed
+90-92% of new frames two refreshes apart on HDMI and the rest in 3-then-1
+pairs. DXVK has no swap interval on Vulkan: it presents FIFO at sync interval 1
+and paces with a CPU timer at 30.000 Hz, while the output runs at 59.94 Hz.
+Each present was a VSYNC flip at the 60 Hz flip rate, shown at the first vblank
+after its submit, and the submit drifts across the vblank window with the timer
+and the frame's CPU time. `ORBIS_WSI_FLIP_RATE=30` (or 20) in `radv.env` sets
+video-out's flip rate for the swapchain's scan-out and allows one queued flip,
+so the display holds each frame for two refreshes and back-pressures the game.
+Unset, nothing changes; the title's own frames stay at 60 Hz.
+`ORBIS_WSI_FLIP_STATS=N` (1 = every 600 flips) logs the display's own cadence
+to `radv.log`: the intervals between shown flips in refreshes, the median raw
+interval, and how far past the last vblank each flip was submitted. With
+`ORBIS_WSI_FLIP_RATE=30` and `d3d9.maxFrameRate = 0` the same scenes showed
+99.7-99.9% at two refreshes and no 1-refresh frame.
+
+0046 lets more than one flip wait on video-out at that rate (2026-11-17). With
+one queued flip the present blocks until the previous flip is on screen, so a
+game-thread stall longer than about one 30 Hz period showed as a repeated
+frame (one ~100 ms stall, one 3-refresh interval). `ORBIS_WSI_FLIP_QUEUE=N`
+(1..3) in `radv.env` lets up to N flips queue before the present blocks; a
+stall of up to about N periods is then absorbed, at N-1 periods (33 ms each)
+more input latency once the queue is full. Unset or 1 is 0045's behaviour bit
+for bit, and it does nothing at 60 Hz. On the copy path the scan-out buffers
+are then taken in turn rather than by swapchain index, moving on only after a
+flip was submitted, and the depth is capped at buffers-1; on the zero-copy path
+it is capped at images-1-R as at 60 Hz. On both, the surface's `minImageCount`
+becomes N + 3: at N = 3 DXVK makes 7 images instead of 5, which on the copy
+path is also 7 scan-out buffers of 8 MiB at 1080p. One line per swapchain names the
+depth used (`ORBIS_WSI_FLIP_QUEUE=N - up to N flips queued (swapchain images
+M)`), and the `ORBIS_WSI_FLIP_STATS` cadence line ends with the flips still
+queued at each submit (min, max, histogram) and the limit. With
+`ORBIS_WSI_FLIP_QUEUE=3`, two Psychonauts scenes showed 3595 of 3595 new frames
+two refreshes apart and no gap over 50 ms for two minutes each, on two
+launches; a 97 ms game-thread stall in that run stayed off the screen.
